@@ -1,0 +1,80 @@
+{
+  "script": "2_calibrate_logit_model_v1.5.py",
+  "csv": "data/datasets/options_chain_dataset.csv",
+  "out_dir": "data/models/v1_5_ticker_intercepts",
+  "target_col": "outcome_ST_gt_K",
+  "week_col": "week_friday",
+  "ticker_col": "ticker",
+  "weight_col": "sample_weight_final",
+  "features_requested": [
+    "x_logit_prn",
+    "T_days",
+    "abs_log_m",
+    "rv20"
+  ],
+  "features_used_final": [
+    "x_logit_prn",
+    "T_days",
+    "abs_log_m",
+    "rv20"
+  ],
+  "add_interactions": false,
+  "calibration": "platt",
+  "C_grid": [
+    0.001,
+    0.002,
+    0.005,
+    0.01,
+    0.02,
+    0.05,
+    0.1,
+    0.2,
+    0.5,
+    1.0,
+    2.0,
+    5.0,
+    10.0
+  ],
+  "best_C": 0.001,
+  "rolling": {
+    "test_weeks": 20,
+    "val_windows": 4,
+    "val_window_weeks": 10,
+    "n_windows_used": 4,
+    "avg_roll_logloss_model": 0.5334213928061081,
+    "avg_roll_logloss_baseline": 0.5274822751918892,
+    "avg_roll_delta": 0.005939117614218947
+  },
+  "splits": {
+    "n_weeks_total": 136,
+    "n_weeks_pretest": 116,
+    "n_weeks_test": 20,
+    "train_fit_weeks_range": [
+      "2023-06-09",
+      "2025-03-21"
+    ],
+    "calib_weeks_range": [
+      "2025-03-28",
+      "2025-09-12"
+    ],
+    "val_pool_weeks_range": [
+      "2024-11-29",
+      "2025-09-12"
+    ],
+    "test_weeks_range": [
+      "2025-09-19",
+      "2026-01-30"
+    ]
+  },
+  "fit_weights": {
+    "fit_weight_renorm": "mean1",
+    "train_decay_half_life_weeks": 52.0,
+    "trainfit_n": 23992,
+    "trainfit_sum_raw": 3.6628134014305482,
+    "trainfit_sum_fit": 23992.0,
+    "calib_n": 6968,
+    "calib_sum_raw": 0.9728240359120492
+  },
+  "random_state": 7,
+  "n_bins": 15
+}

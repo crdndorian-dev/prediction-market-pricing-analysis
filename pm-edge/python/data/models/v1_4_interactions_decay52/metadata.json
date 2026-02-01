@@ -1,0 +1,76 @@
+{
+  "csv": "/Users/dorianc./Desktop/pm-edge/python/data/datasets/options_chain_dataset.csv",
+  "target_col": "outcome_ST_gt_K",
+  "week_col": "week_friday",
+  "weight_col": "sample_weight_final",
+  "features_requested": [
+    "x_logit_prn",
+    "T_days",
+    "abs_log_m",
+    "rv20",
+    "x_prn_x_tdays",
+    "x_prn_x_rv20"
+  ],
+  "features_used": [
+    "x_logit_prn",
+    "T_days",
+    "abs_log_m",
+    "rv20",
+    "x_prn_x_tdays",
+    "x_prn_x_rv20"
+  ],
+  "dropped_all_missing_in_trainfit": [],
+  "add_interactions": true,
+  "train_decay_half_life_weeks": 52.0,
+  "C_grid": [
+    0.005,
+    0.01,
+    0.02,
+    0.05,
+    0.1,
+    0.2,
+    0.5,
+    1.0,
+    2.0,
+    5.0,
+    10.0,
+    20.0
+  ],
+  "best_C": 0.05,
+  "cv_logloss_trainfit": 0.5205452272001685,
+  "calibration": "none",
+  "fit_weight_renorm": "mean1",
+  "winner_by_val_logloss": "logit_base_C=0.05",
+  "split_info": {
+    "n_weeks_total": 136,
+    "n_weeks_train": 96,
+    "n_weeks_calib": 19,
+    "n_weeks_val": 20,
+    "n_weeks_test": 20,
+    "train_fit_weeks_range": [
+      "2023-06-09",
+      "2024-11-29"
+    ],
+    "calib_weeks_range": [
+      "2024-12-06",
+      "2025-04-11"
+    ],
+    "val_weeks_range": [
+      "2025-04-25",
+      "2025-09-12"
+    ],
+    "test_weeks_range": [
+      "2025-09-19",
+      "2026-01-30"
+    ]
+  },
+  "assumptions": [
+    "Target is close-based (default outcome_ST_gt_K).",
+    "Split is by expiry week (week_friday) to avoid leakage.",
+    "Preprocessing fit only on TRAIN_FIT.",
+    "Calibration fit only on CALIB slice.",
+    "FIT weights renormalized to mean=1 if enabled.",
+    "Recency decay (if enabled) applies only to TRAIN_FIT weights during CV+fit (not metrics).",
+    "Interactions (if enabled) are linear products to allow conditional pRN slope shifts."
+  ]
+}
