@@ -1,0 +1,127 @@
+.datasets-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.datasets-meta {
+  width: min(100%, 320px);
+}
+
+.datasets-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-6);
+}
+
+.run-feedback {
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--accent-active);
+  background: var(--surface-wash);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.run-feedback-header {
+  font-weight: 600;
+  color: var(--ink-900);
+  margin-bottom: 0.4rem;
+}
+
+.run-feedback-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--ink-700);
+}
+
+.run-feedback-note {
+  margin: 0.7rem 0 0;
+  font-size: var(--text-sm);
+  color: var(--ink-500);
+}
+
+.run-progress-panel {
+  border-radius: var(--radius-2xl);
+  border: 1px solid var(--outline);
+  background: var(--surface-panel);
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  box-shadow: var(--shadow-soft);
+  width: 100%;
+  max-width: 400px;
+  margin: 0 auto;
+}
+
+.run-progress-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.run-progress-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--ink-700);
+}
+
+.run-progress-empty {
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--outline);
+  background: var(--surface-wash);
+  font-size: var(--text-sm);
+  color: var(--ink-500);
+}
+
+.run-progress-empty p {
+  margin: 0;
+}
+
+.run-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 4fr) 1fr;
+  gap: var(--space-5);
+  align-items: stretch;
+}
+
+.run-shell-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.run-shell-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  justify-content: center;
+  width: 100%;
+}
+
+.run-monitor-panel {
+  width: 100%;
+  max-width: 360px;
+  padding: var(--space-4);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--outline);
+  background: var(--surface-soft);
+  box-shadow: var(--shadow-soft);
+  margin: 0 auto;
+}
+
+@media (max-width: 900px) {
+  .datasets-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .run-shell {
+    grid-template-columns: 1fr;
+  }
+}

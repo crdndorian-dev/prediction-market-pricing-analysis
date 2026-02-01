@@ -209,6 +209,7 @@ This stage:
 - Aligns each snapshot with a specific strike and expiry
 - Computes relevant structural features
 - Extracts **risk-neutral probabilities (pRN)** using the option surface
+- Applies a **forward/Dividend adjustment** using a trailing, time-safe dividend proxy to compute forward price and moneyness
 - Produces a clean, point-in-time CSV dataset
 
 Key design principles:
@@ -217,6 +218,11 @@ Key design principles:
 - The dataset is suitable for strict out-of-sample validation
 
 This dataset serves as the **training universe** for probability calibration.
+
+Dividend forward adjustment details:
+- `dividend_yield` is computed from a trailing dividend sum (default 365-day lookback, time-safe)
+- Forward price uses \( F = S_0 \cdot e^{(r-q)T} \)
+- New output fields include `dividend_yield`, `forward_price`, `log_m_fwd`, and `abs_log_m_fwd`
 
 ---
 
@@ -306,6 +312,7 @@ It outputs probabilistic assessments only.
 ## Limitations & Assumptions
 
 - Risk-neutral probabilities are extracted assuming sufficient option liquidity
+- Dividend yield is a trailing, time-safe proxy (not a forecast of future dividends)
 - Calibration stability may degrade in regime shifts
 - Polymarket prices may be affected by microstructure noise and participation bias
 - No claim of persistent edge is made

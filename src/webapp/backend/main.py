@@ -1,8 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.calibrate_models import router as calibrate_models_router
 from app.api.dashboard import router as dashboard_router
+from app.api.datasets import router as datasets_router
 from app.api.health import router as health_router
+from app.api.polymarket_snapshots import router as polymarket_snapshots_router
 
 app = FastAPI(title="Polyedgetool Web App")
 app.add_middleware(
@@ -14,3 +17,6 @@ app.add_middleware(
 )
 app.include_router(health_router)
 app.include_router(dashboard_router)
+app.include_router(datasets_router)
+app.include_router(calibrate_models_router)
+app.include_router(polymarket_snapshots_router)

@@ -32,6 +32,9 @@ GAMMA_EVENT_BY_SLUG = "https://gamma-api.polymarket.com/events/slug/{}"
 CLOB_PRICES = "https://clob.polymarket.com/prices"  # POST [{"token_id": "...", "side": "BUY"}]
 
 SCRIPT_VER = "1.4.0"
+DEFAULT_OUT_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "data", "raw", "polymarket")
+)
 
 
 # -----------------------------
@@ -272,6 +275,16 @@ def append_df_to_csv(df: pd.DataFrame, path: str) -> None:
     ensure_dir(os.path.dirname(path))
     file_exists = os.path.exists(path) and os.path.getsize(path) > 0
     df.to_csv(path, mode="a", header=not file_exists, index=False)
+
+
+def unique_run_id(runs_dir: str) -> str:
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_path = os.path.join(runs_dir, run_id)
+    while os.path.exists(run_path):
+        time.sleep(1.0)
+        run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        run_path = os.path.join(runs_dir, run_id)
+    return run_id
 
 
 # -----------------------------
@@ -1042,23 +1055,13 @@ def merge_pm_rn(pm: pd.DataFrame, rn: pd.DataFrame) -> pd.DataFrame:
     return merged
 
 
-def add_edge_columns(df: pd.DataFrame) -> pd.DataFrame:
+def add_qrn_column(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    for c in ["pPM_buy","qPM_buy","pRN"]:
+    for c in ["pRN"]:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce")
-
-    out["pPM_exec"] = out["pPM_buy"]
-    out["qPM_exec"] = out["qPM_buy"]
     out["qRN"] = 1.0 - out["pRN"]
-
-    out["edgeYES_rn"] = out["pRN"] - out["pPM_exec"]
-    out["edgeNO_rn"] = (1.0 - out["pRN"]) - out["qPM_exec"]
-    out["delta_P_rn"] = out[["edgeYES_rn", "edgeNO_rn"]].max(axis=1, skipna=True)
-
-    for c in ["qRN","edgeYES_rn","edgeNO_rn","delta_P_rn"]:
-        out[c] = pd.to_numeric(out[c], errors="coerce").round(7)
-
+    out["qRN"] = pd.to_numeric(out["qRN"], errors="coerce").round(7)
     return out
 
 
@@ -1067,17 +1070,17 @@ def select_final_columns(df: pd.DataFrame) -> pd.DataFrame:
         "snapshot_time_utc",
         "week_monday","week_friday","week_sunday",
         "ticker","slug",
-        "event_endDate",
-        "event_id","market_id","condition_id",
-        "yes_token_id","no_token_id",
         "event_title","market_question",
+        "event_id","market_id","condition_id",
+        "event_endDate",
         "K","T_days",
         "pPM_buy","pPM_mid","yes_spread",
         "qPM_buy","qPM_mid","no_spread",
         "pm_ok","pm_reason",
-        "S","pRN","qRN","pRN_raw","rn_method","rn_quote_source","rn_monotone_adjusted",
+        "yes_token_id","no_token_id",
+        "S","pRN","qRN","pRN_raw",
+        "rn_method","rn_quote_source","rn_monotone_adjusted",
         "n_calls_used","calls_k_min","calls_k_max","deltaK",
-        "edgeYES_rn","edgeNO_rn","delta_P_rn",
     ]
     cols_present = [c for c in cols if c in df.columns]
     return df[cols_present].copy()
@@ -1088,19 +1091,19 @@ def select_final_columns(df: pd.DataFrame) -> pd.DataFrame:
 # -----------------------------
 
 def fname_pm_snapshot(day: str) -> str:
-    return f"01__pPM__snapshot__{day}__v{SCRIPT_VER}.csv"
+    return f"pPM-snapshot-{day}.csv"
 
 
 def fname_rn_snapshot(day: str, r: float) -> str:
-    return f"01__pRN__snapshot__{day}__v{SCRIPT_VER}.csv"
+    return f"pRN-snapshot-{day}.csv"
 
 
 def fname_dataset_snapshot(day: str, r: float) -> str:
-    return f"01__pPM_dataset__snapshot__{day}__v{SCRIPT_VER}.csv"
+    return f"pPM-dataset-snapshot-{day}.csv"
 
 
 def fname_dataset_history(r: float) -> str:
-    return f"01__pPM_dataset__history__rolling__v{SCRIPT_VER}.csv"
+    return "pPM-dataset-history-rolling.csv"
 
 
 # -----------------------------
@@ -1109,7 +1112,7 @@ def fname_dataset_history(r: float) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Weekly Polymarket snapshot + pRN (trimmed v1.4.0).")
-    parser.add_argument("--out-dir", type=str, default="./data")
+    parser.add_argument("--out-dir", type=str, default=DEFAULT_OUT_DIR)
     parser.add_argument("--tickers", type=str, default=None, help="Comma-separated tickers")
     parser.add_argument("--tickers-csv", type=str, default=None, help="CSV with a 'ticker' column")
     parser.add_argument("--slug-overrides", type=str, default=None, help="Optional .json/.csv mapping ticker->slug")
@@ -1125,11 +1128,18 @@ def main() -> None:
     )
 
     ensure_dir(args.out_dir)
-    ensure_dir(os.path.join(args.out_dir, "runs"))
-    ensure_dir(os.path.join(args.out_dir, "history"))
+    runs_dir = os.path.join(args.out_dir, "runs")
+    history_dir = os.path.join(args.out_dir, "history")
+    ensure_dir(runs_dir)
+    ensure_dir(history_dir)
 
     tz = ZoneInfo(cfg.tz_name)
     today_local = datetime.now(tz).date()
+    if today_local.weekday() >= 5:
+        raise RuntimeError(
+            f"Script must be run Monday-Friday in {cfg.tz_name}; "
+            f"today is {today_local.isoformat()} (weekday={today_local.weekday()})."
+        )
     week_monday, week_friday, week_sunday = trading_week_bounds(today_local)
 
     assert week_friday.weekday() == 4, f"week_friday must be Friday, got {week_friday} (weekday={week_friday.weekday()})"
@@ -1137,8 +1147,8 @@ def main() -> None:
     tickers = parse_tickers_arg(args.tickers_csv, args.tickers)
     slug_overrides = load_slug_overrides(args.slug_overrides)
 
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = os.path.join(args.out_dir, "runs", run_id)
+    run_id = unique_run_id(runs_dir)
+    run_dir = os.path.join(runs_dir, run_id)
     ensure_dir(run_dir)
 
     day_tag = today_local.isoformat()
@@ -1162,27 +1172,21 @@ def main() -> None:
     )
 
     pm_file = fname_pm_snapshot(day_tag)
-    pm_top = os.path.join(args.out_dir, pm_file)
     pm_run = os.path.join(run_dir, pm_file)
-    pm.to_csv(pm_top, index=False)
     pm.to_csv(pm_run, index=False)
-    print(f"[Write] {pm_top} (rows={len(pm)})")
     print(f"[Write] {pm_run} (rows={len(pm)})")
 
     # 2) pRN snapshot
     rn = compute_pRN_snapshot(pm, cfg)
 
     rn_file = fname_rn_snapshot(day_tag, cfg.risk_free_rate)
-    rn_top = os.path.join(args.out_dir, rn_file)
     rn_run = os.path.join(run_dir, rn_file)
-    rn.to_csv(rn_top, index=False)
     rn.to_csv(rn_run, index=False)
-    print(f"[Write] {rn_top} (rows={len(rn)})")
     print(f"[Write] {rn_run} (rows={len(rn)})")
 
     # 3) Merge + add simple RN edges
     merged = merge_pm_rn(pm, rn)
-    merged = add_edge_columns(merged)
+    merged = add_qrn_column(merged)
     final_df = select_final_columns(merged)
 
     sort_cols = [c for c in ["ticker", "event_endDate", "K"] if c in final_df.columns]
@@ -1190,15 +1194,12 @@ def main() -> None:
         final_df = final_df.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
 
     ds_file = fname_dataset_snapshot(day_tag, cfg.risk_free_rate)
-    ds_top = os.path.join(args.out_dir, ds_file)
     ds_run = os.path.join(run_dir, ds_file)
-    final_df.to_csv(ds_top, index=False)
     final_df.to_csv(ds_run, index=False)
-    print(f"[Write] {ds_top} (rows={len(final_df)})")
     print(f"[Write] {ds_run} (rows={len(final_df)})")
 
     # 4) Append rolling history (merged only)
-    hist_path = os.path.join(args.out_dir, "history", fname_dataset_history(cfg.risk_free_rate))
+    hist_path = os.path.join(history_dir, fname_dataset_history(cfg.risk_free_rate))
     hist = final_df.copy()
     hist["run_id"] = run_id
     hist["run_time_utc"] = datetime.now(timezone.utc).isoformat()

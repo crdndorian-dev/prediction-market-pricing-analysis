@@ -8,6 +8,11 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- #region agent log -->
+    <script>
+      (function(){var u='http://127.0.0.1:7243/ingest/fc71f522-f272-4d23-8f35-daabdd192e3f';fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'index.html',message:'HTML parsed, body has root',data:{hasRoot:!!document.getElementById('root')},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H1'})}).catch(function(){});})();
+    </script>
+    <!-- #endregion -->
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

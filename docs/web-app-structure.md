@@ -62,18 +62,62 @@ polyedgetool/
 - This keeps frontend data predictable and improves UX iteration.
 
 ### 4) **A frontend focused on iteration**
-- `pages/` reflects the main flows: *Dashboard*, *Pipeline Runner*, *Results*, *Datasets*.
+- `pages/` reflects the main flows: *Dashboard*, *Polymarket Snapshots*, *Datasets*, *Calibrate Models*.
 - `components/` keeps reusable UI building blocks.
+
+---
+
+## Page-by-page feature plan (pipeline-first UX)
+
+These pages should make the pipeline runnable end-to-end with minimal friction, clear status, and reproducible runs. Use progressive disclosure to keep defaults simple and advanced knobs tucked away.
+
+### 1) Dashboard
+Purpose: surface essential insights and link users into the right next action.
+- Snapshot of latest pipeline status (last run time, success/fail, duration).
+- Quick actions: "Fetch Polymarket Snapshot", "Build Dataset", "Calibrate Model".
+- Key metrics: counts of snapshots, datasets, calibrated models; most recent versions.
+- Alerts and warnings: missing inputs, stale data, failed jobs.
+- Recent activity log with links to the originating page/run.
+- Backlinks to the other three pages with short "what you can do here" captions.
+
+### 2) Polymarket Snapshots
+Purpose: fetch Polymarket data and run pHAT compute logic.
+- Data source controls: market selection, time window, pagination, rate limits.
+- Run controls: start, stop, retry, dry-run toggle.
+- pHAT parameters: smoothing, filters, calibration flags (collapsed by default).
+- Live run status with structured logs and error output.
+- Output preview: raw snapshot table + computed pHAT summary (small charts).
+- Persist run artifacts with run metadata (timestamp, params, git hash).
+- Export/download snapshot outputs (CSV/JSON) and link to dataset builder.
+
+### 3) Datasets
+Purpose: build and manage historic options datasets with customizable parameters.
+- Dataset builder form: date range, markets/strikes, resolution, filters.
+- Input selection: choose snapshot runs or raw sources.
+- Run controls with progress, logs, and resumable jobs.
+- Dataset registry: list with versioning, size, date range, and status.
+- Validation checks (missing intervals, outliers) with warnings.
+- One-click handoff to "Calibrate Models" with selected dataset.
+
+### 4) Calibrate Models
+Purpose: run calibration, store models, and access prior results.
+- Dataset picker with quick context (date range, size, last updated).
+- Calibration config: model family, priors, optimization settings.
+- Advanced settings (constraints, convergence criteria) collapsed by default.
+- Run controls and live logs; highlight convergence or failure reasons.
+- Model registry: list of calibrated models with metadata and metrics.
+- Model details page/section: parameter table, diagnostics, pRN vs pHAT plots.
+- Actions: compare models, export model artifacts, re-run with tweaks.
 
 ---
 
 ## Suggested UX flows (to document)
 
 Create in `docs/ui-ux/user-flows.md`:
-1. **Run a pipeline**
-2. **Compare pRN vs pHAT vs pPM**
-3. **Inspect a historical dataset**
-4. **Export or compare two runs**
+1. **Run a full pipeline (snapshot -> dataset -> calibration)**
+2. **Re-run only pHAT with different parameters**
+3. **Inspect and validate a historical dataset**
+4. **Compare two model calibrations**
 
 ---
 

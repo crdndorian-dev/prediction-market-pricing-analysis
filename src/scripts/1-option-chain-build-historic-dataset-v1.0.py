@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import bisect
+import hashlib
 import os
+import sys
 import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -78,6 +81,12 @@ class Config:
     # Split adjustment
     apply_split_adjustment: bool = True
     split_source: str = "yfinance"
+
+    # Dividends / forward
+    dividend_source: str = "yfinance"
+    dividend_lookback_days: int = 365
+    dividend_yield_default: float = 0.0
+    use_forward_moneyness: bool = True
 
     # Weighting controls
     add_group_weights: bool = True
@@ -428,6 +437,78 @@ def preload_stock_closes(
 
 
 # ----------------------------
+# Dividend preload (time-safe)
+# ----------------------------
+
+@dataclass
+class DividendHistory:
+    dates: List[date]
+    cumsum: np.ndarray
+    available: bool = True
+
+    def sum_in_range(self, start: date, end: date) -> float:
+        if not self.available or not self.dates:
+            return 0.0
+        l = bisect.bisect_left(self.dates, start)
+        r = bisect.bisect_right(self.dates, end)
+        if r <= l:
+            return 0.0
+        s = float(self.cumsum[r - 1])
+        if l > 0:
+            s -= float(self.cumsum[l - 1])
+        return s
+
+
+def _build_dividend_history_from_series(s: pd.Series) -> DividendHistory:
+    if s is None or len(s) == 0:
+        return DividendHistory(dates=[], cumsum=np.array([], dtype=float), available=True)
+    s = s.groupby(s.index.date).sum()
+    if s is None or len(s) == 0:
+        return DividendHistory(dates=[], cumsum=np.array([], dtype=float), available=True)
+    dates = sorted(list(s.index))
+    amounts = [float(s.loc[d]) for d in dates]
+    cumsum = np.cumsum(amounts, dtype=float)
+    return DividendHistory(dates=dates, cumsum=cumsum, available=True)
+
+
+def _yf_download_dividends(
+    tickers: List[str],
+    start0: date,
+    end0: date,
+    lookback_days: int,
+) -> Dict[str, DividendHistory]:
+    if yf is None:
+        raise RuntimeError("yfinance not installed. Install with: pip install yfinance")
+    out: Dict[str, DividendHistory] = {}
+    fetch_start = start0 - timedelta(days=int(lookback_days))
+    for t in tickers:
+        try:
+            tk = yf.Ticker(t)
+            s = tk.dividends
+            if s is None or len(s) == 0:
+                out[t] = DividendHistory(dates=[], cumsum=np.array([], dtype=float), available=True)
+                continue
+            s = s[(s.index.date >= fetch_start) & (s.index.date <= end0)]
+            out[t] = _build_dividend_history_from_series(s)
+        except Exception:
+            out[t] = DividendHistory(dates=[], cumsum=np.array([], dtype=float), available=False)
+    return out
+
+
+def preload_dividend_histories(
+    *,
+    tickers: List[str],
+    start: date,
+    end: date,
+    cfg: Config,
+) -> Dict[str, DividendHistory]:
+    if cfg.dividend_source != "yfinance":
+        return {t: DividendHistory(dates=[], cumsum=np.array([], dtype=float), available=False) for t in tickers}
+    print(f"[DIV] Preloading dividends via yfinance for {start}..{end} (lookback_days={cfg.dividend_lookback_days}) ...")
+    return _yf_download_dividends(tickers, start, end, cfg.dividend_lookback_days)
+
+
+# ----------------------------
 # Small utilities
 # ----------------------------
 
@@ -523,6 +604,7 @@ def build_call_curve_from_eod(
     spot: float,
     T_years: float,
     r: float,
+    q: float = 0.0,
     cfg: Config,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], dict]:
     diag = {
@@ -589,7 +671,8 @@ def build_call_curve_from_eod(
     # Intrinsic bound (discounted strike)
     T_ref = max(float(T_years), 1e-8)
     discK = use["strike"].astype(float) * np.exp(-float(r) * T_ref)
-    intrinsic = np.maximum(float(spot) - discK, 0.0)
+    fwd_disc = float(spot) * np.exp(-float(q) * T_ref)
+    intrinsic = np.maximum(fwd_disc - discK, 0.0)
 
     before = len(use)
     use = use[use["mid"].astype(float) >= float(cfg.intrinsic_tol) * intrinsic].copy()
@@ -803,6 +886,7 @@ def process_one(
     raw_closes_by_ticker: Dict[str, Dict[date, float]],
     adj_closes_by_ticker: Dict[str, Dict[date, float]],
     split_event_counts: Dict[str, int],
+    dividend_histories: Dict[str, DividendHistory],
     option_chain_cache: Dict[Tuple[str, date, date, Optional[int]], pd.DataFrame],
     cache_lock: threading.Lock,
 ) -> Tuple[List[dict], Optional[dict]]:
@@ -866,6 +950,34 @@ def process_one(
     rv20_raw = realized_vol_proxy(raw_map, asof_used, cfg.rv_lookback_days)
     rv20_adj = realized_vol_proxy(adj_map, asof_used, cfg.rv_lookback_days)
 
+    # Dividends (time-safe trailing window up to asof_used)
+    div_sum = np.nan
+    div_source_used = "none"
+    if cfg.dividend_source == "yfinance":
+        hist = dividend_histories.get(ticker)
+        if hist is not None and hist.available:
+            start_lb = asof_used - timedelta(days=int(cfg.dividend_lookback_days))
+            div_sum = float(hist.sum_in_range(start_lb, asof_used))
+            div_source_used = "yfinance"
+        else:
+            div_source_used = "default"
+    else:
+        div_source_used = "default" if float(cfg.dividend_yield_default) != 0.0 else "none"
+
+    div_sum_annual = np.nan
+    if np.isfinite(div_sum) and int(cfg.dividend_lookback_days) > 0:
+        div_sum_annual = float(div_sum) * (365.25 / float(cfg.dividend_lookback_days))
+
+    def _div_yield(spot: float) -> float:
+        if not np.isfinite(spot) or spot <= 0:
+            return float(cfg.dividend_yield_default)
+        if not np.isfinite(div_sum_annual):
+            return float(cfg.dividend_yield_default)
+        return float(div_sum_annual / float(spot))
+
+    div_yield_raw = _div_yield(float(S0_raw))
+    div_yield_adj = _div_yield(float(S0_adj))
+
     session = get_thread_session()
 
     # --- option expiration (chain fetch) ---
@@ -920,15 +1032,30 @@ def process_one(
 
     # ---- Build curve twice and choose best spot scale ----
     curve_candidates = []
-    for label, spot in [("split_adj", float(S0_adj)), ("raw", float(S0_raw))]:
+    q_adj = float(div_yield_adj)
+    q_raw = float(div_yield_raw)
+
+    def _forward_price(spot: float, q: float) -> float:
+        if not np.isfinite(spot) or spot <= 0:
+            return np.nan
+        return float(spot) * float(np.exp((float(cfg.risk_free_rate) - float(q)) * float(T_years)))
+
+    for label, spot, q in [
+        ("split_adj", float(S0_adj), q_adj),
+        ("raw", float(S0_raw), q_raw),
+    ]:
+        fwd = _forward_price(float(spot), float(q))
+        spot_ref = fwd if (cfg.use_forward_moneyness and np.isfinite(fwd) and fwd > 0) else float(spot)
         k_arr, c_arr, diag_curve = build_call_curve_from_eod(
-            chain, spot=float(spot), T_years=float(T_years), r=float(cfg.risk_free_rate), cfg=cfg
+            chain, spot=float(spot), T_years=float(T_years), r=float(cfg.risk_free_rate), q=float(q), cfg=cfg
         )
         if k_arr is None or c_arr is None:
             continue
-        score, n_inside, used_abslogm_hint = _score_spot_scale(k_arr=k_arr, spot=float(spot), cfg=cfg)
+        score, n_inside, used_abslogm_hint = _score_spot_scale(k_arr=k_arr, spot=float(spot_ref), cfg=cfg)
         n_used = int(diag_curve.get("n_used") or 0)
-        curve_candidates.append((score, n_used, label, float(spot), float(used_abslogm_hint), k_arr, c_arr, diag_curve))
+        curve_candidates.append(
+            (score, n_used, label, float(spot), float(q), float(fwd), float(spot_ref), float(used_abslogm_hint), k_arr, c_arr, diag_curve)
+        )
 
     if not curve_candidates:
         return [], {
@@ -941,7 +1068,7 @@ def process_one(
         }
 
     curve_candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    best_score, best_n_used, spot_scale_used, spot_used, _, k_arr, c_arr, diag_curve = curve_candidates[0]
+    best_score, best_n_used, spot_scale_used, spot_used, q_used, fwd_used, spot_ref_used, _, k_arr, c_arr, diag_curve = curve_candidates[0]
     score_raw = next((x[0] for x in curve_candidates if x[2] == "raw"), -1e18)
     score_adj = next((x[0] for x in curve_candidates if x[2] == "split_adj"), -1e18)
 
@@ -980,8 +1107,10 @@ def process_one(
     # Adaptive band
     k_min = float(np.min(k_arr))
     k_max = float(np.max(k_arr))
+    spot_ref_used = fwd_used if (cfg.use_forward_moneyness and np.isfinite(fwd_used) and fwd_used > 0) else float(spot_used)
+    moneyness_ref = "forward" if (cfg.use_forward_moneyness and np.isfinite(fwd_used) and fwd_used > 0) else "spot"
     k_band, k_band_inside, used_abslogm = pick_band_strikes(
-        k_arr, float(spot_used), cfg=cfg, k_min=k_min, k_max=k_max
+        k_arr, float(spot_ref_used), cfg=cfg, k_min=k_min, k_max=k_max
     )
     n_band_raw = int(k_band.size)
     n_band_inside = int(k_band_inside.size)
@@ -992,11 +1121,11 @@ def process_one(
             chain_full = fetch_chain(None)
             if chain_full is not None and not chain_full.empty:
                 k2, c2, d2 = build_call_curve_from_eod(
-                    chain_full, spot=float(spot_used), T_years=float(T_years), r=float(cfg.risk_free_rate), cfg=cfg
+                    chain_full, spot=float(spot_used), T_years=float(T_years), r=float(cfg.risk_free_rate), q=float(q_used), cfg=cfg
                 )
                 if k2 is not None and c2 is not None:
                     kmin2, kmax2 = float(np.min(k2)), float(np.max(k2))
-                    kb2, ki2, used2 = pick_band_strikes(k2, float(spot_used), cfg=cfg, k_min=kmin2, k_max=kmax2)
+                    kb2, ki2, used2 = pick_band_strikes(k2, float(spot_ref_used), cfg=cfg, k_min=kmin2, k_max=kmax2)
                     if int(ki2.size) > n_band_inside:
                         k_arr, c_arr, diag_curve = k2, c2, d2
                         k_min, k_max = kmin2, kmax2
@@ -1011,7 +1140,7 @@ def process_one(
             "week_friday": week_friday.isoformat(),
             "asof_target": asof_target.isoformat(),
             "drop_reason": "thin_band_inside",
-            "detail": f"inside={n_band_inside} raw={n_band_raw} spot_scale={spot_scale_used} used_abslogm={used_abslogm:.4f} spot={spot_used:.6f} splits_preload={split_n}",
+            "detail": f"inside={n_band_inside} raw={n_band_raw} spot_scale={spot_scale_used} used_abslogm={used_abslogm:.4f} moneyness_ref={moneyness_ref} spot_ref={spot_ref_used:.6f} spot={spot_used:.6f} splits_preload={split_n}",
         }
 
     # pRN on strikes in band
@@ -1035,10 +1164,14 @@ def process_one(
         S0_used = float(S0_raw)
         ST_used = float(ST_raw)
         rv20_used = rv20_raw
+        div_yield_used = float(div_yield_raw)
     else:
         S0_used = float(S0_adj)
         ST_used = float(ST_adj)
         rv20_used = rv20_adj
+        div_yield_used = float(div_yield_adj)
+
+    forward_used = float(fwd_used) if (np.isfinite(fwd_used) and fwd_used > 0) else _forward_price(S0_used, div_yield_used)
 
     # Rows + apply pRN band
     tmp_rows: List[dict] = []
@@ -1082,6 +1215,13 @@ def process_one(
                 "split_events_in_preload_range": split_n,
                 "split_adjustment_applied": bool(cfg.apply_split_adjustment),
 
+                # dividends / forward (time-safe trailing proxy)
+                "dividend_source_used": div_source_used,
+                "dividend_lookback_days": int(cfg.dividend_lookback_days),
+                "dividend_sum_lookback": float(np.round(div_sum, 8)) if np.isfinite(div_sum) else np.nan,
+                "dividend_yield_raw": float(np.round(div_yield_raw, 8)) if np.isfinite(div_yield_raw) else np.nan,
+                "dividend_yield_adj": float(np.round(div_yield_adj, 8)) if np.isfinite(div_yield_adj) else np.nan,
+
                 # chosen scale
                 "spot_scale_used": spot_scale_used,
                 "spot_scale_score_raw": float(score_raw),
@@ -1090,6 +1230,8 @@ def process_one(
                 # used (consistent with chosen scale)
                 "S_asof_close": float(np.round(float(S0_used), 7)),
                 "S_expiry_close": float(np.round(float(ST_used), 7)),
+                "dividend_yield": float(np.round(div_yield_used, 8)) if np.isfinite(div_yield_used) else np.nan,
+                "forward_price": float(np.round(forward_used, 7)) if np.isfinite(forward_used) else np.nan,
 
                 "asof_fallback_days": int(asof_fwd),
                 "expiry_fallback_days": int(exp_bwd),
@@ -1098,6 +1240,8 @@ def process_one(
                 "K": float(np.round(float(K), 7)),
                 "log_m": float(np.round(np.log(float(K) / float(S0_used)), 9)),
                 "abs_log_m": float(np.round(abs(np.log(float(K) / float(S0_used))), 9)),
+                "log_m_fwd": float(np.round(np.log(float(K) / float(forward_used)), 9)) if np.isfinite(forward_used) and forward_used > 0 else np.nan,
+                "abs_log_m_fwd": float(np.round(abs(np.log(float(K) / float(forward_used))), 9)) if np.isfinite(forward_used) and forward_used > 0 else np.nan,
 
                 # vol proxy
                 "rv20": float(np.round(rv20_used, 8)) if np.isfinite(rv20_used) else np.nan,
@@ -1117,6 +1261,8 @@ def process_one(
                 "used_max_abs_logm": float(np.round(used_abslogm, 6)),
                 "n_band_raw": int(n_band_raw),
                 "n_band_inside": int(n_band_inside),
+                "moneyness_ref": moneyness_ref,
+                "moneyness_ref_price": float(np.round(float(spot_ref_used), 7)) if np.isfinite(spot_ref_used) else np.nan,
                 "calls_k_min": float(np.round(k_min, 7)),
                 "calls_k_max": float(np.round(k_max, 7)),
 
@@ -1140,7 +1286,7 @@ def process_one(
             "week_friday": week_friday.isoformat(),
             "asof_target": asof_target.isoformat(),
             "drop_reason": "too_few_in_prn_band",
-            "detail": f"kept={len(tmp_rows)} need={cfg.min_strikes_in_prn_band} inside={n_band_inside} used_abslogm={used_abslogm:.4f} spot_scale={spot_scale_used}",
+            "detail": f"kept={len(tmp_rows)} need={cfg.min_strikes_in_prn_band} inside={n_band_inside} used_abslogm={used_abslogm:.4f} spot_scale={spot_scale_used} moneyness_ref={moneyness_ref}",
         }
 
     # Group id (per ticker + snapshot day + week)
@@ -1261,7 +1407,7 @@ def _sanity_report_and_optional_drop(out_df: pd.DataFrame, drops: List[dict], cf
 def main() -> None:
     ap = argparse.ArgumentParser()
 
-    ap.add_argument("--out-dir", type=str, default="./data/history")
+    ap.add_argument("--out-dir", type=str, default="./data/raw/option-chain")
     ap.add_argument("--out-name", type=str, default="pRN__history__mon_thu__PM10__v1.6.0.csv")
 
     ap.add_argument("--tickers", type=str, default=",".join(PM10_TICKERS))
@@ -1305,6 +1451,12 @@ def main() -> None:
 
     # Split adjustment
     ap.add_argument("--no-split-adjust", action="store_true")
+
+    # Dividends / forward
+    ap.add_argument("--dividend-source", type=str, default=Config().dividend_source, choices=["yfinance", "none"])
+    ap.add_argument("--dividend-lookback-days", type=int, default=Config().dividend_lookback_days)
+    ap.add_argument("--dividend-yield-default", type=float, default=Config().dividend_yield_default)
+    ap.add_argument("--no-forward-moneyness", action="store_true")
 
     # Weights
     ap.add_argument("--no-group-weights", action="store_true")
@@ -1371,6 +1523,11 @@ def main() -> None:
 
         apply_split_adjustment=(not bool(args.no_split_adjust)),
 
+        dividend_source=str(args.dividend_source),
+        dividend_lookback_days=int(args.dividend_lookback_days),
+        dividend_yield_default=float(args.dividend_yield_default),
+        use_forward_moneyness=(not bool(args.no_forward_moneyness)),
+
         add_group_weights=(not bool(args.no_group_weights)),
         add_ticker_weights=(not bool(args.no_ticker_weights)),
         use_soft_quality_weight=(not bool(args.no_soft_quality_weight)),
@@ -1399,21 +1556,79 @@ def main() -> None:
         print("[WARN] min_strikes_for_curve < 3 is likely too low.")
     if cfg.min_strikes_in_prn_band < 1:
         raise SystemExit("--min-band-prn-strikes must be >= 1")
+    if cfg.dividend_lookback_days <= 0:
+        raise SystemExit("--dividend-lookback-days must be > 0")
+    if cfg.dividend_source == "yfinance" and yf is None:
+        raise SystemExit("dividend_source=yfinance requires yfinance installed.")
 
     theta = ThetaClient(cfg.theta_base_url, timeout_s=cfg.timeout_s, verbose=bool(args.verbose_skips))
 
-    os.makedirs(args.out_dir, exist_ok=True)
-    out_path = os.path.join(args.out_dir, args.out_name)
-    drops_path = os.path.join(args.out_dir, args.drops_name)
+    def _clean_args_for_run_dir(argv: List[str]) -> List[str]:
+        cleaned: List[str] = []
+        skip_next = False
+        for a in argv:
+            if skip_next:
+                skip_next = False
+                continue
+            if a in {"--out-dir", "--out-name"}:
+                skip_next = True
+                continue
+            if a.startswith("--out-dir=") or a.startswith("--out-name="):
+                continue
+            cleaned.append(a)
+        return cleaned
+
+    def _slugify_args(argv: List[str], max_len: int = 140) -> str:
+        raw = " ".join(argv).strip()
+        if not raw:
+            return ""
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._=-")
+        out = []
+        prev_us = False
+        for ch in raw:
+            if ch in allowed:
+                out.append(ch)
+                prev_us = False
+            else:
+                if not prev_us:
+                    out.append("_")
+                    prev_us = True
+        slug = "".join(out).strip("_")
+        if len(slug) <= max_len:
+            return slug
+        digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
+        keep = max_len - len("__sha1=") - len(digest)
+        return f"{slug[:keep]}__sha1={digest}"
+
+    run_ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    args_for_slug = _clean_args_for_run_dir(sys.argv[1:])
+    args_slug = _slugify_args(args_for_slug)
+    run_dir_name = f"start={start.isoformat()}__end={end.isoformat()}"
+    if args_slug:
+        run_dir_name = f"{run_dir_name}__args={args_slug}"
+    run_dir_name = f"{run_dir_name}__run={run_ts}"
+
+    out_base_dir = args.out_dir
+    os.makedirs(out_base_dir, exist_ok=True)
+    run_dir = os.path.join(out_base_dir, run_dir_name)
+    os.makedirs(run_dir, exist_ok=False)
+
+    out_path = os.path.join(run_dir, args.out_name)
+    drops_path = os.path.join(run_dir, args.drops_name)
 
     mondays = mondays_in_range(start, end)
     print(f"[PLAN] Weeks={len(mondays)} (Mondays) range={start}..{end} tickers={len(tickers)} snapshots/day=4 (Mon-Thu)")
     print(f"[UNIVERSE] {tickers}")
+    print(f"[OUT] base={out_base_dir} run_dir={run_dir}")
     print(f"[CFG] pRN train band: [{cfg.min_prn_train}, {cfg.max_prn_train}]")
     print(f"[CFG] band start={cfg.max_abs_logm} cap={cfg.max_abs_logm_cap} step={cfg.band_widen_step} adaptive={cfg.adaptive_band}")
     print(f"[CFG] min strikes: curve={cfg.min_strikes_for_curve} after_pRN={cfg.min_strikes_in_prn_band}")
     print(f"[CFG] expiry fallback Fri->Sat: {cfg.try_saturday_expiry_fallback}")
     print(f"[CFG] split_adjustment: {cfg.apply_split_adjustment}")
+    print(
+        f"[CFG] dividend_source={cfg.dividend_source} lookback_days={cfg.dividend_lookback_days} "
+        f"default_yield={cfg.dividend_yield_default} use_forward_moneyness={cfg.use_forward_moneyness}"
+    )
     print(f"[CFG] prefer_bidask: {cfg.prefer_bidask}")
     print(f"[CFG] threads={args.threads} cache={cfg.use_cache} stock_source={cfg.stock_source}")
     if cfg.sanity_report or cfg.sanity_drop:
@@ -1438,6 +1653,13 @@ def main() -> None:
     missing = [t for t in tickers if len(raw_closes_by_ticker.get(t, {})) == 0]
     if missing:
         print(f"[STOCK] ⚠️ No close data for: {missing}")
+
+    dividend_histories = preload_dividend_histories(
+        tickers=tickers,
+        start=preload_start,
+        end=preload_end,
+        cfg=cfg,
+    )
 
     option_chain_cache: Dict[Tuple[str, date, date, Optional[int]], pd.DataFrame] = {}
     cache_lock = threading.Lock()
@@ -1470,6 +1692,7 @@ def main() -> None:
                 raw_closes_by_ticker=raw_closes_by_ticker,
                 adj_closes_by_ticker=adj_closes_by_ticker,
                 split_event_counts=split_counts,
+                dividend_histories=dividend_histories,
                 option_chain_cache=option_chain_cache,
                 cache_lock=cache_lock,
             ): (t, mon, asof_target)

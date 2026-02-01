@@ -24,6 +24,58 @@ fi
 
 pids=()
 
+is_port_free() {
+  "$PYTHON_BIN" - "$1" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    sock.bind(("127.0.0.1", port))
+except OSError:
+    sys.exit(1)
+finally:
+    sock.close()
+sys.exit(0)
+PY
+}
+
+find_free_port() {
+  "$PYTHON_BIN" - <<'PY'
+import socket
+import sys
+
+start = 8000
+end = 8050
+
+for port in range(start, end + 1):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        continue
+    finally:
+        sock.close()
+    print(port)
+    sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
+BACKEND_PORT="${BACKEND_PORT:-8000}"
+if ! is_port_free "$BACKEND_PORT"; then
+  echo "Port $BACKEND_PORT is in use. Selecting a free port..."
+  BACKEND_PORT="$(find_free_port)"
+  if [[ -z "${BACKEND_PORT:-}" ]]; then
+    echo "No free port found in the 8000-8050 range." >&2
+    exit 1
+  fi
+fi
+
 start_backend() {
   (
     cd "$BACKEND_DIR"
@@ -33,13 +85,13 @@ start_backend() {
     fi
     # shellcheck disable=SC1091
     source ".venv/bin/activate"
-    if ! python -c "import fastapi, uvicorn" >/dev/null 2>&1; then
-      echo "Installing backend deps (fastapi, uvicorn)..."
+    if ! python -c "import fastapi, uvicorn, numpy, pandas, requests, yfinance, scipy" >/dev/null 2>&1; then
+      echo "Installing backend deps (fastapi, uvicorn, numpy, pandas, requests, yfinance, scipy)..."
       pip install -U pip
-      pip install fastapi uvicorn
+      pip install fastapi uvicorn numpy pandas requests yfinance scipy
     fi
-    echo "Starting backend on http://localhost:8000"
-    uvicorn main:app --reload --port 8000
+    echo "Starting backend on http://localhost:$BACKEND_PORT"
+    uvicorn main:app --reload --port "$BACKEND_PORT"
   ) &
   pids+=($!)
 }
@@ -52,7 +104,7 @@ start_frontend() {
       npm install
     fi
     echo "Starting frontend dev server..."
-    npm run dev
+    VITE_API_BASE_URL="http://localhost:$BACKEND_PORT" npm run dev
   ) &
   pids+=($!)
 }

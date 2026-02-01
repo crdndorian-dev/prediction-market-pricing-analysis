@@ -1,0 +1,65 @@
+{"location":"index.html","message":"HTML parsed, body has root","data":{"hasRoot":true},"timestamp":1769984030839,"sessionId":"debug-session","hypothesisId":"H1"}
+{"location":"index.html","message":"HTML parsed, body has root","data":{"hasRoot":true},"timestamp":1769984116883,"sessionId":"debug-session","hypothesisId":"H1"}
+{"location":"index.html","message":"HTML parsed, body has root","data":{"hasRoot":true},"timestamp":1769984235672,"sessionId":"debug-session","hypothesisId":"H1"}
+{"location":"index.html","message":"HTML parsed, body has root","data":{"hasRoot":true},"timestamp":1769984241969,"sessionId":"debug-session","hypothesisId":"H1"}
+{"location":"index.html","message":"HTML parsed, body has root","data":{"hasRoot":true},"timestamp":1769984343867,"sessionId":"debug-session","hypothesisId":"H1"}
+{"location":"main.tsx","message":"main.tsx executing after imports","data":{},"timestamp":1769984344085,"sessionId":"debug-session","hypothesisId":"H2"}
+{"location":"main.tsx","message":"before createRoot","data":{"rootExists":true},"timestamp":1769984344085,"sessionId":"debug-session","hypothesisId":"H3"}
+{"location":"main.tsx","message":"createRoot.render completed","data":{},"timestamp":1769984344085,"sessionId":"debug-session","hypothesisId":"H4"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769984344099,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769984344100,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769985483341,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769985483342,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"index.html","message":"HTML parsed, body has root","data":{"hasRoot":true},"timestamp":1769986046344,"sessionId":"debug-session","hypothesisId":"H1"}
+{"location":"index.html","message":"HTML parsed, body has root","data":{"hasRoot":true},"timestamp":1769986051263,"sessionId":"debug-session","hypothesisId":"H1"}
+{"location":"index.html","message":"HTML parsed, body has root","data":{"hasRoot":true},"timestamp":1769986061226,"sessionId":"debug-session","hypothesisId":"H1"}
+{"location":"index.html","message":"HTML parsed, body has root","data":{"hasRoot":true},"timestamp":1769986076111,"sessionId":"debug-session","hypothesisId":"H1"}
+{"location":"index.html","message":"HTML parsed, body has root","data":{"hasRoot":true},"timestamp":1769986122170,"sessionId":"debug-session","hypothesisId":"H1"}
+{"location":"index.html","message":"HTML parsed, body has root","data":{"hasRoot":true},"timestamp":1769986200125,"sessionId":"debug-session","hypothesisId":"H1"}
+{"location":"main.tsx","message":"main.tsx executing after imports","data":{},"timestamp":1769986200456,"sessionId":"debug-session","hypothesisId":"H2"}
+{"location":"main.tsx","message":"before createRoot","data":{"rootExists":true},"timestamp":1769986200456,"sessionId":"debug-session","hypothesisId":"H3"}
+{"location":"main.tsx","message":"createRoot.render completed","data":{},"timestamp":1769986200456,"sessionId":"debug-session","hypothesisId":"H4"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769986200467,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769986200468,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"index.html","message":"HTML parsed, body has root","data":{"hasRoot":true},"timestamp":1769986366314,"sessionId":"debug-session","hypothesisId":"H1"}
+{"location":"main.tsx","message":"main.tsx executing after imports","data":{},"timestamp":1769986366341,"sessionId":"debug-session","hypothesisId":"H2"}
+{"location":"main.tsx","message":"before createRoot","data":{"rootExists":true},"timestamp":1769986366342,"sessionId":"debug-session","hypothesisId":"H3"}
+{"location":"main.tsx","message":"createRoot.render completed","data":{},"timestamp":1769986366342,"sessionId":"debug-session","hypothesisId":"H4"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769986366346,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769986366346,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769986418375,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769986418376,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769986427069,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769986427071,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769986459814,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769986459815,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"index.html","message":"HTML parsed, body has root","data":{"hasRoot":true},"timestamp":1769986477154,"sessionId":"debug-session","hypothesisId":"H1"}
+{"location":"main.tsx","message":"main.tsx executing after imports","data":{},"timestamp":1769986477186,"sessionId":"debug-session","hypothesisId":"H2"}
+{"location":"main.tsx","message":"before createRoot","data":{"rootExists":true},"timestamp":1769986477186,"sessionId":"debug-session","hypothesisId":"H3"}
+{"location":"main.tsx","message":"createRoot.render completed","data":{},"timestamp":1769986477186,"sessionId":"debug-session","hypothesisId":"H4"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769986477190,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769986477190,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"index.html","message":"HTML parsed, body has root","data":{"hasRoot":true},"timestamp":1769986478269,"sessionId":"debug-session","hypothesisId":"H1"}
+{"location":"main.tsx","message":"main.tsx executing after imports","data":{},"timestamp":1769986478293,"sessionId":"debug-session","hypothesisId":"H2"}
+{"location":"main.tsx","message":"before createRoot","data":{"rootExists":true},"timestamp":1769986478293,"sessionId":"debug-session","hypothesisId":"H3"}
+{"location":"main.tsx","message":"createRoot.render completed","data":{},"timestamp":1769986478294,"sessionId":"debug-session","hypothesisId":"H4"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769986478295,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769986478296,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"index.html","message":"HTML parsed, body has root","data":{"hasRoot":true},"timestamp":1769986509761,"sessionId":"debug-session","hypothesisId":"H1"}
+{"location":"main.tsx","message":"main.tsx executing after imports","data":{},"timestamp":1769986509778,"sessionId":"debug-session","hypothesisId":"H2"}
+{"location":"main.tsx","message":"before createRoot","data":{"rootExists":true},"timestamp":1769986509778,"sessionId":"debug-session","hypothesisId":"H3"}
+{"location":"main.tsx","message":"createRoot.render completed","data":{},"timestamp":1769986509778,"sessionId":"debug-session","hypothesisId":"H4"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769986509780,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769986509780,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"index.html","message":"HTML parsed, body has root","data":{"hasRoot":true},"timestamp":1769987130320,"sessionId":"debug-session","hypothesisId":"H1"}
+{"location":"main.tsx","message":"main.tsx executing after imports","data":{},"timestamp":1769987130345,"sessionId":"debug-session","hypothesisId":"H2"}
+{"location":"main.tsx","message":"before createRoot","data":{"rootExists":true},"timestamp":1769987130345,"sessionId":"debug-session","hypothesisId":"H3"}
+{"location":"main.tsx","message":"createRoot.render completed","data":{},"timestamp":1769987130346,"sessionId":"debug-session","hypothesisId":"H4"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769987130348,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769987130348,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"index.html","message":"HTML parsed, body has root","data":{"hasRoot":true},"timestamp":1769987186703,"sessionId":"debug-session","hypothesisId":"H1"}
+{"location":"main.tsx","message":"main.tsx executing after imports","data":{},"timestamp":1769987186788,"sessionId":"debug-session","hypothesisId":"H2"}
+{"location":"main.tsx","message":"before createRoot","data":{"rootExists":true},"timestamp":1769987186788,"sessionId":"debug-session","hypothesisId":"H3"}
+{"location":"main.tsx","message":"createRoot.render completed","data":{},"timestamp":1769987186788,"sessionId":"debug-session","hypothesisId":"H4"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769987186791,"sessionId":"debug-session","hypothesisId":"H6"}
+{"location":"App.tsx","message":"App component rendering","data":{},"timestamp":1769987186791,"sessionId":"debug-session","hypothesisId":"H6"}

@@ -381,6 +381,10 @@ def ensure_engineered_features(df: pd.DataFrame, requested_features: List[str]) 
         "r",
         "log_m",
         "abs_log_m",
+        "dividend_yield",
+        "forward_price",
+        "log_m_fwd",
+        "abs_log_m_fwd",
         "rel_spread_median",
         "n_chain_raw",
         "n_chain_used",
@@ -407,13 +411,37 @@ def ensure_engineered_features(df: pd.DataFrame, requested_features: List[str]) 
         if "log_m" in df.columns:
             df["abs_log_m"] = pd.to_numeric(df["log_m"], errors="coerce").abs()
 
+    need_forward = any(
+        f in requested_features for f in ["forward_price", "log_m_fwd", "abs_log_m_fwd", "log_m_fwd_over_volT", "abs_log_m_fwd_over_volT"]
+    )
+    if need_forward and "forward_price" not in df.columns:
+        if ("S_asof_close" in df.columns) and ("r" in df.columns) and ("dividend_yield" in df.columns):
+            S0 = _numeric_series(df, "S_asof_close")
+            r = _numeric_series(df, "r")
+            q = _numeric_series(df, "dividend_yield")
+            if "T_years" in df.columns:
+                T_years = _numeric_series(df, "T_years")
+            else:
+                T_years = _numeric_series(df, "T_days") / 365.0
+            df["forward_price"] = S0 * np.exp((r - q) * T_years)
+
+    if "log_m_fwd" in requested_features and "log_m_fwd" not in df.columns:
+        if ("K" in df.columns) and ("forward_price" in df.columns):
+            K = _numeric_series(df, "K").to_numpy(dtype=float)
+            F = _numeric_series(df, "forward_price").to_numpy(dtype=float)
+            df["log_m_fwd"] = np.log(np.clip(K, 1e-12, None) / np.clip(F, 1e-12, None))
+
+    if "abs_log_m_fwd" in requested_features and "abs_log_m_fwd" not in df.columns:
+        if "log_m_fwd" in df.columns:
+            df["abs_log_m_fwd"] = pd.to_numeric(df["log_m_fwd"], errors="coerce").abs()
+
     # Horizon transforms
     if "log_T_days" in requested_features:
         T_days = _numeric_series(df, "T_days")
         df["log_T_days"] = np.log1p(T_days.clip(lower=0))
 
     need_sqrt_T = any(
-        f in requested_features for f in ["sqrt_T_years", "rv20_sqrtT", "log_m_over_volT", "abs_log_m_over_volT"]
+        f in requested_features for f in ["sqrt_T_years", "rv20_sqrtT", "log_m_over_volT", "abs_log_m_over_volT", "log_m_fwd_over_volT", "abs_log_m_fwd_over_volT"]
     )
     if need_sqrt_T:
         if "T_years" in df.columns:
@@ -432,6 +460,14 @@ def ensure_engineered_features(df: pd.DataFrame, requested_features: List[str]) 
             df["log_m_over_volT"] = _numeric_series(df, "log_m") / denom
         if "abs_log_m_over_volT" in requested_features:
             df["abs_log_m_over_volT"] = _numeric_series(df, "abs_log_m") / denom
+
+    if ("log_m_fwd_over_volT" in requested_features) or ("abs_log_m_fwd_over_volT" in requested_features):
+        denom = _numeric_series(df, "rv20") * _numeric_series(df, "sqrt_T_years")
+        denom = denom.replace(0, np.nan)
+        if "log_m_fwd_over_volT" in requested_features:
+            df["log_m_fwd_over_volT"] = _numeric_series(df, "log_m_fwd") / denom
+        if "abs_log_m_fwd_over_volT" in requested_features:
+            df["abs_log_m_fwd_over_volT"] = _numeric_series(df, "abs_log_m_fwd") / denom
 
     # Liquidity / quality transforms
     if "log_rel_spread" in requested_features:
@@ -646,7 +682,7 @@ def main() -> None:
 
     ap.add_argument(
         "--features",
-        default="x_logit_prn,log_m,abs_log_m,T_days,sqrt_T_years,rv20,rv20_sqrtT,log_m_over_volT,log_rel_spread,chain_used_frac,band_inside_frac,drop_intrinsic_frac,asof_fallback_days,split_events_in_preload_range,prn_raw_gap",
+        default="x_logit_prn,log_m_fwd,abs_log_m_fwd,T_days,sqrt_T_years,rv20,rv20_sqrtT,log_m_fwd_over_volT,log_rel_spread,chain_used_frac,band_inside_frac,drop_intrinsic_frac,asof_fallback_days,split_events_in_preload_range,prn_raw_gap,dividend_yield",
     )
     ap.add_argument("--categorical-features", default="spot_scale_used")
     ap.add_argument("--add-interactions", action="store_true")

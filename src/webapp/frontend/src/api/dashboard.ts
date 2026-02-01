@@ -37,6 +37,55 @@ export type DashboardData = {
     split: string | null;
   };
   signalBars: number[];
+  datasetSummary?: {
+    fileName: string;
+    path: string;
+    sizeMB: number;
+    rowCount: number;
+    columnCount: number;
+    tickerCount: number;
+    dateRange: {
+      column: string | null;
+      start: string | null;
+      end: string | null;
+    };
+    lastModified: string;
+  } | null;
+  dropsSummary?: {
+    fileName: string;
+    path: string;
+    rowCount: number;
+  } | null;
+  modelSummary?: {
+    modelCount: number;
+    latestModel: {
+      id: string | null;
+      calibration: string | null;
+      dataset: string | null;
+      modifiedAt: string | null;
+      metrics: {
+        logloss: number | null;
+        brier: number | null;
+        ece: number | null;
+        model: string | null;
+        split: string | null;
+      } | null;
+    };
+    bestTest: {
+      model: string | null;
+      split: string | null;
+      logloss: number | null;
+      brier: number | null;
+      ece: number | null;
+    } | null;
+    bestVal: {
+      model: string | null;
+      split: string | null;
+      logloss: number | null;
+      brier: number | null;
+      ece: number | null;
+    } | null;
+  } | null;
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";

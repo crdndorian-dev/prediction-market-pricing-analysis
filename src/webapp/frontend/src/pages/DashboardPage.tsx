@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { DashboardData, fetchDashboard } from "../api/dashboard";
+import type { DashboardData } from "../api/dashboard";
+import { fetchDashboard } from "../api/dashboard";
 import "./DashboardPage.css";
 
 const formatDate = (value?: string | null) => {
@@ -72,8 +73,8 @@ export default function DashboardPage() {
       ? "Ready"
       : "Needs review"
     : "Awaiting data";
-  const readinessStateClass =
-    readinessState === "Ready" ? "status-ready" : "status-warn";
+  const readinessStateVariant =
+    readinessState === "Ready" ? "success" : "failed";
 
   const freshnessDays =
     hero?.dataFreshnessDays !== null && hero?.dataFreshnessDays !== undefined
@@ -138,7 +139,7 @@ export default function DashboardPage() {
   ];
 
   return (
-    <div className="dashboard">
+    <section className="page dashboard">
       {error ? (
         <div className="dashboard-banner error">
           Unable to load dashboard data. Start the backend on port 8000.
@@ -191,7 +192,7 @@ export default function DashboardPage() {
                 <h2>Pipeline readiness</h2>
                 <p>Confirm inputs before you run.</p>
               </div>
-              <span className={`status-pill ${readinessStateClass}`}>
+              <span className={`status-pill ${readinessStateVariant}`}>
                 {readinessState}
               </span>
             </div>
@@ -206,16 +207,17 @@ export default function DashboardPage() {
                       </div>
                       <span
                         className={`status-pill ${
-                          item.status === "Ready"
-                            ? "status-ready"
-                            : "status-warn"
+                          item.status === "Ready" ? "success" : "failed"
                         }`}
                       >
                         {item.status}
                       </span>
                     </div>
-                    <div className="progress">
-                      <span style={{ width: `${item.progress}%` }} />
+                    <div className="progress-bar">
+                      <span
+                        className="progress-fill"
+                        style={{ width: `${item.progress}%` }}
+                      />
                     </div>
                   </li>
                 ))
@@ -237,9 +239,9 @@ export default function DashboardPage() {
                 <h2>Run queue</h2>
                 <p>Watch active and scheduled jobs.</p>
               </div>
-              <span className="status-pill status-info">
-                {runQueue.length ? `${runQueue.length} jobs` : "Idle"}
-              </span>
+            <span className="status-pill running">
+              {runQueue.length ? `${runQueue.length} jobs` : "Idle"}
+            </span>
             </div>
             <ul className="queue">
               {runQueue.length ? (
@@ -313,12 +315,10 @@ export default function DashboardPage() {
                   </div>
                   <div className="run-aside">
                     <span
-                      className={`status-pill ${
-                        run.status === "Success"
-                          ? "status-ready"
-                          : "status-warn"
-                      }`}
-                    >
+                          className={`status-pill ${
+                            run.status === "Success" ? "success" : "failed"
+                          }`}
+                        >
                       {run.status}
                     </span>
                     <div className="run-time">{formatDateTime(run.time)}</div>
@@ -336,7 +336,7 @@ export default function DashboardPage() {
               <h2>Calibration snapshot</h2>
               <p>Latest metrics pulled from models.</p>
             </div>
-            <span className="status-pill status-info">
+            <span className="status-pill running">
               {snapshot?.split ? snapshot.split : "Awaiting metrics"}
             </span>
           </div>
@@ -383,6 +383,6 @@ export default function DashboardPage() {
           </div>
         </div>
       </section>
-    </div>
+    </section>
   );
 }

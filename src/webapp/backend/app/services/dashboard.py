@@ -11,6 +11,8 @@ DATA_DIR = BASE_DIR / "src" / "data"
 MODELS_DIR = DATA_DIR / "models"
 RAW_DIR = DATA_DIR / "raw"
 
+_DATASET_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "summary": None}
+
 
 def _safe_float(value: Any) -> Optional[float]:
     try:
@@ -105,6 +107,100 @@ def _calc_days_since(date_value: Optional[datetime]) -> Optional[int]:
     return delta.days
 
 
+def _parse_date_str(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _find_dataset_file(raw_dir: Path) -> Optional[Path]:
+    preferred = raw_dir / "options-chain-dataset.csv"
+    if preferred.exists():
+        return preferred
+    if not raw_dir.exists():
+        return None
+    candidates = [
+        item
+        for item in raw_dir.iterdir()
+        if item.is_file() and item.suffix == ".csv" and "drops" not in item.name
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item.stat().st_mtime)
+
+
+def _count_csv_rows(path: Path) -> int:
+    if not path.exists():
+        return 0
+    with path.open(newline="") as handle:
+        reader = csv.reader(handle)
+        # Skip header
+        try:
+            next(reader)
+        except StopIteration:
+            return 0
+        return sum(1 for _ in reader)
+
+
+def _summarize_dataset(path: Path) -> Optional[Dict[str, Any]]:
+    if not path.exists():
+        return None
+    mtime = path.stat().st_mtime
+    cached = _DATASET_CACHE
+    if cached.get("path") == str(path) and cached.get("mtime") == mtime:
+        return cached.get("summary")
+
+    row_count = 0
+    tickers = set()
+    date_min = None
+    date_max = None
+    date_column = None
+
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames:
+            if "week_monday" in reader.fieldnames:
+                date_column = "week_monday"
+            elif "asof_date" in reader.fieldnames:
+                date_column = "asof_date"
+            elif "week_friday" in reader.fieldnames:
+                date_column = "week_friday"
+
+        for row in reader:
+            row_count += 1
+            ticker = row.get("ticker")
+            if ticker:
+                tickers.add(ticker)
+            if date_column:
+                parsed = _parse_date_str(row.get(date_column))
+                if parsed:
+                    if date_min is None or parsed < date_min:
+                        date_min = parsed
+                    if date_max is None or parsed > date_max:
+                        date_max = parsed
+
+    summary = {
+        "fileName": path.name,
+        "path": str(path.relative_to(BASE_DIR)),
+        "sizeMB": round(path.stat().st_size / (1024 * 1024), 2),
+        "rowCount": row_count,
+        "columnCount": len(reader.fieldnames or []),
+        "tickerCount": len(tickers),
+        "dateRange": {
+            "column": date_column,
+            "start": date_min.date().isoformat() if date_min else None,
+            "end": date_max.date().isoformat() if date_max else None,
+        },
+        "lastModified": _iso_from_mtime(mtime),
+    }
+
+    _DATASET_CACHE.update({"path": str(path), "mtime": mtime, "summary": summary})
+    return summary
+
+
 def _dataset_label(metadata: Optional[Dict[str, Any]]) -> Optional[str]:
     if not metadata:
         return None
@@ -181,6 +277,22 @@ def _build_signal_bars(runs: List[Dict[str, Any]]) -> List[int]:
     return bars
 
 
+def _best_metrics(rows: List[Dict[str, Any]], split: str) -> Optional[Dict[str, Any]]:
+    pool = [row for row in rows if row.get("split") == split]
+    if not pool:
+        return None
+    best = _pick_best(pool, "logloss")
+    if not best:
+        return None
+    return {
+        "model": best.get("model"),
+        "split": best.get("split"),
+        "logloss": best.get("logloss"),
+        "brier": best.get("brier"),
+        "ece": best.get("ece"),
+    }
+
+
 def build_dashboard_payload() -> Dict[str, Any]:
     runs = _get_runs()
     latest = runs[0] if runs else None
@@ -191,6 +303,8 @@ def build_dashboard_payload() -> Dict[str, Any]:
     test_range = split_info.get("test_weeks_range") if split_info else None
     test_end = _parse_date(test_range[1]) if test_range else None
 
+    dataset_file = _find_dataset_file(RAW_DIR)
+    dataset_summary = _summarize_dataset(dataset_file) if dataset_file else None
     raw_latest = _latest_file(RAW_DIR)
     raw_label = raw_latest.name if raw_latest else None
     raw_date = (
@@ -203,11 +317,14 @@ def build_dashboard_payload() -> Dict[str, Any]:
     data_days = _calc_days_since(data_date)
 
     readiness = []
-    if raw_latest:
+    if dataset_summary:
         readiness.append(
             {
-                "title": "Dataset locked",
-                "detail": raw_label,
+                "title": "Ingestion snapshot",
+                "detail": (
+                    "1-option-chain-build-historic-dataset-v1.0.py"
+                    f" · {dataset_summary.get('fileName')} · {dataset_summary.get('rowCount', 0)} rows"
+                ),
                 "status": "Ready",
                 "progress": 100,
             }
@@ -215,7 +332,7 @@ def build_dashboard_payload() -> Dict[str, Any]:
     else:
         readiness.append(
             {
-                "title": "Dataset locked",
+                "title": "Ingestion snapshot",
                 "detail": "No dataset found in src/data/raw",
                 "status": "Missing",
                 "progress": 0,
@@ -224,14 +341,14 @@ def build_dashboard_payload() -> Dict[str, Any]:
 
     if latest_meta:
         calibration = latest_meta.get("calibration", "unknown")
-        features = latest_meta.get("features")
+        features = latest_meta.get("features") or latest_meta.get("features_used")
         feature_count = len(features) if isinstance(features, list) else None
-        detail = f"Calibration: {calibration}"
+        detail = f"2-calibrate-logit-model-v1.5.py · Calibration: {calibration}"
         if feature_count is not None:
             detail = f"{detail} · {feature_count} features"
         readiness.append(
             {
-                "title": "Calibration parameters",
+                "title": "Calibration model",
                 "detail": detail,
                 "status": "Ready",
                 "progress": 100,
@@ -240,7 +357,7 @@ def build_dashboard_payload() -> Dict[str, Any]:
     else:
         readiness.append(
             {
-                "title": "Calibration parameters",
+                "title": "Calibration model",
                 "detail": "No metadata.json found",
                 "status": "Missing",
                 "progress": 0,
@@ -251,7 +368,7 @@ def build_dashboard_payload() -> Dict[str, Any]:
         readiness.append(
             {
                 "title": "Analysis outputs",
-                "detail": "metrics.csv available",
+                "detail": "metrics.csv available · model diagnostics",
                 "status": "Ready",
                 "progress": 100,
             }
@@ -278,6 +395,32 @@ def build_dashboard_payload() -> Dict[str, Any]:
             }
         )
 
+    drops_file = RAW_DIR / "option-chain-historic-dataset-drops.csv"
+    drops_summary = (
+        {
+            "fileName": drops_file.name,
+            "path": str(drops_file.relative_to(BASE_DIR)),
+            "rowCount": _count_csv_rows(drops_file),
+        }
+        if drops_file.exists()
+        else None
+    )
+
+    best_test = None
+    best_val = None
+    for run in runs:
+        metrics_rows = _load_metrics(MODELS_DIR / run["id"] / "metrics.csv")
+        candidate_test = _best_metrics(metrics_rows, "test")
+        candidate_val = _best_metrics(metrics_rows, "val")
+        if candidate_test and (
+            best_test is None or candidate_test["logloss"] < best_test["logloss"]
+        ):
+            best_test = candidate_test
+        if candidate_val and (
+            best_val is None or candidate_val["logloss"] < best_val["logloss"]
+        ):
+            best_val = candidate_val
+
     payload = {
         "asOf": datetime.now(timezone.utc).isoformat(),
         "hero": {
@@ -294,6 +437,20 @@ def build_dashboard_payload() -> Dict[str, Any]:
         "readiness": readiness,
         "runQueue": [],
         "recentRuns": recent_runs,
+        "datasetSummary": dataset_summary,
+        "dropsSummary": drops_summary,
+        "modelSummary": {
+            "modelCount": len(runs),
+            "latestModel": {
+                "id": latest.get("id") if latest else None,
+                "calibration": latest_meta.get("calibration") if latest_meta else None,
+                "dataset": _dataset_label(latest_meta),
+                "modifiedAt": latest.get("modified_at") if latest else None,
+                "metrics": latest_metrics,
+            },
+            "bestTest": best_test,
+            "bestVal": best_val,
+        },
         "calibrationSnapshot": {
             "logloss": latest_metrics.get("logloss") if latest_metrics else None,
             "brier": latest_metrics.get("brier") if latest_metrics else None,
