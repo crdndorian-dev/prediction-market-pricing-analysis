@@ -12,6 +12,29 @@ The core objective of this project is to **learn a stable and time-safe mapping 
 
 ---
 
+## Local Web App (UI)
+
+Run the backend and frontend in separate terminals:
+
+Backend:
+```bash
+cd src/webapp/backend
+python -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install fastapi uvicorn
+uvicorn main:app --reload --port 8000
+```
+
+Frontend:
+```bash
+cd src/webapp/frontend
+npm install
+npm run dev
+```
+
+---
+
 ## Conceptual Framework
 
 Let:

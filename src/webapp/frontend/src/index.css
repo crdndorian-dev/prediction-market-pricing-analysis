@@ -1,0 +1,106 @@
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap");
+
+:root {
+  --font-display: "Space Grotesk", "Sora", sans-serif;
+  --font-body: "Manrope", "Source Sans 3", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco,
+    Consolas, "Liberation Mono", "Courier New", monospace;
+
+  --ink-900: #0f1f24;
+  --ink-700: #31464c;
+  --ink-500: #5a7076;
+  --accent: #2a8f84;
+  --accent-strong: #1f6f66;
+  --accent-warm: #d9924c;
+  --surface: rgba(255, 255, 255, 0.72);
+  --surface-strong: #ffffff;
+  --outline: rgba(15, 31, 36, 0.14);
+  --shadow-soft: 0 24px 60px rgba(15, 31, 36, 0.12);
+  --shadow-card: 0 14px 40px rgba(15, 31, 36, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  color: var(--ink-900);
+  background: radial-gradient(
+      circle at top left,
+      rgba(255, 249, 235, 0.9) 0%,
+      rgba(246, 243, 234, 0.95) 45%,
+      rgba(228, 242, 242, 0.9) 100%
+    )
+    fixed;
+  overflow-x: hidden;
+}
+
+body::before,
+body::after {
+  content: "";
+  position: fixed;
+  width: 460px;
+  height: 460px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(42, 143, 132, 0.18) 0%,
+    rgba(42, 143, 132, 0) 70%
+  );
+  z-index: 0;
+  pointer-events: none;
+}
+
+body::before {
+  top: -120px;
+  right: -120px;
+}
+
+body::after {
+  bottom: -160px;
+  left: -140px;
+  background: radial-gradient(
+    circle,
+    rgba(217, 146, 76, 0.2) 0%,
+    rgba(217, 146, 76, 0) 70%
+  );
+}
+
+#root {
+  position: relative;
+  z-index: 1;
+}
+
+a {
+  color: var(--accent-strong);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--accent);
+}
+
+img {
+  max-width: 100%;
+  display: block;
+}
+
+button {
+  font-family: inherit;
+}
+
+@media (max-width: 700px) {
+  body::before,
+  body::after {
+    width: 300px;
+    height: 300px;
+  }
+}

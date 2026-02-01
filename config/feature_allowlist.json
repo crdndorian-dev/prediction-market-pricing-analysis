@@ -1,0 +1,33 @@
+{
+  "allowlist_version": "1.0",
+  "allowed_features": [
+    "x_logit_prn",
+    "log_m",
+    "abs_log_m",
+    "T_days",
+    "T_years",
+    "log_T_days",
+    "sqrt_T_years",
+    "rv20",
+    "rv20_sqrtT",
+    "log_m_over_volT",
+    "abs_log_m_over_volT",
+    "log_rel_spread",
+    "chain_used_frac",
+    "band_inside_frac",
+    "drop_intrinsic_frac",
+    "asof_fallback_days",
+    "expiry_fallback_days",
+    "split_events_in_preload_range",
+    "prn_raw_gap",
+    "fallback_any",
+    "median_dK",
+    "min_dK",
+    "r",
+    "r_used",
+    "x_prn_x_tdays",
+    "x_prn_x_rv20",
+    "x_prn_x_logm"
+  ],
+  "notes": "Strict allowlist for calibration features to prevent leakage. Keep in sync with ensure_engineered_features()."
+}

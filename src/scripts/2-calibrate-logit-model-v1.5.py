@@ -20,6 +20,9 @@ Key changes vs v1.4:
     - Build --val-windows contiguous windows of --val-window-weeks each from the period just before TEST.
     - For each window, train on all weeks strictly before the window start (time-safe), then evaluate on the window.
     - Choose C minimizing average rolling-window logloss.
+(4) Adds horizon- and quality-aware engineered features (vol-time scaling, moneyness scaling, liquidity/coverage ratios).
+(5) Fixes calibration split when --calibrate=none (uses all training data) and avoids VAL_POOL leakage
+    by fitting a separate OOS model for VAL_POOL metrics.
 
 Outputs:
 --------
@@ -53,6 +56,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 EPS = 1e-6
+MIN_CALIB_ROWS = 50
 
 
 # -----------------------------
@@ -189,7 +193,7 @@ def apply_recency_decay(
 def make_pipeline(
     *,
     numeric_features: List[str],
-    ticker_col: str,
+    categorical_features: List[str],
     C: float,
     random_state: int,
 ) -> Pipeline:
@@ -202,11 +206,12 @@ def make_pipeline(
         ("onehot", OneHotEncoder(handle_unknown="ignore", drop="first")),
     ])
 
+    transformers = [("num", num_pipe, numeric_features)]
+    if categorical_features:
+        transformers.append(("cat", cat_pipe, categorical_features))
+
     pre = ColumnTransformer(
-        transformers=[
-            ("num", num_pipe, numeric_features),
-            ("cat", cat_pipe, [ticker_col]),
-        ],
+        transformers=transformers,
         remainder="drop",
         sparse_threshold=0.3,  # OK either way
     )
@@ -253,6 +258,7 @@ class FinalModelBundle:
     kind: str  # "baseline_pRN" | "logit" | "logit+platt"
     numeric_features: List[str]
     ticker_col: str
+    categorical_features: List[str]
     base_pipeline: Optional[Pipeline] = None
     platt_calibrator: Optional[LogisticRegression] = None
     eps: float = EPS
@@ -267,9 +273,12 @@ class FinalModelBundle:
         if self.base_pipeline is None:
             raise ValueError("Missing base_pipeline.")
 
-        X = df[self.numeric_features + [self.ticker_col]].copy()
+        cat_cols = dedupe_preserve_order([self.ticker_col] + list(self.categorical_features))
+        X = df[self.numeric_features + cat_cols].copy()
         for c in self.numeric_features:
             X[c] = pd.to_numeric(X[c], errors="coerce")
+        for c in cat_cols:
+            X[c] = X[c].astype("string").fillna("UNKNOWN")
 
         p = self.base_pipeline.predict_proba(X)[:, 1]
 
@@ -314,28 +323,147 @@ def parse_feature_list(features_arg: str) -> List[str]:
     return [s.strip() for s in features_arg.split(",") if s.strip()]
 
 
-def feature_presence_report(df: pd.DataFrame, feats: List[str]) -> pd.DataFrame:
+def parse_categorical_list(features_arg: str) -> List[str]:
+    if not features_arg:
+        return []
+    if features_arg.strip().lower() in ("none", "null", "no"):
+        return []
+    return [s.strip() for s in features_arg.split(",") if s.strip()]
+
+
+def dedupe_preserve_order(items: List[str]) -> List[str]:
+    seen = set()
+    out: List[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def feature_presence_report(df: pd.DataFrame, feats: List[str], *, kind: str) -> pd.DataFrame:
     rows = []
     for c in feats:
         present = c in df.columns
         dtype = str(df[c].dtype) if present else "MISSING"
         nn = int(df[c].notna().sum()) if present else 0
-        rows.append({"feature": c, "present": present, "dtype": dtype, "non_missing": nn})
+        nunique = int(df[c].nunique(dropna=True)) if present else 0
+        rows.append({
+            "feature": c,
+            "kind": kind,
+            "present": present,
+            "dtype": dtype,
+            "non_missing": nn,
+            "n_unique": nunique,
+        })
     return pd.DataFrame(rows)
+
+
+def _numeric_series(df: pd.DataFrame, col: str) -> pd.Series:
+    if col in df.columns:
+        return pd.to_numeric(df[col], errors="coerce")
+    return pd.Series(np.nan, index=df.index)
+
+
+def _safe_divide(num: pd.Series, den: pd.Series) -> pd.Series:
+    den = den.replace(0, np.nan)
+    out = num / den
+    return out.replace([np.inf, -np.inf], np.nan)
 
 
 def ensure_engineered_features(df: pd.DataFrame, requested_features: List[str]) -> pd.DataFrame:
     df = df.copy()
 
-    for c in ["T_days", "rv20", "abs_log_m", "x_logit_prn"]:
+    for c in [
+        "T_days",
+        "T_years",
+        "rv20",
+        "r",
+        "log_m",
+        "abs_log_m",
+        "rel_spread_median",
+        "n_chain_raw",
+        "n_chain_used",
+        "n_band_raw",
+        "n_band_inside",
+        "dropped_intrinsic",
+        "asof_fallback_days",
+        "expiry_fallback_days",
+        "pRN",
+        "pRN_raw",
+        "x_logit_prn",
+    ]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
+    # Compute log_m if requested and missing (safe: uses as-of spot only).
+    if "log_m" in requested_features and "log_m" not in df.columns:
+        if ("K" in df.columns) and ("S_asof_close" in df.columns):
+            K = _numeric_series(df, "K").to_numpy(dtype=float)
+            S0 = _numeric_series(df, "S_asof_close").to_numpy(dtype=float)
+            df["log_m"] = np.log(np.clip(K, 1e-12, None) / np.clip(S0, 1e-12, None))
+
+    if "abs_log_m" in requested_features and "abs_log_m" not in df.columns:
+        if "log_m" in df.columns:
+            df["abs_log_m"] = pd.to_numeric(df["log_m"], errors="coerce").abs()
+
+    # Horizon transforms
+    if "log_T_days" in requested_features:
+        T_days = _numeric_series(df, "T_days")
+        df["log_T_days"] = np.log1p(T_days.clip(lower=0))
+
+    need_sqrt_T = any(
+        f in requested_features for f in ["sqrt_T_years", "rv20_sqrtT", "log_m_over_volT", "abs_log_m_over_volT"]
+    )
+    if need_sqrt_T:
+        if "T_years" in df.columns:
+            T_years = _numeric_series(df, "T_years")
+        else:
+            T_years = _numeric_series(df, "T_days") / 365.0
+        df["sqrt_T_years"] = np.sqrt(T_years.clip(lower=0))
+
+    if "rv20_sqrtT" in requested_features:
+        df["rv20_sqrtT"] = _numeric_series(df, "rv20") * _numeric_series(df, "sqrt_T_years")
+
+    if ("log_m_over_volT" in requested_features) or ("abs_log_m_over_volT" in requested_features):
+        denom = _numeric_series(df, "rv20") * _numeric_series(df, "sqrt_T_years")
+        denom = denom.replace(0, np.nan)
+        if "log_m_over_volT" in requested_features:
+            df["log_m_over_volT"] = _numeric_series(df, "log_m") / denom
+        if "abs_log_m_over_volT" in requested_features:
+            df["abs_log_m_over_volT"] = _numeric_series(df, "abs_log_m") / denom
+
+    # Liquidity / quality transforms
+    if "log_rel_spread" in requested_features:
+        rs = _numeric_series(df, "rel_spread_median").clip(lower=0)
+        df["log_rel_spread"] = np.log1p(rs)
+
+    if "chain_used_frac" in requested_features:
+        df["chain_used_frac"] = _safe_divide(_numeric_series(df, "n_chain_used"), _numeric_series(df, "n_chain_raw"))
+
+    if "band_inside_frac" in requested_features:
+        df["band_inside_frac"] = _safe_divide(_numeric_series(df, "n_band_inside"), _numeric_series(df, "n_band_raw"))
+
+    if "drop_intrinsic_frac" in requested_features:
+        df["drop_intrinsic_frac"] = _safe_divide(_numeric_series(df, "dropped_intrinsic"), _numeric_series(df, "n_chain_raw"))
+
+    if "fallback_any" in requested_features:
+        a = _numeric_series(df, "asof_fallback_days").fillna(0)
+        e = _numeric_series(df, "expiry_fallback_days").fillna(0)
+        df["fallback_any"] = ((a > 0) | (e > 0)).astype(float)
+
+    if "prn_raw_gap" in requested_features:
+        df["prn_raw_gap"] = _numeric_series(df, "pRN") - _numeric_series(df, "pRN_raw")
+
+    # Interactions with logit(pRN) (optional)
     if "x_prn_x_tdays" in requested_features and "x_prn_x_tdays" not in df.columns:
-        df["x_prn_x_tdays"] = df.get("x_logit_prn", np.nan) * df.get("T_days", np.nan)
+        df["x_prn_x_tdays"] = _numeric_series(df, "x_logit_prn") * _numeric_series(df, "T_days")
 
     if "x_prn_x_rv20" in requested_features and "x_prn_x_rv20" not in df.columns:
-        df["x_prn_x_rv20"] = df.get("x_logit_prn", np.nan) * df.get("rv20", np.nan)
+        df["x_prn_x_rv20"] = _numeric_series(df, "x_logit_prn") * _numeric_series(df, "rv20")
+
+    if "x_prn_x_logm" in requested_features and "x_prn_x_logm" not in df.columns:
+        df["x_prn_x_logm"] = _numeric_series(df, "x_logit_prn") * _numeric_series(df, "log_m")
 
     return df
 
@@ -411,10 +539,16 @@ def mask_weeks_before(df: pd.DataFrame, week_col: str, strictly_before: pd.Times
 def split_train_calib_weeks(
     train_weeks_sorted: np.ndarray,
     calib_frac_of_train: float,
+    *,
+    use_calib: bool,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Given sorted weeks used for training, take last fraction as calib weeks."""
+    """Given sorted weeks used for training, take last fraction as calib weeks (optional)."""
     w = pd.to_datetime(pd.Series(train_weeks_sorted)).sort_values().to_numpy()
+    if (not use_calib) or (calib_frac_of_train <= 0):
+        return w, w[:0]
     n = len(w)
+    if n < 2:
+        return w, w[:0]
     n_calib = max(1, int(round(n * calib_frac_of_train)))
     n_calib = min(n_calib, n - 1)  # ensure at least 1 week train_fit
     train_fit_weeks = w[:-n_calib]
@@ -510,7 +644,11 @@ def main() -> None:
     ap.add_argument("--ticker-col", default="ticker")
     ap.add_argument("--weight-col", default=None)
 
-    ap.add_argument("--features", default="x_logit_prn,T_days,abs_log_m,rv20")
+    ap.add_argument(
+        "--features",
+        default="x_logit_prn,log_m,abs_log_m,T_days,sqrt_T_years,rv20,rv20_sqrtT,log_m_over_volT,log_rel_spread,chain_used_frac,band_inside_frac,drop_intrinsic_frac,asof_fallback_days,split_events_in_preload_range,prn_raw_gap",
+    )
+    ap.add_argument("--categorical-features", default="spot_scale_used")
     ap.add_argument("--add-interactions", action="store_true")
     ap.add_argument("--calibrate", choices=["none", "platt"], default="none")
 
@@ -529,6 +667,15 @@ def main() -> None:
     ap.add_argument("--random-state", type=int, default=7)
 
     args = ap.parse_args()
+    calibration_requested = args.calibrate
+    if args.test_weeks <= 0:
+        raise ValueError("--test-weeks must be >= 1.")
+    if args.val_windows <= 0 or args.val_window_weeks <= 0:
+        raise ValueError("--val-windows and --val-window-weeks must be >= 1.")
+    if args.n_bins < 2:
+        raise ValueError("--n-bins must be >= 2.")
+    if not (0.0 <= args.calib_frac_of_train < 1.0):
+        raise ValueError("--calib-frac-of-train must be in [0,1).")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -575,24 +722,56 @@ def main() -> None:
     if "pRN" not in df.columns:
         raise ValueError("CSV missing pRN.")
     df["pRN"] = pd.to_numeric(df["pRN"], errors="coerce").clip(EPS, 1.0 - EPS)
+    df = df[np.isfinite(df["pRN"])].copy()
+    if df.empty:
+        raise ValueError("No rows left after filtering finite pRN.")
     df["x_logit_prn"] = _logit(df["pRN"].to_numpy(dtype=float))
 
     # Features
     requested = parse_feature_list(args.features)
     if args.add_interactions:
-        if "T_days" in df.columns and "x_prn_x_tdays" not in requested:
+        if ("T_days" in df.columns or "T_days" in requested) and "x_prn_x_tdays" not in requested:
             requested.append("x_prn_x_tdays")
-        if "rv20" in df.columns and "x_prn_x_rv20" not in requested:
+        if ("rv20" in df.columns or "rv20" in requested) and "x_prn_x_rv20" not in requested:
             requested.append("x_prn_x_rv20")
+        if ("log_m" in df.columns or "log_m" in requested) and "x_prn_x_logm" not in requested:
+            requested.append("x_prn_x_logm")
 
     df = ensure_engineered_features(df, requested)
 
-    pres = feature_presence_report(df, requested)
+    # Categorical features (ticker + optional extras)
+    extra_cat = parse_categorical_list(args.categorical_features)
+    cat_features = dedupe_preserve_order([args.ticker_col] + extra_cat)
+
+    # Ensure no overlap between numeric and categorical
+    overlap = sorted(set(requested) & set(cat_features))
+    if overlap:
+        raise ValueError(f"Features overlap numeric & categorical lists: {overlap}")
+
+    pres_num = feature_presence_report(df, requested, kind="numeric")
+    pres_cat = feature_presence_report(df, cat_features, kind="categorical")
+
     print("\n=== FEATURE PRESENCE (numeric) ===")
-    print(pres.to_string(index=False))
-    missing = pres.loc[~pres["present"], "feature"].tolist()
+    print(pres_num.to_string(index=False))
+    missing = pres_num.loc[~pres_num["present"], "feature"].tolist()
     if missing:
         raise ValueError(f"Requested features missing from CSV: {missing}")
+    all_missing = pres_num.loc[pres_num["non_missing"] == 0, "feature"].tolist()
+    if all_missing:
+        print(f"[WARN] Dropping all-missing features (entire dataset): {all_missing}")
+        requested = [c for c in requested if c not in all_missing]
+    if not requested:
+        raise ValueError("No numeric features left after dropping all-missing features.")
+
+    print("\n=== FEATURE PRESENCE (categorical) ===")
+    print(pres_cat.to_string(index=False))
+    missing_cat = pres_cat.loc[~pres_cat["present"], "feature"].tolist()
+    if missing_cat:
+        raise ValueError(f"Requested categorical features missing from CSV: {missing_cat}")
+
+    # Ensure categorical columns are string and non-missing
+    for c in cat_features:
+        df[c] = df[c].astype("string").fillna("UNKNOWN")
 
     # Weights
     if weight_col is None:
@@ -623,7 +802,7 @@ def main() -> None:
 
     # Helper to subset rows
     def subset(mask: np.ndarray) -> Tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray]:
-        Xsub = df.loc[mask, requested + [args.ticker_col]].copy()
+        Xsub = df.loc[mask, requested + cat_features].copy()
         ysub = df.loc[mask, target_col].astype(int).to_numpy()
         wsub = df.loc[mask, weight_col].astype(float).to_numpy()
         weeksub = df.loc[mask, args.week_col].to_numpy()
@@ -637,6 +816,7 @@ def main() -> None:
     C_grid = [float(x) for x in args.C_grid.split(",") if x.strip()]
     if not C_grid:
         raise ValueError("Empty --C-grid.")
+    use_calib = args.calibrate == "platt"
 
     # Rolling evaluation for each C
     roll_rows: List[Dict[str, object]] = []
@@ -653,7 +833,6 @@ def main() -> None:
             # Train mask: weeks strictly before window_start (and also strictly before test block)
             m_train = mask_weeks_before(df, args.week_col, wspec.window_start)
             # Evaluate mask: weeks in this window
-            window_weeks = pd.date_range(wspec.window_start, wspec.window_end, freq="7D")  # not used for filtering
             m_val = (df[args.week_col] >= wspec.window_start) & (df[args.week_col] <= wspec.window_end)
             m_val = m_val.to_numpy()
 
@@ -670,7 +849,12 @@ def main() -> None:
             train_weeks_used = np.array(sorted(pd.unique(df.loc[m_train, args.week_col])))
 
             # Split train_fit/calib weeks (calib only used if platt)
-            train_fit_weeks, calib_weeks = split_train_calib_weeks(train_weeks_used, args.calib_frac_of_train)
+            use_platt_window = use_calib
+            train_fit_weeks, calib_weeks = split_train_calib_weeks(
+                train_weeks_used,
+                args.calib_frac_of_train,
+                use_calib=use_platt_window,
+            )
 
             m_trainfit = m_train & mask_weeks(df, args.week_col, train_fit_weeks)
             m_calib = m_train & mask_weeks(df, args.week_col, calib_weeks)
@@ -678,6 +862,13 @@ def main() -> None:
             X_trainfit, y_trainfit, w_trainfit_raw, wk_trainfit = subset(m_trainfit)
             X_calib, y_calib, w_calib_raw, wk_calib = subset(m_calib)
             X_val, y_val, w_val, wk_val = subset(m_val)
+            if use_platt_window and len(y_calib) < MIN_CALIB_ROWS:
+                # Fall back to full training set if calib slice is too small.
+                use_platt_window = False
+                m_trainfit = m_train
+                m_calib = np.zeros_like(m_train, dtype=bool)
+                X_trainfit, y_trainfit, w_trainfit_raw, wk_trainfit = subset(m_trainfit)
+                X_calib, y_calib, w_calib_raw, wk_calib = subset(m_calib)
 
             # Fit weights: decay + renorm (fit-time only)
             w_fit = w_trainfit_raw.copy()
@@ -688,7 +879,7 @@ def main() -> None:
 
             pipe = make_pipeline(
                 numeric_features=requested,
-                ticker_col=args.ticker_col,
+                categorical_features=cat_features,
                 C=C,
                 random_state=args.random_state,
             )
@@ -699,18 +890,14 @@ def main() -> None:
             p_val_base = baseline_pred(m_val)
 
             # Optional Platt (fit on CALIB slice only)
-            if args.calibrate == "platt":
-                if len(y_calib) < 50:
-                    # not enough calib; fall back to base
-                    pass
-                else:
-                    z_cal = pipe.decision_function(X_calib)
-                    w_cal_fit = w_calib_raw.copy()
-                    if args.fit_weight_renorm == "mean1":
-                        w_cal_fit = renorm_fit_weights_mean1(w_cal_fit)
-                    cal = fit_platt_on_logits(z_cal, y_calib, w_cal_fit, random_state=args.random_state)
-                    z_val = pipe.decision_function(X_val)
-                    p_val_model = apply_platt(cal, z_val)
+            if use_platt_window:
+                z_cal = pipe.decision_function(X_calib)
+                w_cal_fit = w_calib_raw.copy()
+                if args.fit_weight_renorm == "mean1":
+                    w_cal_fit = renorm_fit_weights_mean1(w_cal_fit)
+                cal = fit_platt_on_logits(z_cal, y_calib, w_cal_fit, random_state=args.random_state)
+                z_val = pipe.decision_function(X_val)
+                p_val_model = apply_platt(cal, z_val)
 
             # Window metrics
             ll_model = float(log_loss(y_val, np.clip(p_val_model, EPS, 1.0 - EPS), labels=[0, 1], sample_weight=w_val))
@@ -758,15 +945,17 @@ def main() -> None:
     # -----------------------------
     # Final fit: train on ALL pretest weeks (strictly before test block)
     # -----------------------------
-    test_start = pd.Timestamp(test_block_weeks[0])
-
     # Masks for final fit / eval
     m_pretest = mask_weeks(df, args.week_col, pretest_weeks)  # all weeks before TEST
     m_test = mask_weeks(df, args.week_col, test_block_weeks)
 
     # Train weeks used for final fit: all pretest weeks
     train_weeks_used = np.array(sorted(pd.unique(df.loc[m_pretest, args.week_col])))
-    train_fit_weeks, calib_weeks = split_train_calib_weeks(train_weeks_used, args.calib_frac_of_train)
+    train_fit_weeks, calib_weeks = split_train_calib_weeks(
+        train_weeks_used,
+        args.calib_frac_of_train,
+        use_calib=use_calib,
+    )
 
     # Val pool: the same last block of pretest weeks used by rolling windows
     val_pool_weeks = pretest_weeks[-(args.val_windows * args.val_window_weeks):]
@@ -780,6 +969,17 @@ def main() -> None:
     X_calib, y_calib, w_calib_raw, wk_calib = subset(m_calib)
     X_valpool, y_valpool, w_valpool, wk_valpool = subset(m_val_pool)
     X_test, y_test, w_test, wk_test = subset(m_test)
+
+    if use_calib and len(y_calib) < MIN_CALIB_ROWS:
+        print(f"[WARN] CALIB rows={len(y_calib)} < {MIN_CALIB_ROWS}; refitting without calibration.")
+        use_calib = False
+        args.calibrate = "none"
+        train_fit_weeks = train_weeks_used
+        calib_weeks = train_weeks_used[:0]
+        m_trainfit = m_pretest
+        m_calib = np.zeros_like(m_pretest, dtype=bool)
+        X_trainfit, y_trainfit, w_trainfit_raw, wk_trainfit = subset(m_trainfit)
+        X_calib, y_calib, w_calib_raw, wk_calib = subset(m_calib)
 
     # -----------------------------
     # Sanity checks: non-missing counts by split, and drop all-missing-in-trainfit features
@@ -810,10 +1010,10 @@ def main() -> None:
         requested = [c for c in requested if c not in drop_cols]
 
         # Rebuild subsets with updated feature list
-        X_trainfit = df.loc[m_trainfit, requested + [args.ticker_col]].copy()
-        X_calib = df.loc[m_calib, requested + [args.ticker_col]].copy()
-        X_valpool = df.loc[m_val_pool, requested + [args.ticker_col]].copy()
-        X_test = df.loc[m_test, requested + [args.ticker_col]].copy()
+        X_trainfit = df.loc[m_trainfit, requested + cat_features].copy()
+        X_calib = df.loc[m_calib, requested + cat_features].copy()
+        X_valpool = df.loc[m_val_pool, requested + cat_features].copy()
+        X_test = df.loc[m_test, requested + cat_features].copy()
 
         # Ensure numeric types remain clean
         for c in requested:
@@ -824,6 +1024,8 @@ def main() -> None:
 
     print("\n=== FINAL FEATURES USED FOR FIT ===")
     print(requested)
+    print("\n=== FINAL CATEGORICAL FEATURES USED FOR FIT ===")
+    print(cat_features)
 
     # -----------------------------
     # Fit weights: decay + renorm (fit-time only)
@@ -846,7 +1048,7 @@ def main() -> None:
     # -----------------------------
     pipe_final = make_pipeline(
         numeric_features=requested,
-        ticker_col=args.ticker_col,
+        categorical_features=cat_features,
         C=best_C,
         random_state=args.random_state,
     )
@@ -854,26 +1056,88 @@ def main() -> None:
 
     # Optional Platt calibrator (fit ONLY on CALIB)
     platt_cal = None
-    if args.calibrate == "platt":
-        if len(y_calib) < 50:
-            print("[WARN] Not enough CALIB rows for Platt; skipping calibration.")
-            args.calibrate = "none"
-        else:
-            z_cal = pipe_final.decision_function(X_calib)
-            w_cal_fit = w_calib_raw.copy()
-            if args.fit_weight_renorm == "mean1":
-                w_cal_fit = renorm_fit_weights_mean1(w_cal_fit)
-            platt_cal = fit_platt_on_logits(z_cal, y_calib, w_cal_fit, random_state=args.random_state)
+    if use_calib:
+        z_cal = pipe_final.decision_function(X_calib)
+        w_cal_fit = w_calib_raw.copy()
+        if args.fit_weight_renorm == "mean1":
+            w_cal_fit = renorm_fit_weights_mean1(w_cal_fit)
+        platt_cal = fit_platt_on_logits(z_cal, y_calib, w_cal_fit, random_state=args.random_state)
 
     # Bundle model for saving/inference
-    model_kind = "logit+platt" if (args.calibrate == "platt") else "logit"
+    model_kind = "logit+platt" if use_calib else "logit"
     final_bundle = FinalModelBundle(
         kind=model_kind,
         numeric_features=requested,
         ticker_col=args.ticker_col,
+        categorical_features=cat_features,
         base_pipeline=pipe_final,
         platt_calibrator=platt_cal,
     )
+
+    # -----------------------------
+    # OOS model for VAL_POOL metrics (train strictly before val_pool)
+    # -----------------------------
+    eval_bundle = final_bundle
+    model_kind_val = model_kind
+    train_weeks_eval: Optional[np.ndarray] = None
+    use_calib_eval_used: Optional[bool] = None
+    val_pool_start = pd.Timestamp(val_pool_weeks[0])
+    m_oos_train = mask_weeks_before(df, args.week_col, val_pool_start) & m_pretest
+    if m_oos_train.sum() < 100:
+        print("[WARN] Not enough pre-val data for OOS VAL_POOL; using final model (in-sample) for val_pool metrics.")
+    else:
+        train_weeks_eval = np.array(sorted(pd.unique(df.loc[m_oos_train, args.week_col])))
+        use_calib_eval = use_calib
+        train_fit_weeks_eval, calib_weeks_eval = split_train_calib_weeks(
+            train_weeks_eval,
+            args.calib_frac_of_train,
+            use_calib=use_calib_eval,
+        )
+        m_trainfit_eval = m_oos_train & mask_weeks(df, args.week_col, train_fit_weeks_eval)
+        m_calib_eval = m_oos_train & mask_weeks(df, args.week_col, calib_weeks_eval)
+
+        X_trainfit_eval, y_trainfit_eval, w_trainfit_eval_raw, wk_trainfit_eval = subset(m_trainfit_eval)
+        X_calib_eval, y_calib_eval, w_calib_eval_raw, wk_calib_eval = subset(m_calib_eval)
+
+        if use_calib_eval and len(y_calib_eval) < MIN_CALIB_ROWS:
+            use_calib_eval = False
+            m_trainfit_eval = m_oos_train
+            m_calib_eval = np.zeros_like(m_oos_train, dtype=bool)
+            X_trainfit_eval, y_trainfit_eval, w_trainfit_eval_raw, wk_trainfit_eval = subset(m_trainfit_eval)
+            X_calib_eval, y_calib_eval, w_calib_eval_raw, wk_calib_eval = subset(m_calib_eval)
+
+        w_fit_eval = w_trainfit_eval_raw.copy()
+        if args.train_decay_half_life_weeks and args.train_decay_half_life_weeks > 0:
+            w_fit_eval = apply_recency_decay(w_fit_eval, wk_trainfit_eval, half_life_weeks=args.train_decay_half_life_weeks)
+        if args.fit_weight_renorm == "mean1":
+            w_fit_eval = renorm_fit_weights_mean1(w_fit_eval)
+
+        pipe_eval = make_pipeline(
+            numeric_features=requested,
+            categorical_features=cat_features,
+            C=best_C,
+            random_state=args.random_state,
+        )
+        pipe_eval.fit(X_trainfit_eval, y_trainfit_eval, clf__sample_weight=w_fit_eval)
+
+        platt_eval = None
+        if use_calib_eval:
+            z_cal = pipe_eval.decision_function(X_calib_eval)
+            w_cal_fit = w_calib_eval_raw.copy()
+            if args.fit_weight_renorm == "mean1":
+                w_cal_fit = renorm_fit_weights_mean1(w_cal_fit)
+            platt_eval = fit_platt_on_logits(z_cal, y_calib_eval, w_cal_fit, random_state=args.random_state)
+
+        model_kind_val = "logit+platt" if use_calib_eval else "logit"
+        use_calib_eval_used = use_calib_eval
+        eval_bundle = FinalModelBundle(
+            kind=model_kind_val,
+            numeric_features=requested,
+            ticker_col=args.ticker_col,
+            categorical_features=cat_features,
+            base_pipeline=pipe_eval,
+            platt_calibrator=platt_eval,
+        )
 
     # -----------------------------
     # Predictions + Metrics (VAL_POOL + TEST)
@@ -881,8 +1145,8 @@ def main() -> None:
     p_base_val = df.loc[m_val_pool, "pRN"].to_numpy(dtype=float)
     p_base_test = df.loc[m_test, "pRN"].to_numpy(dtype=float)
 
-    p_model_val = final_bundle.predict_proba_from_df(df.loc[m_val_pool, requested + [args.ticker_col, "pRN"]])
-    p_model_test = final_bundle.predict_proba_from_df(df.loc[m_test, requested + [args.ticker_col, "pRN"]])
+    p_model_val = eval_bundle.predict_proba_from_df(df.loc[m_val_pool, requested + cat_features + ["pRN"]])
+    p_model_test = final_bundle.predict_proba_from_df(df.loc[m_test, requested + cat_features + ["pRN"]])
 
     # Metrics
     met_base_val = evaluate(y_valpool, p_base_val, w=w_valpool, n_bins=args.n_bins)
@@ -908,7 +1172,7 @@ def main() -> None:
     metrics_rows = [
         {"model": "baseline_pRN", "split": "val_pool", **met_base_val, "n": int(len(y_valpool)), "weight_sum": float(np.sum(w_valpool))},
         {"model": "baseline_pRN", "split": "test", **met_base_test, "n": int(len(y_test)), "weight_sum": float(np.sum(w_test))},
-        {"model": model_kind + f"_C={best_C:g}", "split": "val_pool", **met_model_val, "n": int(len(y_valpool)), "weight_sum": float(np.sum(w_valpool))},
+        {"model": model_kind_val + f"_C={best_C:g}", "split": "val_pool", **met_model_val, "n": int(len(y_valpool)), "weight_sum": float(np.sum(w_valpool))},
         {"model": model_kind + f"_C={best_C:g}", "split": "test", **met_model_test, "n": int(len(y_test)), "weight_sum": float(np.sum(w_test))},
         {"model": "rolling_selection", "split": "avg_over_windows",
          "logloss": avg_roll_ll, "brier": float("nan"), "ece": float("nan"),
@@ -920,6 +1184,8 @@ def main() -> None:
     print("\n=== FINAL FIT SUMMARY ===")
     print(f"best_C (rolling avg): {best_C:g}")
     print(f"calibration: {args.calibrate}")
+    if model_kind_val != model_kind:
+        print(f"val_pool_model_kind: {model_kind_val} (OOS)")
     print("\n=== METRICS (VAL_POOL + TEST) ===")
     # Sort for readability
     show_cols = [c for c in ["model", "split", "logloss", "brier", "ece", "n", "weight_sum",
@@ -935,7 +1201,7 @@ def main() -> None:
     # -----------------------------
     rel = pd.concat([
         reliability_table(y_valpool, p_base_val, n_bins=args.n_bins, w=w_valpool, label="val_pool__baseline_pRN"),
-        reliability_table(y_valpool, p_model_val, n_bins=args.n_bins, w=w_valpool, label=f"val_pool__{model_kind}_C={best_C:g}"),
+        reliability_table(y_valpool, p_model_val, n_bins=args.n_bins, w=w_valpool, label=f"val_pool__{model_kind_val}_C={best_C:g}"),
         reliability_table(y_test, p_base_test, n_bins=args.n_bins, w=w_test, label="test__baseline_pRN"),
         reliability_table(y_test, p_model_test, n_bins=args.n_bins, w=w_test, label=f"test__{model_kind}_C={best_C:g}"),
     ], ignore_index=True)
@@ -962,11 +1228,16 @@ def main() -> None:
         "target_col": target_col,
         "week_col": args.week_col,
         "ticker_col": args.ticker_col,
+        "categorical_features_requested": parse_categorical_list(args.categorical_features),
+        "categorical_features_used": cat_features,
         "weight_col": weight_col,
         "features_requested": parse_feature_list(args.features),
         "features_used_final": requested,
         "add_interactions": bool(args.add_interactions),
-        "calibration": args.calibrate,
+        "calibration_requested": calibration_requested,
+        "calibration_used": args.calibrate,
+        "model_kind_val_pool": model_kind_val,
+        "model_kind_test": model_kind,
         "C_grid": C_grid,
         "best_C": best_C,
         "rolling": {
@@ -986,6 +1257,11 @@ def main() -> None:
             "calib_weeks_range": [str(pd.Timestamp(calib_weeks[0]).date()), str(pd.Timestamp(calib_weeks[-1]).date())] if len(calib_weeks) else None,
             "val_pool_weeks_range": [str(pd.Timestamp(val_pool_weeks[0]).date()), str(pd.Timestamp(val_pool_weeks[-1]).date())] if len(val_pool_weeks) else None,
             "test_weeks_range": [str(pd.Timestamp(test_block_weeks[0]).date()), str(pd.Timestamp(test_block_weeks[-1]).date())],
+        },
+        "val_pool_oos": {
+            "used": train_weeks_eval is not None,
+            "train_weeks_range": [str(pd.Timestamp(train_weeks_eval[0]).date()), str(pd.Timestamp(train_weeks_eval[-1]).date())] if isinstance(train_weeks_eval, np.ndarray) and len(train_weeks_eval) else None,
+            "use_calib": use_calib_eval_used,
         },
         "fit_weights": {
             "fit_weight_renorm": args.fit_weight_renorm,
@@ -1007,5 +1283,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

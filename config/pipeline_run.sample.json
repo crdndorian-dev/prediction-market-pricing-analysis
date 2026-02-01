@@ -1,0 +1,42 @@
+{
+  "version": "1.0",
+  "run_tag": "sample_june_2023",
+  "stage1": {
+    "script": "src/scripts/1-option-chain-build-historic-dataset-v1.0.py",
+    "args": {
+      "out_dir": "src/data/raw",
+      "out_name": "options_chain_dataset.csv",
+      "drops_name": "option_chain_historic_dataset_drops.csv",
+      "tickers": "NVDA,AAPL,GOOGL,MSFT,META,AMZN,PLTR",
+      "start": "2023-06-01",
+      "end": "2023-06-30",
+      "strike_range": 0,
+      "min_band_strikes": 6,
+      "min_band_prn_strikes": 4,
+      "min_prn_train": 0.08,
+      "max_prn_train": 0.92,
+      "prefer_bidask": true,
+      "min_chain_used_hard": 0,
+      "write_drops": true,
+      "verbose_skips": false,
+      "rates_csv": null
+    }
+  },
+  "stage2": {
+    "script": "src/scripts/2-calibrate-logit-model-v1.5.py",
+    "args": {
+      "csv": "src/data/raw/options_chain_dataset.csv",
+      "out_dir": "src/data/models/v1-5-ticker-intercepts",
+      "features": "x_logit_prn,log_m,abs_log_m,T_days,rv20",
+      "categorical_features": "",
+      "calibrate": "platt",
+      "test_weeks": 20,
+      "val_windows": 4,
+      "val_window_weeks": 10,
+      "fit_weight_renorm": "mean1",
+      "train_decay_half_life_weeks": 52,
+      "schema": "config/options_dataset_schema.json",
+      "feature_allowlist": "config/feature_allowlist.json"
+    }
+  }
+}

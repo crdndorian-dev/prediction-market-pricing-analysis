@@ -1,0 +1,49 @@
+{
+  "schema_version": "1.0",
+  "required_columns": [
+    "ticker",
+    "week_friday",
+    "asof_date",
+    "K",
+    "S_asof_close",
+    "pRN",
+    "outcome_ST_gt_K"
+  ],
+  "optional_columns": [
+    "week_monday",
+    "S_expiry_close",
+    "T_days",
+    "T_years",
+    "r",
+    "r_used",
+    "r_curve_date",
+    "r_tenor_days",
+    "log_m",
+    "abs_log_m",
+    "rv20",
+    "rel_spread_median",
+    "n_chain_raw",
+    "n_chain_used",
+    "n_band_raw",
+    "n_band_inside",
+    "dropped_intrinsic",
+    "asof_fallback_days",
+    "expiry_fallback_days",
+    "pRN_raw",
+    "group_id",
+    "median_dK",
+    "min_dK",
+    "quality_weight",
+    "sample_weight_final"
+  ],
+  "allow_extra_columns": true,
+  "recommended_dtypes": {
+    "ticker": "string",
+    "week_friday": "datetime",
+    "asof_date": "datetime",
+    "K": "float",
+    "S_asof_close": "float",
+    "pRN": "float",
+    "outcome_ST_gt_K": "int"
+  }
+}
