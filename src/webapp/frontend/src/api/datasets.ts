@@ -1,7 +1,19 @@
 export type DatasetRunRequest = {
   outDir?: string;
-  outName?: string;
-  dropsName?: string;
+  datasetName?: string;
+  scheduleMode?: "weekly" | "expiry_range";
+  expiryWeekdays?: string;
+  asofWeekdays?: string;
+  dteList?: string;
+  dteMin?: number;
+  dteMax?: number;
+  dteStep?: number;
+  writeSnapshot?: boolean;
+  writePrnView?: boolean;
+  writeTrainView?: boolean;
+  writeLegacy?: boolean;
+  prnVersion?: string;
+  prnConfigHash?: string;
   tickers?: string;
   start: string;
   end: string;
@@ -93,6 +105,8 @@ export type DatasetRunSummary = {
   run_dir: string;
   dataset_file?: DatasetFileSummary | null;
   drops_file?: DatasetFileSummary | null;
+  training_file?: DatasetFileSummary | null;
+  files?: DatasetFileSummary[] | null;
   last_modified?: string | null;
 };
 
@@ -112,10 +126,27 @@ export type DatasetPreviewResponse = {
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
+export const getDatasetFileUrl = (path: string): string => {
+  const params = new URLSearchParams({ path });
+  return `${API_BASE}/datasets/runs/file?${params.toString()}`;
+};
+
 const datasetRequestBody = (payload: DatasetRunRequest) => ({
   out_dir: payload.outDir,
-  out_name: payload.outName,
-  drops_name: payload.dropsName,
+  dataset_name: payload.datasetName,
+  schedule_mode: payload.scheduleMode,
+  expiry_weekdays: payload.expiryWeekdays,
+  asof_weekdays: payload.asofWeekdays,
+  dte_list: payload.dteList,
+  dte_min: payload.dteMin,
+  dte_max: payload.dteMax,
+  dte_step: payload.dteStep,
+  write_snapshot: payload.writeSnapshot,
+  write_prn_view: payload.writePrnView,
+  write_train_view: payload.writeTrainView,
+  write_legacy: payload.writeLegacy,
+  prn_version: payload.prnVersion,
+  prn_config_hash: payload.prnConfigHash,
   tickers: payload.tickers,
   start: payload.start,
   end: payload.end,
@@ -199,6 +230,75 @@ export async function startDatasetJob(
   return response.json();
 }
 
+export async function renameDatasetRun(
+  runDir: string,
+  newName: string,
+): Promise<DatasetRunSummary> {
+  const response = await fetch(`${API_BASE}/datasets/runs/rename`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ run_dir: runDir, new_name: newName }),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      `Rename run failed (${response.status}): ${detail || "unknown error"}`,
+    );
+  }
+  return response.json();
+}
+
+export async function listDatasetRuns(): Promise<DatasetListResponse> {
+  const response = await fetch(`${API_BASE}/datasets/runs`);
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      `Dataset runs request failed (${response.status}): ${detail || "unknown error"}`,
+    );
+  }
+
+  return response.json();
+}
+
+export async function previewDatasetFile(
+  path: string,
+  mode: "head" | "tail",
+  limit = 20,
+): Promise<DatasetPreviewResponse> {
+  const params = new URLSearchParams({
+    path,
+    mode,
+    limit: limit.toString(),
+  });
+  const response = await fetch(
+    `${API_BASE}/datasets/runs/preview?${params.toString()}`,
+  );
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      `Dataset preview failed (${response.status}): ${detail || "unknown error"}`,
+    );
+  }
+  return response.json();
+}
+
+export async function deleteDatasetRun(
+  runDir: string,
+): Promise<DatasetRunSummary> {
+  const params = new URLSearchParams({ run_dir: runDir });
+  const response = await fetch(
+    `${API_BASE}/datasets/runs?${params.toString()}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      `Dataset delete failed (${response.status}): ${detail || "unknown error"}`,
+    );
+  }
+  return response.json();
+}
+
 export async function getDatasetJob(jobId: string): Promise<DatasetJobStatus> {
   const response = await fetch(`${API_BASE}/datasets/jobs/${jobId}`, {
     method: "GET",
@@ -220,50 +320,6 @@ export async function killDatasetJob(jobId: string): Promise<DatasetJobStatus> {
     const detail = await response.text();
     throw new Error(
       `Failed to cancel dataset job (${response.status}): ${detail || "unknown error"}`,
-    );
-  }
-  return response.json();
-}
-
-export async function fetchDatasetRuns(): Promise<DatasetListResponse> {
-  const response = await fetch(`${API_BASE}/datasets/runs`);
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(
-      `Failed to list dataset runs (${response.status}): ${detail || "unknown error"}`,
-    );
-  }
-  return response.json();
-}
-
-export async function previewDatasetFile(
-  path: string,
-  options?: { limit?: number; mode?: "head" | "tail" },
-): Promise<DatasetPreviewResponse> {
-  const params = new URLSearchParams({ path });
-  params.set("limit", String(options?.limit ?? 20));
-  params.set("mode", options?.mode ?? "head");
-  const response = await fetch(`${API_BASE}/datasets/runs/preview?${params}`);
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(
-      `Failed to preview dataset (${response.status}): ${detail || "unknown error"}`,
-    );
-  }
-  return response.json();
-}
-
-export async function deleteDatasetRun(
-  runDir: string,
-): Promise<DatasetRunSummary> {
-  const params = new URLSearchParams({ run_dir: runDir });
-  const response = await fetch(`${API_BASE}/datasets/runs?${params}`, {
-    method: "DELETE",
-  });
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(
-      `Failed to delete dataset run (${response.status}): ${detail || "unknown error"}`,
     );
   }
   return response.json();

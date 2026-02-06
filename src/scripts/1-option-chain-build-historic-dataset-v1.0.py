@@ -8,7 +8,7 @@ import os
 import sys
 import threading
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -23,6 +23,8 @@ except Exception:  # pragma: no cover
 
 
 PM10_TICKERS = ["AAPL", "GOOGL", "MSFT", "META", "AMZN", "PLTR", "NVDA", "NFLX", "OPEN", "TSLA"]
+BUILD_VERSION = os.path.basename(__file__)
+RN_METHOD = "breeden_litzenberger_call_curve"
 
 
 # ----------------------------
@@ -115,6 +117,52 @@ def yyyymmdd(d: date) -> str:
     return d.strftime("%Y%m%d")
 
 
+def iso_ts(d: date) -> str:
+    return datetime(d.year, d.month, d.day, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def compute_row_id(
+    *,
+    asof_ts: str,
+    ticker: str,
+    expiry_date_used: str,
+    strike: float,
+    option_type: str,
+) -> str:
+    payload = f"{asof_ts}|{ticker}|{expiry_date_used}|{strike:.7f}|{option_type}"
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def compute_prn_config_hash(cfg: Config) -> str:
+    payload = {
+        "risk_free_rate": cfg.risk_free_rate,
+        "option_strike_range": cfg.option_strike_range,
+        "retry_full_chain_if_band_thin": cfg.retry_full_chain_if_band_thin,
+        "try_saturday_expiry_fallback": cfg.try_saturday_expiry_fallback,
+        "max_abs_logm": cfg.max_abs_logm,
+        "max_abs_logm_cap": cfg.max_abs_logm_cap,
+        "band_widen_step": cfg.band_widen_step,
+        "adaptive_band": cfg.adaptive_band,
+        "max_band_strikes": cfg.max_band_strikes,
+        "min_strikes_for_curve": cfg.min_strikes_for_curve,
+        "min_strikes_in_prn_band": cfg.min_strikes_in_prn_band,
+        "rel_spread_max_per_strike": cfg.rel_spread_max_per_strike,
+        "intrinsic_tol": cfg.intrinsic_tol,
+        "insane_price_multiple": cfg.insane_price_multiple,
+        "prefer_bidask": cfg.prefer_bidask,
+        "min_trade_count": cfg.min_trade_count,
+        "min_volume": cfg.min_volume,
+        "use_forward_moneyness": cfg.use_forward_moneyness,
+        "dividend_source": cfg.dividend_source,
+        "dividend_lookback_days": cfg.dividend_lookback_days,
+        "dividend_yield_default": cfg.dividend_yield_default,
+        "stock_source": cfg.stock_source,
+        "apply_split_adjustment": cfg.apply_split_adjustment,
+    }
+    raw = "|".join(f"{k}={payload[k]}" for k in sorted(payload))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
 def iso_week_monday(d: date) -> date:
     return d - timedelta(days=d.weekday())
 
@@ -129,6 +177,119 @@ def mondays_in_range(start: date, end: date) -> List[date]:
 
 def asof_days_mon_to_thu(week_monday: date) -> List[date]:
     return [week_monday + timedelta(days=i) for i in range(0, 4)]
+
+
+_WEEKDAY_MAP = {
+    "mon": 0,
+    "monday": 0,
+    "tue": 1,
+    "tues": 1,
+    "tuesday": 1,
+    "wed": 2,
+    "weds": 2,
+    "wednesday": 2,
+    "thu": 3,
+    "thur": 3,
+    "thurs": 3,
+    "thursday": 3,
+    "fri": 4,
+    "friday": 4,
+    "sat": 5,
+    "saturday": 5,
+    "sun": 6,
+    "sunday": 6,
+}
+
+
+def parse_weekdays(raw: str, *, label: str) -> List[int]:
+    if raw is None:
+        return []
+    parts = [p.strip().lower() for p in raw.split(",") if p.strip()]
+    if not parts:
+        return []
+    out: List[int] = []
+    seen = set()
+    for p in parts:
+        if p.isdigit():
+            w = int(p)
+        else:
+            key = p[:3]
+            if key not in _WEEKDAY_MAP:
+                raise SystemExit(f"{label} must use weekdays like mon,tue,... or 0..6 (0=Mon). Got: {p}")
+            w = _WEEKDAY_MAP[key]
+        if w < 0 or w > 6:
+            raise SystemExit(f"{label} weekday out of range 0..6: {w}")
+        if w in seen:
+            continue
+        seen.add(w)
+        out.append(w)
+    return out
+
+
+def parse_dte_list(raw: str) -> List[int]:
+    if raw is None:
+        return []
+    raw = raw.strip()
+    if not raw:
+        return []
+    out: List[int] = []
+    for part in raw.split(","):
+        p = part.strip()
+        if not p:
+            continue
+        if "-" in p:
+            a, b = p.split("-", 1)
+            start = int(a.strip())
+            end = int(b.strip())
+            if end < start:
+                raise SystemExit(f"dte range must be ascending: {p}")
+            out.extend(list(range(start, end + 1)))
+        else:
+            out.append(int(p))
+    deduped: List[int] = []
+    seen = set()
+    for v in out:
+        if v < 0:
+            raise SystemExit(f"dte values must be >= 0; got {v}")
+        if v in seen:
+            continue
+        seen.add(v)
+        deduped.append(v)
+    return deduped
+
+
+def resolve_dte_list(
+    *,
+    dte_list_raw: str,
+    dte_min: Optional[int],
+    dte_max: Optional[int],
+    dte_step: int,
+) -> List[int]:
+    parsed = parse_dte_list(dte_list_raw)
+    if parsed:
+        return parsed
+    if dte_min is None and dte_max is None:
+        return []
+    if dte_step <= 0:
+        raise SystemExit("--dte-step must be >= 1")
+    min_v = int(dte_min) if dte_min is not None else 0
+    max_v = int(dte_max) if dte_max is not None else min_v
+    if max_v < min_v:
+        raise SystemExit("--dte-max must be >= --dte-min")
+    return list(range(min_v, max_v + 1, int(dte_step)))
+
+
+def dates_in_range_by_weekday(start: date, end: date, weekdays: List[int]) -> List[date]:
+    if not weekdays:
+        return []
+    out: List[date] = []
+    wset = set(weekdays)
+    cursor = start
+    while cursor <= end:
+        if cursor.weekday() in wset:
+            out.append(cursor)
+        cursor += timedelta(days=1)
+    return out
 
 
 # ----------------------------
@@ -882,7 +1043,7 @@ def process_one(
     ticker: str,
     asof_target: date,     # snapshot day (Mon/Tue/Wed/Thu)
     week_monday: date,
-    week_friday: date,
+    week_friday: date,     # event end / expiry anchor (legacy name)
     raw_closes_by_ticker: Dict[str, Dict[date, float]],
     adj_closes_by_ticker: Dict[str, Dict[date, float]],
     split_event_counts: Dict[str, int],
@@ -932,6 +1093,7 @@ def process_one(
     # Keep consistent dates (prefer adjusted date choices)
     asof_used = asof_adj
     expiry_close_used = exp_adj
+    asof_ts = iso_ts(asof_used)
 
     # Horizon: always to Friday "event" date (week_friday), not to expiry_close_used fallback.
     # But the option chain itself is for "expiration_used" (Fri or Sat fallback), see below.
@@ -1182,6 +1344,16 @@ def process_one(
         if not (cfg.min_prn_train <= p <= cfg.max_prn_train):
             continue
 
+        K_val = float(np.round(float(K), 7))
+        option_type = "call"
+        row_id = compute_row_id(
+            asof_ts=asof_ts,
+            ticker=ticker,
+            expiry_date_used=expiration_used.isoformat(),
+            strike=K_val,
+            option_type=option_type,
+        )
+
         p_raw = np.nan
         if pRN_raw_targets is not None and i < len(pRN_raw_targets):
             pr = float(pRN_raw_targets[i])
@@ -1189,6 +1361,10 @@ def process_one(
 
         tmp_rows.append(
             {
+                # stable join keys
+                "row_id": row_id,
+                "asof_ts": asof_ts,
+                "option_type": option_type,
                 # identity
                 "ticker": ticker,
                 "week_monday": week_monday.isoformat(),
@@ -1237,11 +1413,11 @@ def process_one(
                 "expiry_fallback_days": int(exp_bwd),
 
                 # strike + moneyness
-                "K": float(np.round(float(K), 7)),
-                "log_m": float(np.round(np.log(float(K) / float(S0_used)), 9)),
-                "abs_log_m": float(np.round(abs(np.log(float(K) / float(S0_used))), 9)),
-                "log_m_fwd": float(np.round(np.log(float(K) / float(forward_used)), 9)) if np.isfinite(forward_used) and forward_used > 0 else np.nan,
-                "abs_log_m_fwd": float(np.round(abs(np.log(float(K) / float(forward_used))), 9)) if np.isfinite(forward_used) and forward_used > 0 else np.nan,
+                "K": K_val,
+                "log_m": float(np.round(np.log(float(K_val) / float(S0_used)), 9)),
+                "abs_log_m": float(np.round(abs(np.log(float(K_val) / float(S0_used))), 9)),
+                "log_m_fwd": float(np.round(np.log(float(K_val) / float(forward_used)), 9)) if np.isfinite(forward_used) and forward_used > 0 else np.nan,
+                "abs_log_m_fwd": float(np.round(abs(np.log(float(K_val) / float(forward_used))), 9)) if np.isfinite(forward_used) and forward_used > 0 else np.nan,
 
                 # vol proxy
                 "rv20": float(np.round(rv20_used, 8)) if np.isfinite(rv20_used) else np.nan,
@@ -1253,7 +1429,7 @@ def process_one(
                 "qRN_raw": float(np.round(1.0 - p_raw, 7)) if np.isfinite(p_raw) else np.nan,
 
                 # realized outcome label (close used at/near Friday)
-                "outcome_ST_gt_K": 1 if float(ST_used) > float(K) else 0,
+                "outcome_ST_gt_K": 1 if float(ST_used) > float(K_val) else 0,
 
                 # band diagnostics
                 "max_abs_logm_start": float(cfg.max_abs_logm),
@@ -1309,6 +1485,251 @@ def process_one(
             rr["quality_weight"] = 1.0
 
     return tmp_rows, None
+
+
+# ----------------------------
+# View builders + checks
+# ----------------------------
+
+def build_snapshot_view(out_df: pd.DataFrame, *, cfg: Config) -> pd.DataFrame:
+    if out_df is None or out_df.empty:
+        return pd.DataFrame(columns=["row_id"])
+
+    required = [
+        "row_id",
+        "asof_ts",
+        "ticker",
+        "option_expiration_requested",
+        "option_expiration_used",
+        "K",
+        "S_asof_close",
+        "S_expiry_close",
+        "asof_fallback_days",
+        "expiry_fallback_days",
+        "T_days",
+    ]
+    missing = [c for c in required if c not in out_df.columns]
+    if missing:
+        raise RuntimeError(f"Snapshot view missing required columns: {missing}")
+
+    used = out_df["option_expiration_used"].astype(str)
+    req = out_df["option_expiration_requested"].astype(str)
+    if "expiry_convention" in out_df.columns:
+        conv = out_df["expiry_convention"].astype(str)
+    else:
+        conv = pd.Series([""] * len(out_df))
+    expiry_used_reason = np.where(
+        used == req,
+        "requested",
+        np.where(conv.str.contains("SAT", case=False, na=False), "fallback_next", "fallback_prev"),
+    )
+
+    if "spot_scale_used" in out_df.columns:
+        spot_scale = out_df["spot_scale_used"].astype(str)
+    else:
+        spot_scale = pd.Series(["raw"] * len(out_df))
+    close_source = f"{cfg.stock_source}_" + spot_scale
+
+    snapshot = pd.DataFrame(
+        {
+            "row_id": out_df["row_id"],
+            "asof_ts": out_df["asof_ts"],
+            "ticker": out_df["ticker"],
+            "option_type": out_df["option_type"] if "option_type" in out_df.columns else pd.Series(["call"] * len(out_df)),
+            "expiry_date_requested": out_df["option_expiration_requested"],
+            "expiry_date_used": out_df["option_expiration_used"],
+            "expiry_used_reason": expiry_used_reason,
+            "event_end_date": out_df.get("week_friday", out_df["option_expiration_requested"]),
+            "event_end_tz": "UTC",
+            "K": out_df["K"],
+            "S0_close_used": out_df["S_asof_close"],
+            "S0_close_source": close_source,
+            "S0_close_lag_days": out_df["asof_fallback_days"],
+            "expiry_close_used": out_df["S_expiry_close"],
+            "expiry_close_source": close_source,
+            "expiry_close_lag_days": out_df["expiry_fallback_days"],
+            "T_days": out_df["T_days"],
+        }
+    )
+
+    extra_cols = [
+        "asof_target",
+        "asof_date",
+        "week_monday",
+        "week_friday",
+        "spot_scale_used",
+        "spot_scale_score_raw",
+        "spot_scale_score_adj",
+        "split_adjustment_applied",
+        "split_events_in_preload_range",
+        "dividend_source_used",
+        "dividend_lookback_days",
+        "dividend_sum_lookback",
+        "dividend_yield_raw",
+        "dividend_yield_adj",
+        "dividend_yield",
+        "forward_price",
+        "moneyness_ref",
+        "moneyness_ref_price",
+        "used_max_abs_logm",
+        "n_band_raw",
+        "n_band_inside",
+        "calls_k_min",
+        "calls_k_max",
+        "theta_quote_source",
+        "n_chain_raw",
+        "n_chain_used",
+        "rel_spread_median",
+        "dropped_liquidity",
+        "dropped_intrinsic",
+        "dropped_insane",
+        "median_dK",
+        "min_dK",
+    ]
+    for col in extra_cols:
+        if col in out_df.columns:
+            snapshot[col] = out_df[col]
+
+    return snapshot
+
+
+def build_prn_view(
+    out_df: pd.DataFrame,
+    *,
+    prn_version: str,
+    prn_config_hash: str,
+) -> pd.DataFrame:
+    if out_df is None or out_df.empty:
+        return pd.DataFrame(columns=["row_id"])
+
+    required = ["row_id", "ticker", "option_expiration_used", "asof_date", "pRN", "pRN_raw"]
+    missing = [c for c in required if c not in out_df.columns]
+    if missing:
+        raise RuntimeError(f"pRN view missing required columns: {missing}")
+
+    asof_date = out_df["asof_date"].astype(str).str.slice(0, 10)
+    curve_id = (
+        out_df["ticker"].astype(str)
+        + "|"
+        + out_df["option_expiration_used"].astype(str)
+        + "|"
+        + asof_date
+        + "|"
+        + RN_METHOD
+        + "|"
+        + prn_version
+    )
+
+    prn_view = pd.DataFrame(
+        {
+            "row_id": out_df["row_id"],
+            "pRN_raw": out_df["pRN_raw"],
+            "pRN": out_df["pRN"],
+            "rn_method": RN_METHOD,
+            "rn_quote_source": out_df.get("theta_quote_source"),
+            "rn_monotone_adjusted": (
+                out_df["prn_monotone_adj_intervals"].astype(bool)
+                if "prn_monotone_adj_intervals" in out_df.columns
+                else pd.Series([False] * len(out_df))
+            )
+            | (
+                out_df["prn_monotone_adj_targets"].astype(bool)
+                if "prn_monotone_adj_targets" in out_df.columns
+                else pd.Series([False] * len(out_df))
+            ),
+            "curve_id": curve_id,
+            "prn_version": prn_version,
+            "prn_config_hash": prn_config_hash,
+            "n_calls_used": out_df.get("n_chain_used"),
+            "calls_k_min": out_df.get("calls_k_min"),
+            "calls_k_max": out_df.get("calls_k_max"),
+            "deltaK": out_df.get("median_dK"),
+            "avg_rel_spread": out_df.get("rel_spread_median"),
+        }
+    )
+
+    return prn_view
+
+
+def require_row_id_unique(df: pd.DataFrame, label: str) -> None:
+    if df is None or df.empty:
+        return
+    if "row_id" not in df.columns:
+        raise RuntimeError(f"[CHECK] row_id missing in {label}")
+    dupes = int(df["row_id"].duplicated().sum())
+    if dupes > 0:
+        raise RuntimeError(f"[CHECK] row_id not unique in {label}: dupes={dupes}")
+
+
+# ----------------------------
+# Schedule builder
+# ----------------------------
+
+def build_schedule_entries(
+    *,
+    start: date,
+    end: date,
+    schedule_mode: str,
+    expiry_weekdays: List[int],
+    asof_weekdays: List[int],
+    dte_list: List[int],
+) -> Tuple[List[Tuple[date, date, date]], Dict[str, int]]:
+    entries: List[Tuple[date, date, date]] = []
+    skipped_after_expiry = 0
+    skipped_out_of_range = 0
+
+    if schedule_mode == "weekly":
+        # Legacy mode: interpret start/end as Monday range.
+        mondays = mondays_in_range(start, end)
+        for mon in mondays:
+            expiry_date = iso_week_friday(mon)
+            week_monday = mon
+            if dte_list:
+                asof_dates = [expiry_date - timedelta(days=int(dte)) for dte in dte_list]
+            else:
+                asof_dates = [week_monday + timedelta(days=int(dow)) for dow in asof_weekdays]
+            seen = set()
+            for asof_date in asof_dates:
+                # No-leakage: snapshots must be <= expiry/event end.
+                if asof_date > expiry_date:
+                    skipped_after_expiry += 1
+                    continue
+                # Respect the legacy date range only when using weekday-based snapshots.
+                if (not dte_list) and (asof_date < start or asof_date > end):
+                    skipped_out_of_range += 1
+                    continue
+                if asof_date in seen:
+                    continue
+                seen.add(asof_date)
+                entries.append((week_monday, expiry_date, asof_date))
+    elif schedule_mode == "expiry_range":
+        # New mode: interpret start/end as expiry date range.
+        expiries = dates_in_range_by_weekday(start, end, expiry_weekdays)
+        for expiry_date in expiries:
+            week_monday = iso_week_monday(expiry_date)
+            if dte_list:
+                asof_dates = [expiry_date - timedelta(days=int(dte)) for dte in dte_list]
+            else:
+                asof_dates = [week_monday + timedelta(days=int(dow)) for dow in asof_weekdays]
+            seen = set()
+            for asof_date in asof_dates:
+                # No-leakage: snapshots must be <= expiry/event end.
+                if asof_date > expiry_date:
+                    skipped_after_expiry += 1
+                    continue
+                if asof_date in seen:
+                    continue
+                seen.add(asof_date)
+                entries.append((week_monday, expiry_date, asof_date))
+    else:
+        raise SystemExit(f"--schedule-mode must be one of: weekly, expiry_range (got {schedule_mode})")
+
+    stats = {
+        "entries": len(entries),
+        "skipped_after_expiry": skipped_after_expiry,
+        "skipped_out_of_range": skipped_out_of_range,
+    }
+    return entries, stats
 
 
 # ----------------------------
@@ -1409,10 +1830,33 @@ def main() -> None:
 
     ap.add_argument("--out-dir", type=str, default="./data/raw/option-chain")
     ap.add_argument("--out-name", type=str, default="pRN__history__mon_thu__PM10__v1.6.0.csv")
+    ap.add_argument("--run-dir-name", type=str, default="", help="Optional run directory name override (no path).")
+    ap.add_argument("--dataset-name", type=str, default="",
+        help="Kebab-case dataset name. When provided, all outputs use {purpose}-{name}.csv naming.")
+    ap.add_argument("--write-snapshot", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--write-prn-view", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--write-train-view", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--write-legacy", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--prn-version", type=str, default="v1")
+    ap.add_argument("--prn-config-hash", type=str, default=None)
+    ap.add_argument("--train-view-name", type=str, default="train_view.csv")
 
     ap.add_argument("--tickers", type=str, default=",".join(PM10_TICKERS))
     ap.add_argument("--start", type=str, required=True, help="YYYY-MM-DD (range used to generate Mondays)")
     ap.add_argument("--end", type=str, required=True, help="YYYY-MM-DD (range used to generate Mondays)")
+    ap.add_argument(
+        "--schedule-mode",
+        type=str,
+        choices=["weekly", "expiry_range"],
+        default="weekly",
+        help="weekly=legacy Mondays range; expiry_range=start/end are expiries.",
+    )
+    ap.add_argument("--expiry-weekdays", type=str, default="fri", help="Expiry weekdays (mon..sun or 0..6).")
+    ap.add_argument("--asof-weekdays", type=str, default="mon,tue,wed,thu", help="As-of weekdays when no DTE list.")
+    ap.add_argument("--dte-list", type=str, default="", help="Comma list of DTEs or ranges (e.g., 1,2,3 or 1-5).")
+    ap.add_argument("--dte-min", type=int, default=None)
+    ap.add_argument("--dte-max", type=int, default=None)
+    ap.add_argument("--dte-step", type=int, default=1)
 
     ap.add_argument("--theta-base-url", type=str, default=Config().theta_base_url)
     ap.add_argument("--stock-source", type=str, default=Config().stock_source, choices=["yfinance", "theta", "auto"])
@@ -1561,7 +2005,24 @@ def main() -> None:
     if cfg.dividend_source == "yfinance" and yf is None:
         raise SystemExit("dividend_source=yfinance requires yfinance installed.")
 
+    prn_version = (args.prn_version or "v1").strip() or "v1"
+    prn_config_hash = (args.prn_config_hash or "").strip() or compute_prn_config_hash(cfg)
+
     theta = ThetaClient(cfg.theta_base_url, timeout_s=cfg.timeout_s, verbose=bool(args.verbose_skips))
+
+    schedule_mode = str(args.schedule_mode or "weekly").strip().lower()
+    expiry_weekdays = parse_weekdays(str(args.expiry_weekdays or ""), label="--expiry-weekdays")
+    asof_weekdays = parse_weekdays(str(args.asof_weekdays or ""), label="--asof-weekdays")
+    dte_list = resolve_dte_list(
+        dte_list_raw=str(args.dte_list or ""),
+        dte_min=args.dte_min,
+        dte_max=args.dte_max,
+        dte_step=int(args.dte_step),
+    )
+    if schedule_mode == "expiry_range" and not expiry_weekdays:
+        raise SystemExit("--expiry-weekdays required when --schedule-mode=expiry_range.")
+    if not dte_list and not asof_weekdays:
+        raise SystemExit("--asof-weekdays required when no DTE list is provided.")
 
     def _clean_args_for_run_dir(argv: List[str]) -> List[str]:
         cleaned: List[str] = []
@@ -1570,10 +2031,10 @@ def main() -> None:
             if skip_next:
                 skip_next = False
                 continue
-            if a in {"--out-dir", "--out-name"}:
+            if a in {"--out-dir", "--out-name", "--run-dir-name", "--dataset-name"}:
                 skip_next = True
                 continue
-            if a.startswith("--out-dir=") or a.startswith("--out-name="):
+            if a.startswith("--out-dir=") or a.startswith("--out-name=") or a.startswith("--run-dir-name=") or a.startswith("--dataset-name="):
                 continue
             cleaned.append(a)
         return cleaned
@@ -1600,24 +2061,98 @@ def main() -> None:
         keep = max_len - len("__sha1=") - len(digest)
         return f"{slug[:keep]}__sha1={digest}"
 
+    def _sanitize_run_dir_name(value: str, max_len: int = 140) -> str:
+        raw = value.strip()
+        if not raw:
+            return ""
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        out = []
+        prev_us = False
+        for ch in raw:
+            if ch in allowed:
+                out.append(ch)
+                prev_us = False
+            else:
+                if not prev_us:
+                    out.append("_")
+                    prev_us = True
+        slug = "".join(out).strip("_")
+        if not slug:
+            return ""
+        if len(slug) <= max_len:
+            return slug
+        digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
+        keep = max_len - len("__sha1=") - len(digest)
+        return f"{slug[:keep]}__sha1={digest}"
+
+    def _to_kebab_case(value: str) -> str:
+        import re as _re
+        raw = value.strip()
+        if not raw:
+            return ""
+        raw = _re.sub(r'[\s_]+', '-', raw)
+        raw = _re.sub(r'[^a-zA-Z0-9-]', '', raw)
+        raw = _re.sub(r'-{2,}', '-', raw)
+        return raw.strip('-').lower()
+
+    dataset_name = _to_kebab_case(str(args.dataset_name or ""))
+
     run_ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    args_for_slug = _clean_args_for_run_dir(sys.argv[1:])
-    args_slug = _slugify_args(args_for_slug)
-    run_dir_name = f"start={start.isoformat()}__end={end.isoformat()}"
-    if args_slug:
-        run_dir_name = f"{run_dir_name}__args={args_slug}"
-    run_dir_name = f"{run_dir_name}__run={run_ts}"
+    custom_run_dir = _sanitize_run_dir_name(str(args.run_dir_name or ""))
+    if dataset_name and not custom_run_dir:
+        run_dir_name = dataset_name
+    elif custom_run_dir:
+        if custom_run_dir.lower().endswith(".csv"):
+            raise SystemExit("--run-dir-name must not include a .csv extension.")
+        run_dir_name = custom_run_dir
+    else:
+        args_for_slug = _clean_args_for_run_dir(sys.argv[1:])
+        args_slug = _slugify_args(args_for_slug)
+        run_dir_name = f"start={start.isoformat()}__end={end.isoformat()}"
+        if args_slug:
+            run_dir_name = f"{run_dir_name}__args={args_slug}"
+        run_dir_name = f"{run_dir_name}__run={run_ts}"
 
     out_base_dir = args.out_dir
     os.makedirs(out_base_dir, exist_ok=True)
     run_dir = os.path.join(out_base_dir, run_dir_name)
     os.makedirs(run_dir, exist_ok=False)
 
-    out_path = os.path.join(run_dir, args.out_name)
-    drops_path = os.path.join(run_dir, args.drops_name)
+    # Resolve output filenames based on --dataset-name or legacy args
+    if dataset_name:
+        legacy_out_name = f"legacy-{dataset_name}.csv"
+        snapshot_out_name = f"snapshot-{dataset_name}.csv"
+        prn_view_out_name = f"prn-view-{dataset_name}.csv"
+        train_view_out_name = f"training-{dataset_name}.csv"
+        drops_out_name = f"drops-{dataset_name}.csv"
+    else:
+        legacy_out_name = args.out_name
+        snapshot_out_name = "snapshot.csv"
+        prn_view_out_name = "prn_view.csv"
+        train_view_out_name = (args.train_view_name or "train_view.csv").strip() or "train_view.csv"
+        drops_out_name = args.drops_name
 
-    mondays = mondays_in_range(start, end)
-    print(f"[PLAN] Weeks={len(mondays)} (Mondays) range={start}..{end} tickers={len(tickers)} snapshots/day=4 (Mon-Thu)")
+    out_path = os.path.join(run_dir, legacy_out_name)
+    drops_path = os.path.join(run_dir, drops_out_name)
+
+    schedule_entries, schedule_stats = build_schedule_entries(
+        start=start,
+        end=end,
+        schedule_mode=schedule_mode,
+        expiry_weekdays=expiry_weekdays,
+        asof_weekdays=asof_weekdays,
+        dte_list=dte_list,
+    )
+    expiries_count = len({exp for _, exp, _ in schedule_entries})
+    asof_hint = f"dte={dte_list}" if dte_list else f"asof_weekdays={asof_weekdays}"
+    print(
+        f"[PLAN] mode={schedule_mode} range={start}..{end} expiries={expiries_count} "
+        f"asof={asof_hint} tickers={len(tickers)}"
+    )
+    if schedule_stats["skipped_after_expiry"] > 0:
+        print(f"[WARN] asof dates after expiry skipped: {schedule_stats['skipped_after_expiry']}")
+    if schedule_stats["skipped_out_of_range"] > 0:
+        print(f"[WARN] asof dates outside range skipped (weekly mode): {schedule_stats['skipped_out_of_range']}")
     print(f"[UNIVERSE] {tickers}")
     print(f"[OUT] base={out_base_dir} run_dir={run_dir}")
     print(f"[CFG] pRN train band: [{cfg.min_prn_train}, {cfg.max_prn_train}]")
@@ -1631,6 +2166,7 @@ def main() -> None:
     )
     print(f"[CFG] prefer_bidask: {cfg.prefer_bidask}")
     print(f"[CFG] threads={args.threads} cache={cfg.use_cache} stock_source={cfg.stock_source}")
+    print(f"[CFG] prn_version={prn_version} prn_config_hash={prn_config_hash}")
     if cfg.sanity_report or cfg.sanity_drop:
         print(
             f"[CFG] sanity_report={cfg.sanity_report} sanity_drop={cfg.sanity_drop} "
@@ -1667,15 +2203,13 @@ def main() -> None:
     rows: List[dict] = []
     drops: List[dict] = []
 
-    # Jobs = for each week, snapshot days Mon/Tue/Wed/Thu, for each ticker (expiry always that week's Friday)
+    # Jobs = for each expiry/asof snapshot, for each ticker.
     def jobs():
-        for mon in mondays:
-            fri = iso_week_friday(mon)
-            for asof_target in asof_days_mon_to_thu(mon):
-                for t in tickers:
-                    yield (t, mon, fri, asof_target)
+        for (week_monday, expiry_date, asof_target) in schedule_entries:
+            for t in tickers:
+                yield (t, week_monday, expiry_date, asof_target)
 
-    total_jobs = len(mondays) * 4 * len(tickers)
+    total_jobs = len(schedule_entries) * len(tickers)
     done = 0
     kept_groups = 0
 
@@ -1780,8 +2314,54 @@ def main() -> None:
         print("[SUMMARY] per-ticker groups:")
         print(out_df.groupby("ticker")["group_id"].nunique().sort_values(ascending=False).to_string())
 
-    out_df.to_csv(out_path, index=False)
-    print(f"[WRITE] {out_path}")
+    train_view_path = os.path.join(run_dir, train_view_out_name)
+    snapshot_path = os.path.join(run_dir, snapshot_out_name)
+    prn_view_path = os.path.join(run_dir, prn_view_out_name)
+
+    train_view_df = out_df.copy()
+    # Train view provenance (keeps legacy schema intact)
+    train_view_df["prn_version"] = prn_version
+    train_view_df["prn_config_hash"] = prn_config_hash
+    train_view_df["dataset_view"] = "train_view"
+    train_view_df["build_version"] = BUILD_VERSION
+
+    snapshot_df = build_snapshot_view(out_df, cfg=cfg) if args.write_snapshot else None
+    prn_view_df = build_prn_view(out_df, prn_version=prn_version, prn_config_hash=prn_config_hash) if args.write_prn_view else None
+
+    if args.write_snapshot and snapshot_df is not None:
+        require_row_id_unique(snapshot_df, "snapshot")
+        bad_cols = [c for c in snapshot_df.columns if "prn" in c.lower()]
+        if bad_cols:
+            raise RuntimeError(f"[CHECK] snapshot contains pRN columns: {bad_cols}")
+
+    if args.write_prn_view and prn_view_df is not None:
+        require_row_id_unique(prn_view_df, "prn_view")
+
+    if args.write_train_view:
+        require_row_id_unique(train_view_df, "train_view")
+
+    if args.write_legacy:
+        require_row_id_unique(out_df, "legacy")
+
+    if args.write_snapshot and args.write_train_view and snapshot_df is not None:
+        if len(snapshot_df) != len(train_view_df):
+            print(f"[WARN] snapshot rows != train_view rows: snapshot={len(snapshot_df)} train_view={len(train_view_df)}")
+
+    if args.write_snapshot and snapshot_df is not None:
+        snapshot_df.to_csv(snapshot_path, index=False)
+        print(f"[WRITE] snapshot: {snapshot_path}")
+
+    if args.write_prn_view and prn_view_df is not None:
+        prn_view_df.to_csv(prn_view_path, index=False)
+        print(f"[WRITE] prn_view: {prn_view_path}")
+
+    if args.write_train_view:
+        train_view_df.to_csv(train_view_path, index=False)
+        print(f"[WRITE] train_view: {train_view_path}")
+
+    if args.write_legacy:
+        out_df.to_csv(out_path, index=False)
+        print(f"[WRITE] legacy: {out_path}")
 
     if args.write_drops:
         drops_df = pd.DataFrame(drops) if drops else pd.DataFrame(columns=["ticker", "week_monday", "week_friday", "asof_target", "drop_reason", "detail"])

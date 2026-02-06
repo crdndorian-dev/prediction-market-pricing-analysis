@@ -1,0 +1,223 @@
+{
+  "script": "2-calibrate-logit-model-v1.5.py",
+  "csv": "/Users/dorianc./Desktop/polyedgetool/polyedgetool/src/data/raw/option-chain/1dte-01-06-23-30-01-26/training-1dte-01-06-23-30-01-26.csv",
+  "out_dir": "/Users/dorianc./Desktop/polyedgetool/polyedgetool/src/data/models/1dte-logit-model/trials/029__C=5__feat=v:rv20__ti=non_foundation__tx=0__decay=0__cal=none__foundation=off__b9cec513",
+  "target_col": "outcome_ST_gt_K",
+  "week_col": "week_friday",
+  "ticker_col": "ticker",
+  "mode": "pooled",
+  "foundation_tickers": [],
+  "foundation_weight": 1.0,
+  "train_tickers": [],
+  "tdays_allowed": [
+    1
+  ],
+  "asof_dow_allowed": null,
+  "asof_date_col": "asof_date",
+  "expiry_date_col": "expiry_close_date_used",
+  "tdays_constant": true,
+  "asof_dow_constant": false,
+  "ticker_intercepts": "non_foundation",
+  "ticker_x_interactions": false,
+  "ticker_feature_col": "_ticker_intercept_scoped",
+  "interaction_ticker_col": null,
+  "metrics_top_tickers": 10,
+  "categorical_features_requested": [
+    "spot_scale_used"
+  ],
+  "categorical_features_used": [
+    "_ticker_intercept_scoped",
+    "spot_scale_used"
+  ],
+  "weight_col": "sample_weight_final",
+  "features_requested": [
+    "x_logit_prn",
+    "rv20"
+  ],
+  "features_used_final": [
+    "x_logit_prn",
+    "rv20",
+    "log_m_fwd",
+    "x_m"
+  ],
+  "forbidden_features_removed": [],
+  "near_constant_features_removed": [],
+  "forward_fallback_rows_dropped": 0,
+  "add_interactions": false,
+  "calibration_requested": "none",
+  "calibration_used": "none",
+  "selection_objective": "delta_vs_baseline",
+  "fallback_to_baseline_if_worse": true,
+  "fallback_to_baseline_triggered": false,
+  "model_kind_val_pool": "logit",
+  "model_kind_test": "logit",
+  "model_kind_deployed": "logit",
+  "C_grid": [
+    5.0
+  ],
+  "best_C": 5.0,
+  "rolling": {
+    "test_weeks": 20,
+    "val_windows": 4,
+    "val_window_weeks": 10,
+    "n_windows_used": 4,
+    "avg_roll_logloss_model": 0.48603053977194083,
+    "avg_roll_logloss_baseline": 0.4911739794002227,
+    "avg_roll_delta": -0.005143439628281898
+  },
+  "two_stage": {
+    "stage1_categorical_features": null,
+    "stage2_categorical_features": null
+  },
+  "ticker_support": {
+    "min_support": 300,
+    "train_unique": 12,
+    "kept_unique": 12,
+    "mapped_train_rows": 281
+  },
+  "interaction_support": null,
+  "ticker_support_tickers": [
+    "0_FOUNDATION",
+    "AMZN",
+    "GOOGL",
+    "IWM",
+    "META",
+    "MSFT",
+    "NFLX",
+    "NVDA",
+    "PLTR",
+    "QQQ",
+    "SPY",
+    "TSLA"
+  ],
+  "interaction_support_tickers": null,
+  "ticker_min_support": 300,
+  "ticker_min_support_interactions": 1000,
+  "auto_drop_near_constant": true,
+  "splits": {
+    "n_weeks_total": 526,
+    "n_weeks_pretest": 506,
+    "n_weeks_test": 20,
+    "train_fit_weeks_range": [
+      "2023-06-02",
+      "2025-12-19"
+    ],
+    "calib_weeks_range": null,
+    "val_pool_weeks_range": [
+      "2025-10-10",
+      "2025-12-19"
+    ],
+    "test_weeks_range": [
+      "2025-12-23",
+      "2026-01-30"
+    ]
+  },
+  "val_pool_oos": {
+    "used": true,
+    "train_weeks_range": [
+      "2023-06-02",
+      "2025-10-09"
+    ],
+    "use_calib": false,
+    "model_kind": "logit",
+    "mode": "pooled"
+  },
+  "fit_weights": {
+    "fit_weight_renorm": "mean1",
+    "train_decay_half_life_weeks": 0.0,
+    "foundation_weight": 1.0,
+    "trainfit_n": 32677,
+    "trainfit_sum_raw": 8.894676946986907,
+    "trainfit_sum_fit": 32677.0,
+    "calib_n": 0,
+    "calib_sum_raw": 0.0
+  },
+  "group_reweight": {
+    "mode": "none",
+    "enabled": false
+  },
+  "moneyness_column_used": "log_m_fwd",
+  "enable_x_abs_m": false,
+  "optional_filters": {
+    "max_abs_logm": null,
+    "drop_prn_extremes": false,
+    "prn_eps": 0.0001,
+    "rows_filtered": 0
+  },
+  "min_prn_train": 0.1000082,
+  "max_prn_train": 0.8998177,
+  "prn_train_range": [
+    0.1000082,
+    0.8998177
+  ],
+  "random_state": 13,
+  "n_bins": 15,
+  "eceq_bins": 10,
+  "bootstrap_ci": true,
+  "bootstrap_B": 2000,
+  "bootstrap_seed": 0,
+  "bootstrap_group": "auto",
+  "model_version": "v1.5.0",
+  "training_timestamp": "2026-02-06T00:18:40.371882+00:00",
+  "git_commit": "7fbb1455039bdda17fc62c8121ec40550fc67075",
+  "git_commit_datetime": "2026-02-02T00:08:52+01:00",
+  "required_columns": [
+    "x_logit_prn",
+    "rv20",
+    "log_m_fwd",
+    "x_m",
+    "_ticker_intercept_scoped",
+    "spot_scale_used",
+    "ticker",
+    "pRN",
+    "pRN_raw",
+    "K",
+    "S",
+    "T_days",
+    "event_endDate",
+    "snapshot_time_utc",
+    "r",
+    "dividend_yield",
+    "forward_price"
+  ],
+  "feature_manifest_path": "feature_manifest.json",
+  "model_artifact": "model.joblib",
+  "train_end_date": "2025-12-19",
+  "features": [
+    "x_logit_prn",
+    "rv20",
+    "log_m_fwd",
+    "x_m",
+    "_ticker_intercept_scoped_GOOGL",
+    "_ticker_intercept_scoped_IWM",
+    "_ticker_intercept_scoped_META",
+    "_ticker_intercept_scoped_MSFT",
+    "_ticker_intercept_scoped_NFLX",
+    "_ticker_intercept_scoped_NVDA",
+    "_ticker_intercept_scoped_OTHER",
+    "_ticker_intercept_scoped_PLTR",
+    "_ticker_intercept_scoped_QQQ",
+    "_ticker_intercept_scoped_SPY",
+    "_ticker_intercept_scoped_TSLA",
+    "spot_scale_used_split_adj"
+  ],
+  "coefficients": [
+    1.2111588881700215,
+    0.0422020431917907,
+    -0.4294601971418001,
+    -0.08180188403621022,
+    0.17274053762867325,
+    0.14295316357391216,
+    0.005569557349491331,
+    0.0768738965172152,
+    -0.4014623071888344,
+    -0.10866604717199208,
+    -0.36196807980215,
+    0.19132789607647877,
+    0.17659102671154742,
+    0.18919937178913726,
+    -0.050256494800294475,
+    -0.4959793485650646
+  ],
+  "intercept": 0.7264158241494898
+}

@@ -1,0 +1,109 @@
+{
+  "schema_version": "1.0.0",
+  "description": "Guaranteed baseline schema contract for the polyedgetool pipeline. All downstream scripts MUST be able to handle these columns (even if NaN). All upstream scripts MUST provide these columns.",
+
+  "guaranteed_baseline_columns": {
+    "description": "Columns that MUST exist in every snapshot CSV. Can be NaN if data unavailable, but column must exist.",
+    "columns": [
+      "ticker",
+      "K",
+      "S",
+      "T_days",
+      "pRN",
+      "pRN_raw",
+      "event_endDate",
+      "snapshot_time_utc",
+      "r",
+      "dividend_yield",
+      "forward_price",
+      "rv20",
+      "rel_spread_median",
+      "n_chain_raw",
+      "n_chain_used",
+      "n_band_raw",
+      "n_band_inside",
+      "dropped_intrinsic",
+      "asof_fallback_days",
+      "expiry_fallback_days",
+      "split_events_in_preload_range",
+      "S_asof_close"
+    ]
+  },
+
+  "guaranteed_derived_features": {
+    "description": "Features that can ALWAYS be computed from baseline columns (assuming baseline columns exist). These will be added by ensure_engineered_features() and snapshot enrichment.",
+    "features": [
+      "x_logit_prn",
+      "log_m",
+      "abs_log_m",
+      "T_years",
+      "log_T_days",
+      "sqrt_T_years",
+      "expiry_date"
+    ]
+  },
+
+  "conditional_derived_features": {
+    "description": "Features that CAN be computed IF certain baseline columns are non-NaN. If baseline is NaN, these will be NaN.",
+    "features": {
+      "log_m_fwd": {"requires": ["K", "forward_price"], "formula": "log(K / forward_price)"},
+      "abs_log_m_fwd": {"requires": ["log_m_fwd"], "formula": "abs(log_m_fwd)"},
+      "rv20_sqrtT": {"requires": ["rv20", "T_days"], "formula": "rv20 * sqrt(T_days/365)"},
+      "log_m_over_volT": {"requires": ["log_m", "rv20", "T_days"], "formula": "log_m / (rv20 * sqrt_T_years)"},
+      "abs_log_m_over_volT": {"requires": ["abs_log_m", "rv20", "T_days"], "formula": "abs_log_m / (rv20 * sqrt_T_years)"},
+      "log_m_fwd_over_volT": {"requires": ["log_m_fwd", "rv20", "T_days"], "formula": "log_m_fwd / (rv20 * sqrt_T_years)"},
+      "abs_log_m_fwd_over_volT": {"requires": ["abs_log_m_fwd", "rv20", "T_days"], "formula": "abs_log_m_fwd / (rv20 * sqrt_T_years)"},
+      "log_rel_spread": {"requires": ["rel_spread_median"], "formula": "log1p(rel_spread_median)"},
+      "chain_used_frac": {"requires": ["n_chain_used", "n_chain_raw"], "formula": "n_chain_used / n_chain_raw"},
+      "band_inside_frac": {"requires": ["n_band_inside", "n_band_raw"], "formula": "n_band_inside / n_band_raw"},
+      "drop_intrinsic_frac": {"requires": ["dropped_intrinsic", "n_chain_raw"], "formula": "dropped_intrinsic / n_chain_raw"},
+      "fallback_any": {"requires": ["asof_fallback_days", "expiry_fallback_days"], "formula": "boolean indicator"},
+      "had_fallback": {"requires": ["asof_fallback_days", "expiry_fallback_days"], "formula": "nonzero fallback indicator"},
+      "had_intrinsic_drop": {"requires": ["dropped_intrinsic", "n_chain_raw"], "formula": "drop_intrinsic_frac > 0"},
+      "had_band_clip": {"requires": ["n_band_inside", "n_band_raw"], "formula": "band_inside_frac < 1"},
+      "prn_raw_gap": {"requires": ["pRN", "pRN_raw"], "formula": "pRN - pRN_raw"},
+      "x_prn_x_tdays": {"requires": ["x_logit_prn", "T_days"], "formula": "x_logit_prn * T_days"},
+      "x_prn_x_rv20": {"requires": ["x_logit_prn", "rv20"], "formula": "x_logit_prn * rv20"},
+      "x_prn_x_logm": {"requires": ["x_logit_prn", "log_m"], "formula": "x_logit_prn * log_m"}
+    }
+  },
+
+  "validation_rules": {
+    "calibration": {
+      "description": "Calibration script MUST validate that requested features can be computed from baseline schema",
+      "rules": [
+        "All requested numeric features must be in guaranteed_derived_features OR conditional_derived_features",
+        "If using conditional features, model MUST handle NaN values gracefully",
+        "Emit warning if requested features depend on columns that are typically NaN in snapshots (rv20, dividend_yield, forward_price)"
+      ]
+    },
+    "snapshot": {
+      "description": "Snapshot script MUST guarantee baseline schema exists",
+      "rules": [
+        "All columns in guaranteed_baseline_columns MUST be present (even if NaN)",
+        "All features in guaranteed_derived_features MUST be computed",
+        "All features in conditional_derived_features MUST be attempted (result may be NaN)"
+      ]
+    },
+    "inference": {
+      "description": "Inference script MUST validate schema before prediction",
+      "rules": [
+        "Check that snapshot has all guaranteed_baseline_columns",
+        "Check that model's required features are computable from available data",
+        "FAIL LOUDLY if critical features would be all-NaN",
+        "Warn if >50% of rows have NaN in key features"
+      ]
+    }
+  },
+
+  "known_limitations": {
+    "description": "Columns that are NOT available in snapshots and will be NaN unless historical data is joined",
+    "columns": [
+      "rv20",
+      "dividend_yield",
+      "forward_price"
+    ],
+    "impact": "Features depending on these columns will be NaN in snapshot-only mode. For production inference, join historical data OR use models trained without these features.",
+    "recommended_action": "Train separate model variants: (1) snapshot-only (no rv20/div), (2) full-features (with historical data join)"
+  }
+}

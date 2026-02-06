@@ -1,0 +1,109 @@
+{
+  "status": "success",
+  "return_code": 0,
+  "runtime_seconds": 35.63575291633606,
+  "objective": 0.48327006081067403,
+  "score": 0.48327006081067403,
+  "delta_brier": null,
+  "delta_ece": null,
+  "val_logloss_std": 0.02919269256554755,
+  "val_logloss_by_window": [
+    {
+      "window": "roll_val_1",
+      "window_start": "2025-10-10",
+      "window_end": "2025-10-28",
+      "logloss": 0.47514582641943215,
+      "baseline_logloss": 0.48008947795333723
+    },
+    {
+      "window": "roll_val_2",
+      "window_start": "2025-10-29",
+      "window_end": "2025-11-13",
+      "logloss": 0.5330269985446198,
+      "baseline_logloss": 0.5285354347456531
+    },
+    {
+      "window": "roll_val_3",
+      "window_start": "2025-11-14",
+      "window_end": "2025-12-03",
+      "logloss": 0.4629312894948225,
+      "baseline_logloss": 0.4783165810878931
+    },
+    {
+      "window": "roll_val_4",
+      "window_start": "2025-12-04",
+      "window_end": "2025-12-19",
+      "logloss": 0.46197612878382177,
+      "baseline_logloss": 0.4777544238140075
+    }
+  ],
+  "test_metrics": {
+    "logloss": 0.4038988048169109,
+    "brier": 0.12607709390332283,
+    "ece": 0.06744163970070409,
+    "ece_q": 0.05912561878231685,
+    "baseline_logloss": null
+  },
+  "train_weeks_range": [
+    "2023-06-02",
+    "2025-12-19"
+  ],
+  "test_weeks_range": [
+    "2025-12-23",
+    "2026-01-30"
+  ],
+  "command": [
+    "/Users/dorianc./Desktop/polyedgetool/polyedgetool/src/webapp/backend/.venv/bin/python",
+    "/Users/dorianc./Desktop/polyedgetool/polyedgetool/src/scripts/2-calibrate-logit-model-v1.5.py",
+    "--csv",
+    "/Users/dorianc./Desktop/polyedgetool/polyedgetool/src/data/raw/option-chain/1dte-01-06-23-30-01-26/training-1dte-01-06-23-30-01-26.csv",
+    "--out-dir",
+    "/Users/dorianc./Desktop/polyedgetool/polyedgetool/src/data/models/1dte-logit-model/trials/074__C=0.05__feat=min__ti=none__tx=0__decay=26__cal=none__rw=chain__foundation=off__469d51fc",
+    "--bootstrap-ci",
+    "--bootstrap-B",
+    "2000",
+    "--bootstrap-seed",
+    "0",
+    "--bootstrap-group",
+    "auto",
+    "--tdays-allowed",
+    "1",
+    "--random-state",
+    "13",
+    "--C-grid",
+    "0.05",
+    "--features",
+    "x_logit_prn",
+    "--ticker-intercepts",
+    "none",
+    "--train-decay-half-life-weeks",
+    "26.0",
+    "--calibrate",
+    "none",
+    "--foundation-tickers",
+    "",
+    "--foundation-weight",
+    "1.0",
+    "--group-reweight",
+    "chain"
+  ],
+  "stdout": "RUNNING SCRIPT: /Users/dorianc./Desktop/polyedgetool/polyedgetool/src/scripts/2-calibrate-logit-model-v1.5.py\n\n=== REGIME FILTER SUMMARY ===\ntdays_allowed: [1]\nasof_dow_allowed: ALL\nrows_before: 33917 rows_after: 33917\n\nRows by T_days:\nT_days\n1    33917\n\nRows by ticker:\nticker\nQQQ      7827\nSPY      5935\nNFLX     3643\nIWM      3156\nMETA     3147\nNVDA     2761\nTSLA     2684\nMSFT     1425\nPLTR     1334\nGOOGL     901\nAMZN      791\nAAPL      313\n\n=== TICKER SANITY ===\nunique_tickers: 12\n\n=== OPTIONAL DATA FILTERS ===\n[FILTER] drop_prn_extremes: OFF\n[FILTER] max_abs_logm: OFF\n[FILTER] Total rows dropped by optional filters: 0 (remaining: 33917)\n\n[INFO] pRN training range: [0.100008, 0.899818]\n[INFO] Resolved moneyness column: log_m_fwd\n\n=== VALIDATING FEATURE AVAILABILITY ===\n[WARN] Could not validate features against schema contract: Unknown features requested that cannot be computed from baseline schema: ['x_m']\nPlease check config/pipeline_schema_contract.json for available features.\n       Continuing with training, but inference may fail if features are unavailable.\n\n=== FEATURE PRESENCE (numeric) ===\n    feature    kind  present   dtype  non_missing  n_unique\nx_logit_prn numeric     True float64        33917      4210\n  log_m_fwd numeric     True float64        33917     33739\n        x_m numeric     True float64        33917     33917\n\n=== FEATURE PRESENCE (categorical) ===\n        feature        kind  present dtype  non_missing  n_unique\nspot_scale_used categorical     True   str        33917         2\n\n=== GROUP REWEIGHTING ===\n[GROUP-REWEIGHT] Chain reweighting enabled\n                 Total unique chain snapshots: 2784\n                 Median group size: 10 rows\n\n=== ROLLING WINDOW SPECS ===\nroll_val_1: window=[2025-10-10..2025-10-28] (10 wks), train uses weeks < 2025-10-10\nroll_val_2: window=[2025-10-29..2025-11-13] (10 wks), train uses weeks < 2025-10-29\nroll_val_3: window=[2025-11-14..2025-12-03] (10 wks), train uses weeks < 2025-11-14\nroll_val_4: window=[20...",
+  "stderr": "/Users/dorianc./Desktop/polyedgetool/polyedgetool/src/webapp/backend/.venv/lib/python3.13/site-packages/sklearn/linear_model/_logistic.py:1135: FutureWarning: 'penalty' was deprecated in version 1.8 and will be removed in 1.10. To avoid this warning, leave 'penalty' set to its default value and use 'l1_ratio' or 'C' instead. Use l1_ratio=0 instead of penalty='l2', l1_ratio=1 instead of penalty='l1', and C=np.inf instead of penalty=None.\n  warnings.warn(\n/Users/dorianc./Desktop/polyedgetool/polyedgetool/src/webapp/backend/.venv/lib/python3.13/site-packages/sklearn/linear_model/_logistic.py:1135: FutureWarning: 'penalty' was deprecated in version 1.8 and will be removed in 1.10. To avoid this warning, leave 'penalty' set to its default value and use 'l1_ratio' or 'C' instead. Use l1_ratio=0 instead of penalty='l2', l1_ratio=1 instead of penalty='l1', and C=np.inf instead of penalty=None.\n  warnings.warn(\n/Users/dorianc./Desktop/polyedgetool/polyedgetool/src/webapp/backend/.venv/lib/python3.13/site-packages/sklearn/linear_model/_logistic.py:1135: FutureWarning: 'penalty' was deprecated in version 1.8 and will be removed in 1.10. To avoid this warning, leave 'penalty' set to its default value and use 'l1_ratio' or 'C' instead. Use l1_ratio=0 instead of penalty='l2', l1_ratio=1 instead of penalty='l1', and C=np.inf instead of penalty=None.\n  warnings.warn(\n/Users/dorianc./Desktop/polyedgetool/polyedgetool/src/webapp/backend/.venv/lib/python3.13/site-packages/sklearn/linear_model/_logistic.py:1135: FutureWarning: 'penalty' was deprecated in version 1.8 and will be removed in 1.10. To avoid this warning, leave 'penalty' set to its default value and use 'l1_ratio' or 'C' instead. Use l1_ratio=0 instead of penalty='l2', l1_ratio=1 instead of penalty='l1', and C=np.inf instead of penalty=None.\n  warnings.warn(\n/Users/dorianc./Desktop/polyedgetool/polyedgetool/src/webapp/backend/.venv/lib/python3.13/site-packages/sklearn/linear_model/_logistic.py:1135: FutureWarning: 'penalty'...",
+  "config": {
+    "C": 0.05,
+    "feature_choices": {
+      "volatility": [],
+      "moneyness": []
+    },
+    "enable_x_m": false,
+    "enable_x_abs_m": false,
+    "ticker_intercepts": "none",
+    "ticker_x_interactions": false,
+    "train_decay_half_life_weeks": 26.0,
+    "calibrate": "none",
+    "group_reweight": "chain",
+    "foundation_enabled": false,
+    "foundation_weight": 1.0,
+    "foundation_tickers": ""
+  }
+}

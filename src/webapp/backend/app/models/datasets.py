@@ -15,6 +15,74 @@ class DatasetRunRequest(BaseModel):
         default=None,
         description="Output CSV filename for the dataset.",
     )
+    run_dir_name: Optional[str] = Field(
+        default=None,
+        description="Optional run directory name override (basename only).",
+    )
+    dataset_name: Optional[str] = Field(
+        default=None,
+        description="Kebab-case dataset name. Overrides out_name/run_dir_name/train_view_name with {purpose}-{name}.csv convention.",
+    )
+    training_dataset: Optional[str] = Field(
+        default=None,
+        description="Training dataset selection (legacy or train_view). Deprecated when dataset_name is set.",
+    )
+    schedule_mode: Optional[str] = Field(
+        default=None,
+        description="Snapshot schedule mode (weekly or expiry_range).",
+    )
+    expiry_weekdays: Optional[str] = Field(
+        default=None,
+        description="Comma-separated expiry weekdays.",
+    )
+    asof_weekdays: Optional[str] = Field(
+        default=None,
+        description="Comma-separated as-of weekdays.",
+    )
+    dte_list: Optional[str] = Field(
+        default=None,
+        description="Comma-separated DTE list (supports ranges).",
+    )
+    dte_min: Optional[int] = Field(
+        default=None,
+        description="Minimum DTE (inclusive).",
+    )
+    dte_max: Optional[int] = Field(
+        default=None,
+        description="Maximum DTE (inclusive).",
+    )
+    dte_step: Optional[int] = Field(
+        default=None,
+        description="DTE step for range.",
+    )
+    write_snapshot: Optional[bool] = Field(
+        default=None,
+        description="Write snapshot.csv output.",
+    )
+    write_prn_view: Optional[bool] = Field(
+        default=None,
+        description="Write prn_view.csv output.",
+    )
+    write_train_view: Optional[bool] = Field(
+        default=None,
+        description="Write train_view.csv output.",
+    )
+    write_legacy: Optional[bool] = Field(
+        default=None,
+        description="Write legacy CSV output (backward compatible).",
+    )
+    prn_version: Optional[str] = Field(
+        default=None,
+        description="pRN version tag.",
+    )
+    prn_config_hash: Optional[str] = Field(
+        default=None,
+        description="pRN config hash override.",
+    )
+    train_view_name: Optional[str] = Field(
+        default=None,
+        description="Filename for train_view output.",
+    )
     drops_name: Optional[str] = Field(
         default=None,
         description="Output filename for dropped rows report.",
@@ -112,7 +180,17 @@ class DatasetRunSummary(BaseModel):
     run_dir: str
     dataset_file: Optional[DatasetFileSummary]
     drops_file: Optional[DatasetFileSummary]
+    training_file: Optional[DatasetFileSummary] = None
+    files: List[DatasetFileSummary] = Field(default_factory=list)
     last_modified: Optional[str]
+
+
+class DatasetRunRenameRequest(BaseModel):
+    run_dir: str = Field(..., description="Run directory to rename.")
+    new_name: str = Field(
+        ...,
+        description="New run directory name (basename only).",
+    )
 
 
 class DatasetListResponse(BaseModel):

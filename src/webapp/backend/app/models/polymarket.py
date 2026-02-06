@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from datetime import datetime
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -18,6 +19,11 @@ class PolymarketSnapshotRunSummary(BaseModel):
 class PolymarketSnapshotListResponse(BaseModel):
     out_dir: str
     runs: List[PolymarketSnapshotRunSummary]
+
+
+class PolymarketSnapshotDeleteResponse(BaseModel):
+    run_id: str
+    deleted: bool
 
 
 class PolymarketSnapshotFileSummary(BaseModel):
@@ -68,6 +74,30 @@ class PolymarketSnapshotRunRequest(BaseModel):
         default=None,
         description="Timezone used to resolve the weekly market window.",
     )
+    contract_type: Optional[Literal["weekly", "1dte"]] = Field(
+        default=None,
+        description="Contract type to fetch (weekly or 1dte).",
+    )
+    contract_1dte: Optional[Literal["close_today", "close_tomorrow"]] = Field(
+        default=None,
+        description="For 1dte: contract expiring at today's or tomorrow's market close.",
+    )
+    target_date: Optional[str] = Field(
+        default=None,
+        description="Override target date for contract resolution (YYYY-MM-DD).",
+    )
+    exchange_calendar: Optional[str] = Field(
+        default=None,
+        description="Exchange calendar name (e.g. XNYS).",
+    )
+    allow_nonlive: bool = Field(
+        default=False,
+        description="Allow non-live snapshots to compute pRN from yfinance option chains.",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="Run fetch + compute + validation without writing any files.",
+    )
     keep_nonexec: bool = Field(
         default=False,
         description="Keep rows with pm_ok=False (same as script flag).",
@@ -84,3 +114,12 @@ class PolymarketSnapshotRunResponse(BaseModel):
     stderr: str
     duration_s: float
     command: List[str]
+
+
+class PolymarketSnapshotJobStatus(BaseModel):
+    job_id: str
+    status: Literal["queued", "running", "finished", "failed"]
+    result: Optional[PolymarketSnapshotRunResponse] = None
+    error: Optional[str] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None

@@ -1,0 +1,33 @@
+{
+  "trial_id": 86,
+  "trial_name": "C=0.1__feat=min__ti=none__tx=0__decay=26__cal=none__foundation=on__fweight=1.5",
+  "config": {
+    "C": 0.1,
+    "feature_choices": {
+      "volatility": [],
+      "moneyness": []
+    },
+    "enable_x_m": false,
+    "enable_x_abs_m": false,
+    "ticker_intercepts": "none",
+    "ticker_x_interactions": false,
+    "train_decay_half_life_weeks": 26.0,
+    "calibrate": "none",
+    "group_reweight": "none",
+    "foundation_enabled": true,
+    "foundation_weight": 1.5,
+    "foundation_tickers": "SPY,QQQ,IWM"
+  },
+  "baseline_args": [
+    "--bootstrap-ci",
+    "--bootstrap-B",
+    "2000",
+    "--bootstrap-seed",
+    "0",
+    "--bootstrap-group",
+    "auto",
+    "--tdays-allowed",
+    "1"
+  ],
+  "objective": "logloss"
+}

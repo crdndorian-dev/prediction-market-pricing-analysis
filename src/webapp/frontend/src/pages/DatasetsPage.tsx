@@ -1,17 +1,45 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+} from "react";
 
 import {
+  deleteDatasetRun,
+  getDatasetFileUrl,
   killDatasetJob,
+  listDatasetRuns,
+  previewDatasetFile,
+  renameDatasetRun,
   startDatasetJob,
   type DatasetJobStatus,
+  type DatasetFileSummary,
+  type DatasetPreviewResponse,
   type DatasetRunResponse,
+  type DatasetRunSummary,
 } from "../api/datasets";
 import { useDatasetJob } from "../contexts/datasetJob";
+import { useAnyJobRunning } from "../contexts/jobGuard";
 import "./DatasetsPage.css";
 
 type DatasetFormState = {
   outDir: string;
-  outName: string;
+  datasetName: string;
+  scheduleMode: "weekly" | "expiry_range";
+  expiryWeekdays: string;
+  asofWeekdays: string;
+  dteList: string;
+  dteMin: string;
+  dteMax: string;
+  dteStep: string;
+  writeSnapshot: boolean;
+  writePrnView: boolean;
+  writeTrainView: boolean;
+  writeLegacy: boolean;
+  prnVersion: string;
+  prnConfigHash: string;
   tickers: string;
   start: string;
   end: string;
@@ -57,10 +85,36 @@ type DatasetFormState = {
   verboseSkips: boolean;
 };
 
+const TRADING_UNIVERSE_TICKERS = [
+  "AAPL",
+  "GOOGL",
+  "MSFT",
+  "META",
+  "AMZN",
+  "PLTR",
+  "NVDA",
+  "TSLA",
+  "NFLX",
+  "OPEN",
+];
+
 const defaultForm: DatasetFormState = {
   outDir: "src/data/raw/option-chain",
-  outName: "options-chain-dataset.csv",
-  tickers: "AAPL, GOOGL, MSFT, META, AMZN, PLTR, NVDA, NFLX, OPEN, TSLA",
+  datasetName: "",
+  scheduleMode: "weekly",
+  expiryWeekdays: "fri",
+  asofWeekdays: "mon,tue,wed,thu",
+  dteList: "",
+  dteMin: "",
+  dteMax: "",
+  dteStep: "1",
+  writeSnapshot: true,
+  writePrnView: true,
+  writeTrainView: true,
+  writeLegacy: true,
+  prnVersion: "v1",
+  prnConfigHash: "",
+  tickers: TRADING_UNIVERSE_TICKERS.join(", "),
   start: "",
   end: "",
   thetaBaseUrl: "http://127.0.0.1:25503/v3",
@@ -105,15 +159,17 @@ const defaultForm: DatasetFormState = {
   verboseSkips: false,
 };
 
-const DEFAULT_OUT_NAME = defaultForm.outName;
-
-const trimCsvStem = (value: string) =>
-  value.replace(/\.csv$/i, "").trim() || value.trim();
-
-const deriveDropsName = (outName: string) =>
-  `${trimCsvStem(outName)}-drops.csv`;
+const toKebabCase = (value: string) =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-|-$/g, "");
 
 const STORAGE_KEY = "polyedgetool.datasets.form";
+const CALIBRATE_STORAGE_KEY = "polyedgetool.calibrate.form";
 
 const parseOptionalNumber = (value: string): number | undefined => {
   const trimmed = value.trim();
@@ -135,6 +191,15 @@ const loadStoredForm = (): Partial<DatasetFormState> | null => {
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return null;
+    // Migration: convert old fields to datasetName
+    if (!parsed.datasetName && parsed.runDirName) {
+      parsed.datasetName = parsed.runDirName;
+    }
+    parsed.writeTrainView = true;
+    delete parsed.outName;
+    delete parsed.runDirName;
+    delete parsed.trainViewName;
+    delete parsed.trainingDataset;
     return parsed as Partial<DatasetFormState>;
   } catch {
     return null;
@@ -147,6 +212,199 @@ const parseTickers = (raw: string): string[] | undefined => {
     .map((value) => value.trim())
     .filter(Boolean);
   return cleaned.length > 0 ? cleaned : undefined;
+};
+
+const normalizeTickers = (values: string[]): string[] => {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const normalized = value.trim().toUpperCase();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+};
+
+const orderTickers = (values: string[]): string[] => {
+  const universeSet = new Set(TRADING_UNIVERSE_TICKERS);
+  const universeOrdered = TRADING_UNIVERSE_TICKERS.filter((ticker) =>
+    values.includes(ticker),
+  );
+  const extras = values.filter((ticker) => !universeSet.has(ticker));
+  return [...universeOrdered, ...extras];
+};
+
+const formatTickerList = (values: string[]): string => values.join(", ");
+
+const splitTickerInput = (raw: string): string[] => {
+  return raw
+    .split(/[\s,]+/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+};
+
+const WEEKDAY_MAP: Record<string, number> = {
+  mon: 1,
+  monday: 1,
+  tue: 2,
+  tues: 2,
+  tuesday: 2,
+  wed: 3,
+  weds: 3,
+  wednesday: 3,
+  thu: 4,
+  thur: 4,
+  thurs: 4,
+  thursday: 4,
+  fri: 5,
+  friday: 5,
+  sat: 6,
+  saturday: 6,
+  sun: 0,
+  sunday: 0,
+};
+
+const parseWeekdays = (raw: string): number[] | null => {
+  const cleaned = raw
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  if (cleaned.length === 0) return null;
+  const out: number[] = [];
+  const seen = new Set<number>();
+  for (const item of cleaned) {
+    let day: number | undefined;
+    if (/^\d+$/.test(item)) {
+      const scriptDay = Number.parseInt(item, 10);
+      day = Number.isFinite(scriptDay) ? (scriptDay + 1) % 7 : undefined;
+    } else {
+      day = WEEKDAY_MAP[item];
+    }
+    if (day === undefined || Number.isNaN(day)) return null;
+    if (!seen.has(day)) {
+      seen.add(day);
+      out.push(day);
+    }
+  }
+  return out;
+};
+
+const countWeekdaysInRange = (
+  start: string,
+  end: string,
+  weekdays: number[] | null,
+): number | null => {
+  if (!start || !end || !weekdays || weekdays.length === 0) return null;
+  const startDate = new Date(`${start}T00:00:00Z`);
+  const endDate = new Date(`${end}T00:00:00Z`);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+    return null;
+  }
+  if (endDate < startDate) return null;
+  const daySet = new Set(weekdays);
+  let count = 0;
+  const cursor = new Date(startDate);
+  while (cursor <= endDate) {
+    if (daySet.has(cursor.getUTCDay())) count += 1;
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return count;
+};
+
+const resolveDteCount = (
+  listRaw: string,
+  minRaw: string,
+  maxRaw: string,
+  stepRaw: string,
+): number | null => {
+  const parts = listRaw
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (parts.length > 0) {
+    const values = new Set<number>();
+    for (const part of parts) {
+      if (part.includes("-")) {
+        const [startStr, endStr] = part.split("-", 2);
+        const start = Number.parseInt(startStr, 10);
+        const end = Number.parseInt(endStr, 10);
+        if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+        const lo = Math.min(start, end);
+        const hi = Math.max(start, end);
+        for (let v = lo; v <= hi; v += 1) values.add(v);
+      } else {
+        const v = Number.parseInt(part, 10);
+        if (!Number.isFinite(v)) return null;
+        values.add(v);
+      }
+    }
+    return values.size;
+  }
+
+  const minVal = minRaw.trim() ? Number.parseInt(minRaw, 10) : null;
+  const maxVal = maxRaw.trim() ? Number.parseInt(maxRaw, 10) : null;
+  if (minVal === null && maxVal === null) return null;
+  const step = stepRaw.trim() ? Number.parseInt(stepRaw, 10) : 1;
+  if (!Number.isFinite(step) || step <= 0) return null;
+  const lo = minVal ?? 0;
+  const hi = maxVal ?? lo;
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi < lo) return null;
+  return Math.floor((hi - lo) / step) + 1;
+};
+
+const formatByteCount = (bytes?: number | null): string => {
+  if (!bytes) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  return `${mb.toFixed(1)} MB`;
+};
+
+const formatTimestamp = (value?: string | null): string =>
+  value ? new Date(value).toLocaleString() : "Unknown";
+
+const PREVIEW_LIMIT = 20;
+
+type PreviewTarget = {
+  label: string;
+  path: string;
+};
+
+const dedupeFiles = (files: DatasetFileSummary[]): DatasetFileSummary[] => {
+  const seen = new Set<string>();
+  return files.filter((file) => {
+    if (seen.has(file.path)) return false;
+    seen.add(file.path);
+    return true;
+  });
+};
+
+const buildRunFiles = (run: DatasetRunSummary): DatasetFileSummary[] => {
+  const listed = run.files?.filter(Boolean) ?? [];
+  if (listed.length > 0) {
+    return dedupeFiles(listed);
+  }
+  const fallback = [
+    run.training_file,
+    run.dataset_file,
+    run.drops_file,
+  ].filter(Boolean) as DatasetFileSummary[];
+  return dedupeFiles(fallback);
+};
+
+const sortRunFiles = (
+  files: DatasetFileSummary[],
+  trainingPath?: string | null,
+): DatasetFileSummary[] => {
+  return [...files].sort((a, b) => {
+    const aIsTraining = trainingPath && a.path === trainingPath;
+    const bIsTraining = trainingPath && b.path === trainingPath;
+    if (aIsTraining && !bIsTraining) return -1;
+    if (!aIsTraining && bIsTraining) return 1;
+    return a.name.localeCompare(b.name);
+  });
 };
 
 const countMondaysInRange = (start: string, end: string): number | null => {
@@ -185,7 +443,20 @@ const buildCommandPreview = (state: DatasetFormState): string => {
   };
 
   addValue("--out-dir", state.outDir);
-  addValue("--out-name", state.outName);
+  addValue("--dataset-name", state.datasetName);
+  addValue("--schedule-mode", state.scheduleMode);
+  addValue("--expiry-weekdays", state.expiryWeekdays);
+  addValue("--asof-weekdays", state.asofWeekdays);
+  addValue("--dte-list", state.dteList);
+  addValue("--dte-min", state.dteMin);
+  addValue("--dte-max", state.dteMax);
+  addValue("--dte-step", state.dteStep);
+  addOptionalBool("--write-snapshot", "--no-write-snapshot", state.writeSnapshot);
+  addOptionalBool("--write-prn-view", "--no-write-prn-view", state.writePrnView);
+  addOptionalBool("--write-train-view", "--no-write-train-view", state.writeTrainView);
+  addOptionalBool("--write-legacy", "--no-write-legacy", state.writeLegacy);
+  addValue("--prn-version", state.prnVersion);
+  addValue("--prn-config-hash", state.prnConfigHash);
   addValue("--tickers", state.tickers);
   addValue("--start", state.start);
   addValue("--end", state.end);
@@ -234,10 +505,6 @@ const buildCommandPreview = (state: DatasetFormState): string => {
   addOptionalBool("--cache", "--no-cache", state.cache);
 
   addFlag("--write-drops", state.writeDrops);
-  if (state.writeDrops) {
-    const effectiveOutName = state.outName.trim() || DEFAULT_OUT_NAME;
-    addValue("--drops-name", deriveDropsName(effectiveOutName));
-  }
 
   addFlag("--sanity-report", state.sanityReport);
   addFlag("--sanity-drop", state.sanityDrop);
@@ -259,32 +526,110 @@ export default function DatasetsPage() {
   const [storageReady, setStorageReady] = useState(false);
   const { jobStatus, jobId, setJobId, setJobStatus: setGlobalJobStatus } =
     useDatasetJob();
+  const { anyJobRunning, primaryJob } = useAnyJobRunning();
   const [killLoading, setKillLoading] = useState(false);
-  const defaultTickers = useMemo(
-    () => parseTickers(defaultForm.tickers) ?? [],
-    [],
-  );
+  const [datasetRuns, setDatasetRuns] = useState<DatasetRunSummary[]>([]);
+  const [runsLoading, setRunsLoading] = useState(false);
+  const [runsError, setRunsError] = useState<string | null>(null);
+  const [previewTarget, setPreviewTarget] = useState<PreviewTarget | null>(null);
+  const [previewResponse, setPreviewResponse] =
+    useState<DatasetPreviewResponse | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [deleteConfirmRun, setDeleteConfirmRun] = useState<string | null>(null);
+  const [deleteLoadingRun, setDeleteLoadingRun] = useState<string | null>(null);
+  const [renamingRunId, setRenamingRunId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState<string>("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [renameLoading, setRenameLoading] = useState(false);
+  const [customTickerInput, setCustomTickerInput] = useState("");
+  const refreshDatasetRuns = useCallback(async () => {
+    setRunsLoading(true);
+    setRunsError(null);
+    try {
+      const response = await listDatasetRuns();
+      setDatasetRuns(response.runs);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setRunsError(message);
+    } finally {
+      setRunsLoading(false);
+    }
+  }, []);
 
-  const tickersList = useMemo(
-    () => parseTickers(formState.tickers),
-    [formState.tickers],
+  const selectedTickers = useMemo(() => {
+    const parsed = normalizeTickers(parseTickers(formState.tickers) ?? []);
+    return orderTickers(parsed);
+  }, [formState.tickers]);
+  const selectedTickerSet = useMemo(
+    () => new Set(selectedTickers),
+    [selectedTickers],
   );
-  const resolvedTickersCount =
-    tickersList?.length ?? defaultTickers.length;
-  const isUsingDefaultTickers = !tickersList;
+  const customTickers = useMemo(
+    () =>
+      selectedTickers.filter(
+        (ticker) => !TRADING_UNIVERSE_TICKERS.includes(ticker),
+      ),
+    [selectedTickers],
+  );
+  const customTickerCount = customTickers.length;
+  const resolvedTickersCount = selectedTickers.length;
   const weeksCount = useMemo(
     () => countMondaysInRange(formState.start, formState.end),
     [formState.start, formState.end],
   );
-  const snapshotsPerWeek = 4;
+  const expiryWeekdays = useMemo(
+    () => parseWeekdays(formState.expiryWeekdays),
+    [formState.expiryWeekdays],
+  );
+  const asofWeekdays = useMemo(
+    () => parseWeekdays(formState.asofWeekdays),
+    [formState.asofWeekdays],
+  );
+  const expiriesCount = useMemo(() => {
+    if (formState.scheduleMode === "weekly") return weeksCount;
+    return countWeekdaysInRange(formState.start, formState.end, expiryWeekdays);
+  }, [
+    formState.scheduleMode,
+    formState.start,
+    formState.end,
+    expiryWeekdays,
+    weeksCount,
+  ]);
+  const dteCount = useMemo(
+    () =>
+      resolveDteCount(
+        formState.dteList,
+        formState.dteMin,
+        formState.dteMax,
+        formState.dteStep,
+      ),
+    [formState.dteList, formState.dteMin, formState.dteMax, formState.dteStep],
+  );
+  const asofCount = dteCount ?? (asofWeekdays ? asofWeekdays.length : null);
+  const snapshotCountLabel = dteCount
+    ? `${dteCount} DTEs`
+    : asofWeekdays
+      ? `${asofWeekdays.length} weekdays`
+      : "—";
   const plannedJobs =
-    weeksCount && resolvedTickersCount
-      ? weeksCount * snapshotsPerWeek * resolvedTickersCount
+    expiriesCount && asofCount && resolvedTickersCount
+      ? expiriesCount * asofCount * resolvedTickersCount
       : null;
   const commandPreview = useMemo(
     () => buildCommandPreview(formState),
     [formState],
   );
+
+  const updateTickers = useCallback((next: string[]) => {
+    const normalized = normalizeTickers(next);
+    if (normalized.length === 0) return;
+    const ordered = orderTickers(normalized);
+    setFormState((prev) => ({
+      ...prev,
+      tickers: formatTickerList(ordered),
+    }));
+  }, []);
 
   const updateJobState = (status: DatasetJobStatus) => {
     setGlobalJobStatus(status);
@@ -312,18 +657,35 @@ export default function DatasetsPage() {
     }
   }, [jobStatus]);
 
+  useEffect(() => {
+    refreshDatasetRuns();
+  }, [refreshDatasetRuns]);
+
+  useEffect(() => {
+    if (selectedTickers.length === 0) {
+      updateTickers(TRADING_UNIVERSE_TICKERS);
+    }
+  }, [selectedTickers, updateTickers]);
+
+  useEffect(() => {
+    if (!jobStatus) return;
+    if (["finished", "failed", "cancelled"].includes(jobStatus.status)) {
+      refreshDatasetRuns();
+    }
+  }, [jobStatus?.status, refreshDatasetRuns]);
+
   const resolvedRange =
     formState.start && formState.end
       ? `${formState.start} → ${formState.end}`
       : "Select a date range";
-  const resolvedTickersLabel = tickersList
-    ? `${tickersList.length} tickers`
-    : `Using script defaults (${defaultTickers.length})`;
+  const resolvedTickersLabel = customTickers.length
+    ? `${resolvedTickersCount} tickers (${customTickers.length} custom)`
+    : `${resolvedTickersCount} tickers`;
   const plannedJobsLabel = plannedJobs
     ? `${plannedJobs.toLocaleString()} jobs`
     : "Set a date range";
   const plannedWeeksLabel =
-    weeksCount !== null ? `${weeksCount} weeks` : "Weeks pending";
+    expiriesCount !== null ? `${expiriesCount} expiries` : "Expiries pending";
   const jobProgress = jobStatus?.progress ?? null;
   const progressPercent =
     jobProgress && jobProgress.total > 0
@@ -360,6 +722,60 @@ export default function DatasetsPage() {
           : "Failed"
         : "Cancelled"
     : "Idle";
+  const datasetNameKebab = toKebabCase(formState.datasetName);
+  const trainingDatasetPath =
+    currentResult?.out_dir && datasetNameKebab
+      ? `${currentResult.out_dir}/${datasetNameKebab}/training-${datasetNameKebab}.csv`
+      : null;
+  const trainingDatasetEnabled = formState.writeTrainView;
+
+  useEffect(() => {
+    if (!jobStatus || jobStatus.status !== "finished") return;
+    if (!currentResult?.ok) return;
+    if (!trainingDatasetPath || !trainingDatasetEnabled) return;
+    try {
+      const raw = localStorage.getItem(CALIBRATE_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : {};
+      const next = { ...parsed, datasetPath: trainingDatasetPath };
+      localStorage.setItem(CALIBRATE_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // ignore storage failures
+    }
+  }, [
+    jobStatus?.status,
+    currentResult?.ok,
+    trainingDatasetPath,
+    trainingDatasetEnabled,
+  ]);
+
+  useEffect(() => {
+    if (!previewTarget) {
+      setPreviewResponse(null);
+      setPreviewError(null);
+      setPreviewLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    previewDatasetFile(previewTarget.path, "head", PREVIEW_LIMIT)
+      .then((result) => {
+        if (cancelled) return;
+        setPreviewResponse(result);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setPreviewResponse(null);
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setPreviewError(message);
+      })
+      .finally(() => {
+        if (!cancelled) setPreviewLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [previewTarget]);
 
   useEffect(() => {
     const stored = loadStoredForm();
@@ -368,6 +784,12 @@ export default function DatasetsPage() {
     }
     setStorageReady(true);
   }, []);
+
+  useEffect(() => {
+    if (!formState.writeTrainView) {
+      setFormState((prev) => ({ ...prev, writeTrainView: true }));
+    }
+  }, [formState.writeTrainView]);
 
   useEffect(() => {
     if (!storageReady) return;
@@ -380,6 +802,12 @@ export default function DatasetsPage() {
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (anyJobRunning) {
+      setRunError(
+        `Another job is running (${primaryJob?.name ?? "unknown"}). Wait for it to finish.`,
+      );
+      return;
+    }
     setRunError(null);
     setRunResult(null);
     setGlobalJobStatus(null);
@@ -388,9 +816,27 @@ export default function DatasetsPage() {
     setIsRunning(true);
 
     try {
+      if (!formState.datasetName.trim()) {
+        setRunError("Dataset name is required.");
+        setIsRunning(false);
+        return;
+      }
       const payload = {
         outDir: formState.outDir.trim() || undefined,
-        outName: formState.outName.trim() || undefined,
+        datasetName: formState.datasetName.trim(),
+        scheduleMode: formState.scheduleMode,
+        expiryWeekdays: formState.expiryWeekdays.trim() || undefined,
+        asofWeekdays: formState.asofWeekdays.trim() || undefined,
+        dteList: formState.dteList.trim() || undefined,
+        dteMin: parseOptionalInt(formState.dteMin),
+        dteMax: parseOptionalInt(formState.dteMax),
+        dteStep: parseOptionalInt(formState.dteStep),
+        writeSnapshot: formState.writeSnapshot,
+        writePrnView: formState.writePrnView,
+        writeTrainView: formState.writeTrainView,
+        writeLegacy: formState.writeLegacy,
+        prnVersion: formState.prnVersion.trim() || undefined,
+        prnConfigHash: formState.prnConfigHash.trim() || undefined,
         tickers: formState.tickers.trim() || undefined,
         start: formState.start,
         end: formState.end,
@@ -430,8 +876,8 @@ export default function DatasetsPage() {
         noTickerWeights: !formState.tickerWeights,
         noSoftQualityWeight: !formState.softQualityWeight,
         rvLookbackDays: parseOptionalInt(formState.rvLookbackDays),
-          cache: formState.cache,
-          writeDrops: formState.writeDrops,
+        cache: formState.cache,
+        writeDrops: formState.writeDrops,
         sanityReport: formState.sanityReport,
         sanityDrop: formState.sanityDrop,
         sanityAbsLogmMax: parseOptionalNumber(formState.sanityAbsLogmMax),
@@ -463,21 +909,105 @@ export default function DatasetsPage() {
     }
   };
 
+  const handlePreviewSelection = useCallback((target: PreviewTarget) => {
+    setPreviewTarget(target);
+  }, []);
+
+  const handleDeleteRun = async (runDir: string) => {
+    setDeleteLoadingRun(runDir);
+    setDeleteConfirmRun(null);
+    try {
+      await deleteDatasetRun(runDir);
+      if (previewTarget?.path.startsWith(runDir)) {
+        setPreviewTarget(null);
+      }
+      await refreshDatasetRuns();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setRunsError(message);
+    } finally {
+      setDeleteLoadingRun(null);
+    }
+  };
+
+  const handleStartRename = (runId: string, currentName: string) => {
+    setRenamingRunId(runId);
+    setRenameValue(currentName);
+    setRenameError(null);
+  };
+
+  const handleCancelRename = () => {
+    setRenamingRunId(null);
+    setRenameValue("");
+    setRenameError(null);
+  };
+
+  const handleConfirmRename = async (runId: string, runDir: string) => {
+    const trimmed = renameValue.trim();
+    if (!trimmed) {
+      setRenameError("Directory name cannot be empty.");
+      return;
+    }
+    setRenameLoading(true);
+    setRenameError(null);
+    try {
+      const updated = await renameDatasetRun(runDir, trimmed);
+      setDatasetRuns((prev) =>
+        prev.map((run) => (run.id === runId ? updated : run)),
+      );
+      if (previewTarget?.path.startsWith(runDir)) {
+        setPreviewTarget(null);
+      }
+      handleCancelRename();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setRenameError(message);
+    } finally {
+      setRenameLoading(false);
+    }
+  };
+
+  const toggleUniverseTicker = useCallback(
+    (ticker: string) => {
+      const next = selectedTickerSet.has(ticker)
+        ? selectedTickers.filter((value) => value !== ticker)
+        : [...selectedTickers, ticker];
+      updateTickers(next);
+    },
+    [selectedTickers, selectedTickerSet, updateTickers],
+  );
+
+  const removeSelectedTicker = useCallback(
+    (ticker: string) => {
+      if (!selectedTickerSet.has(ticker)) return;
+      const next = selectedTickers.filter((value) => value !== ticker);
+      updateTickers(next);
+    },
+    [selectedTickers, selectedTickerSet, updateTickers],
+  );
+
+  const handleAddCustomTicker = useCallback(() => {
+    const tokens = splitTickerInput(customTickerInput);
+    if (!tokens.length) return;
+    const next = [...selectedTickers, ...tokens];
+    updateTickers(next);
+    setCustomTickerInput("");
+  }, [customTickerInput, selectedTickers, updateTickers]);
+
   return (
     <section className="page datasets-page">
       <header className="page-header">
         <div>
-          <p className="page-kicker">Database</p>
-          <h1 className="page-title">Build the options dataset</h1>
+          <p className="page-kicker">Option Chain</p>
+          <h1 className="page-title">Build the option chain dataset</h1>
           <p className="page-subtitle">
-            Generate the historic options chain dataset and track every CLI
-            input in one place.
+            Generate the option-chain dataset that feeds calibration and keep every CLI input tracked in one place.
           </p>
         </div>
-        <div className="meta-card datasets-meta">
-          <span className="meta-label">Pipeline stage</span>
-          <span>1-option-chain-build-historic-dataset-v1.0.py</span>
-          <div className="meta-pill">CSV + optional drops report</div>
+        <div className="meta-card datasets-meta page-goal-card">
+          <span className="meta-label">Goal</span>
+          <span>Produce the reproducible option-chain dataset that powers calibration.</span>
+          <div className="meta-pill">Outputs stored under src/data/raw/option-chain</div>
         </div>
       </header>
 
@@ -499,9 +1029,18 @@ export default function DatasetsPage() {
               <span>{resolvedTickersLabel}</span>
             </div>
             <div>
-              <span className="meta-label">Output target</span>
+              <span className="meta-label">Dataset</span>
               <span>
-                {formState.outDir}/{formState.outName}
+                {formState.outDir}/{datasetNameKebab || "(unnamed)"}
+              </span>
+            </div>
+            <div>
+              <span className="meta-label">Schedule</span>
+              <span>
+                {formState.scheduleMode}
+                {dteCount
+                  ? ` · DTE ${formState.dteList || `${formState.dteMin}-${formState.dteMax}`}`
+                  : ` · asof ${formState.asofWeekdays}`}
               </span>
             </div>
             <div>
@@ -551,22 +1090,77 @@ export default function DatasetsPage() {
                 </div>
               </div>
               <div className="field">
-                <label htmlFor="datasetTickers">
-                  Tickers (comma-separated)
-                </label>
-                <input
-                  id="datasetTickers"
-                  className="input"
-                  value={formState.tickers}
-                  onChange={(event) =>
-                    setFormState((prev) => ({
-                      ...prev,
-                      tickers: event.target.value,
-                    }))
-                  }
-                />
+                <label>Trading universe</label>
+                <div className="ticker-grid">
+                  {TRADING_UNIVERSE_TICKERS.map((ticker) => (
+                    <button
+                      key={ticker}
+                      type="button"
+                      className={`ticker-chip ${
+                        selectedTickerSet.has(ticker) ? "selected" : ""
+                      }`}
+                      aria-pressed={selectedTickerSet.has(ticker)}
+                      onClick={() => toggleUniverseTicker(ticker)}
+                    >
+                      {ticker}
+                    </button>
+                  ))}
+                </div>
                 <span className="field-hint">
-                  Leave blank to use the PM10 defaults from the script.
+                  Pick from the core trading universe, then add any extra tickers below.
+                </span>
+              </div>
+              <div className="field">
+                <label htmlFor="datasetCustomTicker">Add custom tickers</label>
+                <div className="inline-fields compact">
+                  <input
+                    id="datasetCustomTicker"
+                    className="input"
+                    placeholder="e.g. AMD, INTC"
+                    value={customTickerInput}
+                    onChange={(event) => setCustomTickerInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        handleAddCustomTicker();
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="button light"
+                    onClick={handleAddCustomTicker}
+                  >
+                    Add
+                  </button>
+                </div>
+                <span className="field-hint">
+                  Custom tickers are appended to the selection and can be removed below.
+                </span>
+              </div>
+              <div className="field">
+                <label>Selected tickers</label>
+                <div className="ticker-selection">
+                  {selectedTickers.map((ticker) => {
+                    const isCustom = !TRADING_UNIVERSE_TICKERS.includes(ticker);
+                    return (
+                      <button
+                        key={ticker}
+                        type="button"
+                        className={`ticker-chip selected ${
+                          isCustom ? "custom" : ""
+                        }`}
+                        onClick={() => removeSelectedTicker(ticker)}
+                        aria-label={`Remove ${ticker}`}
+                      >
+                        <span>{ticker}</span>
+                        <span className="ticker-remove">×</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <span className="field-hint">
+                  Click a ticker to remove it from the selection.
                 </span>
               </div>
             </div>
@@ -576,34 +1170,96 @@ export default function DatasetsPage() {
               <div className="inline-fields">
                 <div className="field">
                   <label>Output directory</label>
-                  <div className="input readonly">{formState.outDir}</div>
+                  <div className="field-value">{formState.outDir}</div>
                 </div>
-            <div className="field">
-              <label htmlFor="outName">Dataset filename</label>
-              <div
-                className={`input-with-default${
-                  formState.outName ? " filled" : ""
-                }`}
-                data-default={DEFAULT_OUT_NAME}
-              >
-                <input
-                  id="outName"
-                  className="input"
-                  value={formState.outName}
-                  onChange={(event) =>
-                    setFormState((prev) => ({
-                      ...prev,
-                      outName: event.target.value,
-                    }))
-                  }
-                />
-              </div>
-            </div>
+                <div className="field">
+                  <label htmlFor="datasetName">Dataset name</label>
+                  <input
+                    id="datasetName"
+                    className="input"
+                    placeholder="e.g. pm10-mon-thu-v2"
+                    required
+                    value={formState.datasetName}
+                    onChange={(event) =>
+                      setFormState((prev) => ({
+                        ...prev,
+                        datasetName: event.target.value,
+                      }))
+                    }
+                  />
+                </div>
               </div>
               <div className="inline-fields">
-            <div className="field">
-              <label>Write drops report</label>
+                <div className="field">
+                  <label htmlFor="prnVersion">pRN version</label>
+                  <input
+                    id="prnVersion"
+                    className="input"
+                    value={formState.prnVersion}
+                    onChange={(event) =>
+                      setFormState((prev) => ({
+                        ...prev,
+                        prnVersion: event.target.value,
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+              <div className="inline-fields">
+                <div className="field">
+                  <label>Outputs to generate</label>
                   <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={formState.writeTrainView}
+                      disabled
+                      readOnly
+                    />
+                    training-{datasetNameKebab || "{name}"}.csv
+                  </label>
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={formState.writeSnapshot}
+                      onChange={(event) =>
+                        setFormState((prev) => ({
+                          ...prev,
+                          writeSnapshot: event.target.checked,
+                        }))
+                      }
+                    />
+                    snapshot-{datasetNameKebab || "{name}"}.csv
+                  </label>
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={formState.writePrnView}
+                      onChange={(event) =>
+                        setFormState((prev) => ({
+                          ...prev,
+                          writePrnView: event.target.checked,
+                        }))
+                      }
+                    />
+                    prn-view-{datasetNameKebab || "{name}"}.csv
+                  </label>
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={formState.writeLegacy}
+                      onChange={(event) =>
+                        setFormState((prev) => ({
+                          ...prev,
+                          writeLegacy: event.target.checked,
+                        }))
+                      }
+                    />
+                    legacy-{datasetNameKebab || "{name}"}.csv
+                  </label>
+                  <label
+                    className="checkbox"
+                    title="Written as drops-{name}.csv"
+                  >
                     <input
                       type="checkbox"
                       checked={formState.writeDrops}
@@ -614,10 +1270,143 @@ export default function DatasetsPage() {
                         }))
                       }
                     />
-                    Enable <code>--write-drops</code>
+                    drops-{datasetNameKebab || "{name}"}.csv
                   </label>
                 </div>
               </div>
+            </div>
+
+            <div className="section-card dataset-section">
+              <h3>Snapshot schedule</h3>
+              <div className="inline-fields">
+                <div className="field">
+                  <label htmlFor="scheduleMode">How are start/end dates used?</label>
+                  <select
+                    id="scheduleMode"
+                    className="input"
+                    value={formState.scheduleMode}
+                    onChange={(event) =>
+                      setFormState((prev) => ({
+                        ...prev,
+                        scheduleMode: event.target
+                          .value as DatasetFormState["scheduleMode"],
+                      }))
+                    }
+                  >
+                    <option value="weekly">Weekly (generate Monday anchors)</option>
+                    <option value="expiry_range">Expiry range (start/end are expiry dates)</option>
+                  </select>
+                </div>
+                {formState.scheduleMode === "expiry_range" ? (
+                  <div className="field">
+                    <label htmlFor="expiryWeekdays">Expiry weekdays</label>
+                    <input
+                      id="expiryWeekdays"
+                      className="input"
+                      value={formState.expiryWeekdays}
+                      onChange={(event) =>
+                        setFormState((prev) => ({
+                          ...prev,
+                          expiryWeekdays: event.target.value,
+                        }))
+                      }
+                    />
+                    <span className="field-hint">
+                      e.g. fri or mon,fri (comma-separated).
+                    </span>
+                  </div>
+                ) : null}
+              </div>
+              <div className="inline-fields">
+                <div className="field">
+                  <label htmlFor="asofWeekdays">Observation weekdays</label>
+                  <input
+                    id="asofWeekdays"
+                    className="input"
+                    value={formState.asofWeekdays}
+                    disabled={!!formState.dteList.trim()}
+                    onChange={(event) =>
+                      setFormState((prev) => ({
+                        ...prev,
+                        asofWeekdays: event.target.value,
+                      }))
+                    }
+                  />
+                  <span className="field-hint">
+                    Days to observe the chain.{" "}
+                    {formState.dteList.trim()
+                      ? "Disabled because DTE list is set."
+                      : "e.g. mon,tue,wed,thu"}
+                  </span>
+                </div>
+                <div className="field">
+                  <label htmlFor="dteList">DTE list (overrides weekdays)</label>
+                  <input
+                    id="dteList"
+                    className="input"
+                    placeholder="e.g. 1,2,3 or 1-5"
+                    value={formState.dteList}
+                    onChange={(event) =>
+                      setFormState((prev) => ({
+                        ...prev,
+                        dteList: event.target.value,
+                      }))
+                    }
+                  />
+                  <span className="field-hint">
+                    Days-to-expiry to observe. Leave blank to use weekdays above.
+                  </span>
+                </div>
+              </div>
+              {formState.dteList.trim() ? (
+                <div className="inline-fields">
+                  <div className="field">
+                    <label htmlFor="dteMin">DTE min</label>
+                    <input
+                      id="dteMin"
+                      className="input"
+                      inputMode="numeric"
+                      value={formState.dteMin}
+                      onChange={(event) =>
+                        setFormState((prev) => ({
+                          ...prev,
+                          dteMin: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="dteMax">DTE max</label>
+                    <input
+                      id="dteMax"
+                      className="input"
+                      inputMode="numeric"
+                      value={formState.dteMax}
+                      onChange={(event) =>
+                        setFormState((prev) => ({
+                          ...prev,
+                          dteMax: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="dteStep">DTE step</label>
+                    <input
+                      id="dteStep"
+                      className="input"
+                      inputMode="numeric"
+                      value={formState.dteStep}
+                      onChange={(event) =>
+                        setFormState((prev) => ({
+                          ...prev,
+                          dteStep: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                </div>
+              ) : null}
             </div>
 
             <details className="advanced">
@@ -1241,7 +2030,7 @@ export default function DatasetsPage() {
               <button
                 className="button primary"
                 type="submit"
-                disabled={isRunning}
+                disabled={isRunning || anyJobRunning}
               >
                 {isRunning ? "Building dataset..." : "Run dataset build"}
               </button>
@@ -1266,90 +2055,6 @@ export default function DatasetsPage() {
           </div>
           <div className="panel-body">
             <div className="run-shell">
-              <div className="run-shell-main">
-                {!jobStatus ? (
-                  <div className="empty">No dataset run yet.</div>
-                ) : (
-                  <div className="run-output">
-                    <div className="run-summary">
-                      <div className="run-summary-header">
-                        <div>
-                          <span className="meta-label">Output</span>
-                          <div className="run-id">
-                            {currentResult?.output_file ??
-                              `${currentResult?.out_dir ?? formState.outDir}/${currentResult?.out_name ?? formState.outName}`}
-                          </div>
-                        </div>
-                        <div className="run-summary-actions">
-                          <span className={`status-pill ${statusClass}`}>
-                            {statusLabel}
-                          </span>
-                        </div>
-                      </div>
-                      <div className="run-meta-grid">
-                        <div>
-                          <span className="meta-label">Duration</span>
-                          <span>
-                            {currentResult
-                              ? `${currentResult.duration_s.toFixed(2)}s`
-                              : jobStatus.status === "running" ||
-                                jobStatus.status === "queued"
-                              ? "Running"
-                              : "Pending"}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="meta-label">Output dir</span>
-                          <span>{currentResult?.out_dir ?? formState.outDir}</span>
-                        </div>
-                        <div>
-                          <span className="meta-label">Drops file</span>
-                          <span>
-                            {currentResult?.drops_file ??
-                              (formState.writeDrops ? "Pending" : "Not written")}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                    <div className="log-tabs">
-                      <button
-                        className={`log-tab ${
-                          activeLog === "stdout" ? "active" : ""
-                        }`}
-                        type="button"
-                        onClick={() => setActiveLog("stdout")}
-                      >
-                        stdout
-                      </button>
-                      <button
-                        className={`log-tab ${
-                          activeLog === "stderr" ? "active" : ""
-                        }`}
-                        type="button"
-                        onClick={() => setActiveLog("stderr")}
-                      >
-                        stderr
-                      </button>
-                    </div>
-                    <div className="log-block">
-                      <span className="meta-label">
-                        {activeLog === "stdout" ? "stdout" : "stderr"}
-                      </span>
-                      <pre>
-                        {activeLog === "stdout"
-                          ? stdoutText || "No stdout captured."
-                          : stderrText || "No stderr captured."}
-                      </pre>
-                    </div>
-                    {currentResult?.command ? (
-                      <details className="command-details">
-                        <summary>Command used</summary>
-                        <code>{currentResult.command.join(" ")}</code>
-                      </details>
-                    ) : null}
-                  </div>
-                )}
-              </div>
               <aside className="run-shell-sidebar">
                 <div className="run-progress-panel">
                   <div className="run-progress-heading">
@@ -1373,12 +2078,12 @@ export default function DatasetsPage() {
                           <span className="meta-label">Tickers</span>
                           <span>
                             {resolvedTickersCount.toLocaleString()}
-                            {isUsingDefaultTickers ? " (default)" : ""}
+                            {customTickerCount ? ` (${customTickerCount} custom)` : ""}
                           </span>
                         </div>
                         <div>
                           <span className="meta-label">Snapshot days</span>
-                          <span>{snapshotsPerWeek} per week</span>
+                          <span>{snapshotCountLabel} per expiry</span>
                         </div>
                         <div>
                           <span className="meta-label">Planned jobs</span>
@@ -1450,17 +2155,371 @@ export default function DatasetsPage() {
                   )}
                 </div>
               </aside>
+              <div className="run-shell-main">
+                {!jobStatus ? (
+                  <div className="empty">No dataset run yet.</div>
+                ) : (
+                  <div className="run-output">
+                    <div className="run-summary">
+                      <div className="run-summary-header">
+                        <div>
+                          <span className="meta-label">Output</span>
+                          <div className="run-id">
+                            {currentResult?.output_file ??
+                              `${currentResult?.out_dir ?? formState.outDir}/${datasetNameKebab || "(pending)"}`}
+                          </div>
+                        </div>
+                        <div className="run-summary-actions">
+                          <span className={`status-pill ${statusClass}`}>
+                            {statusLabel}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="run-meta-grid">
+                        <div>
+                          <span className="meta-label">Duration</span>
+                          <span>
+                            {currentResult
+                              ? `${currentResult.duration_s.toFixed(2)}s`
+                              : jobStatus.status === "running" ||
+                                jobStatus.status === "queued"
+                              ? "Running"
+                              : "Pending"}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="meta-label">Output dir</span>
+                          <span>{currentResult?.out_dir ?? formState.outDir}</span>
+                        </div>
+                        <div>
+                          <span className="meta-label">Training dataset</span>
+                          <span>
+                            {trainingDatasetEnabled
+                              ? trainingDatasetPath ?? "Pending"
+                              : "Not written"}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="meta-label">Drops file</span>
+                          <span>
+                            {currentResult?.drops_file ??
+                              (formState.writeDrops ? "Pending" : "Not written")}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="log-tabs">
+                      <button
+                        className={`log-tab ${
+                          activeLog === "stdout" ? "active" : ""
+                        }`}
+                        type="button"
+                        onClick={() => setActiveLog("stdout")}
+                      >
+                        stdout
+                      </button>
+                      <button
+                        className={`log-tab ${
+                          activeLog === "stderr" ? "active" : ""
+                        }`}
+                        type="button"
+                        onClick={() => setActiveLog("stderr")}
+                      >
+                        stderr
+                      </button>
+                    </div>
+                    <div className="log-block">
+                      <span className="meta-label">
+                        {activeLog === "stdout" ? "stdout" : "stderr"}
+                      </span>
+                      <pre>
+                        {activeLog === "stdout"
+                          ? stdoutText || "No stdout captured."
+                          : stderrText || "No stderr captured."}
+                      </pre>
+                    </div>
+                    {currentResult?.command ? (
+                      <details className="command-details">
+                        <summary>Command used</summary>
+                        <code>{currentResult.command.join(" ")}</code>
+                      </details>
+                    ) : null}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </section>
       </div>
 
+      <section className="panel dataset-registry-panel">
+        <div className="panel-header">
+          <div>
+            <h2>Dataset registry</h2>
+            <span className="panel-hint">
+              Preview any CSV, rename the run directory, and clean out stale exports.
+            </span>
+          </div>
+        </div>
+        <div className="panel-body dataset-registry-body">
+          <div className="dataset-runs-list">
+            {runsLoading ? (
+              <div className="empty">Loading dataset exports…</div>
+            ) : runsError ? (
+              <div className="error">{runsError}</div>
+            ) : datasetRuns.length === 0 ? (
+              <div className="empty">
+                No dataset exports yet. Run the builder to create a CSV snapshot.
+              </div>
+            ) : (
+              datasetRuns.map((run) => {
+                const runName = run.run_dir.split("/").pop() ?? run.id;
+                const trainingFile = run.training_file ?? null;
+                const trainingPath = trainingFile?.path ?? null;
+                const files = sortRunFiles(buildRunFiles(run), trainingPath);
+                const fileCount = files.length;
+                const filesLabel = fileCount
+                  ? `${fileCount} CSV${fileCount === 1 ? "" : "s"}`
+                  : "No CSV files";
+                const trainingLabel = trainingFile
+                  ? `Training: ${trainingFile.name}`
+                  : "Training file missing";
+                const isRenaming = renamingRunId === run.id;
+                return (
+                  <article key={run.id} className="dataset-run-item">
+                    <div className="dataset-run-main">
+                      {isRenaming ? (
+                        <div className="rename-input-wrapper">
+                          <input
+                            className="input rename-input"
+                            type="text"
+                            value={renameValue}
+                            onChange={(event) =>
+                              setRenameValue(event.target.value)
+                            }
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                handleConfirmRename(run.id, run.run_dir);
+                              } else if (event.key === "Escape") {
+                                handleCancelRename();
+                              }
+                            }}
+                            autoFocus
+                          />
+                          {renameError ? (
+                            <div className="error">{renameError}</div>
+                          ) : null}
+                          <div className="rename-actions">
+                            <button
+                              className="button ghost small"
+                              type="button"
+                              onClick={() =>
+                                handleConfirmRename(run.id, run.run_dir)
+                              }
+                              disabled={renameLoading}
+                            >
+                              {renameLoading ? "Saving…" : "Save"}
+                            </button>
+                            <button
+                              className="button ghost small"
+                              type="button"
+                              onClick={handleCancelRename}
+                              disabled={renameLoading}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="dataset-run-title">{runName}</div>
+                      )}
+                      <div className="dataset-run-meta">
+                        <span>{formatTimestamp(run.last_modified)}</span>
+                        <span>{filesLabel}</span>
+                        <span>{trainingLabel}</span>
+                      </div>
+                      <div className="dataset-run-path">{run.run_dir}</div>
+                    </div>
+                    <div className="dataset-run-actions">
+                      <button
+                        type="button"
+                        className="button light small"
+                        onClick={() => handleStartRename(run.id, runName)}
+                        disabled={isRenaming || renameLoading}
+                      >
+                        Rename dataset
+                      </button>
+                      <button
+                        type="button"
+                        className="button ghost danger small"
+                        onClick={() => setDeleteConfirmRun(run.id)}
+                        disabled={deleteLoadingRun === run.id}
+                      >
+                        {deleteLoadingRun === run.id
+                          ? "Deleting…"
+                          : "Delete dataset"}
+                      </button>
+                      {deleteConfirmRun === run.id ? (
+                        <div className="dataset-delete-confirm inline">
+                          <p>
+                            Permanently delete <strong>{runName}</strong> and all its files?
+                          </p>
+                          <div className="dataset-delete-actions">
+                            <button
+                              type="button"
+                              className="button danger small"
+                              onClick={() => handleDeleteRun(run.run_dir)}
+                              disabled={deleteLoadingRun === run.id}
+                            >
+                              {deleteLoadingRun === run.id
+                                ? "Deleting…"
+                                : "Delete"}
+                            </button>
+                            <button
+                              type="button"
+                              className="button ghost small"
+                              onClick={() => setDeleteConfirmRun(null)}
+                              disabled={deleteLoadingRun === run.id}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                    <div className="dataset-run-files">
+                      {files.length === 0 ? (
+                        <div className="dataset-run-files-empty">
+                          No CSV files found in this run.
+                        </div>
+                      ) : (
+                        files.map((file) => {
+                          const isTraining = trainingPath === file.path;
+                          return (
+                            <div key={file.path} className="dataset-run-file">
+                              <div className="dataset-run-file-info">
+                                <div className="dataset-run-file-name">
+                                  {file.name}
+                                </div>
+                                <div className="dataset-run-file-meta">
+                                  {isTraining ? (
+                                    <span className="dataset-run-file-tag">
+                                      Training
+                                    </span>
+                                  ) : null}
+                                  <span>{formatByteCount(file.size_bytes)}</span>
+                                </div>
+                              </div>
+                              <div className="dataset-run-file-actions">
+                                <button
+                                  type="button"
+                                  className="button light small"
+                                  onClick={() =>
+                                    handlePreviewSelection({
+                                      label: `${file.name}${isTraining ? " (training)" : ""}`,
+                                      path: file.path,
+                                    })
+                                  }
+                                >
+                                  Preview
+                                </button>
+                                <a
+                                  href={getDatasetFileUrl(file.path)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="button light small"
+                                >
+                                  Open
+                                </a>
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </article>
+                );
+              })
+            )}
+          </div>
+          <div className="dataset-preview-panel">
+            <div className="dataset-preview-header">
+              <div>
+                <span className="meta-label">CSV preview</span>
+                <p className="dataset-preview-title">
+                  {previewTarget?.label ??
+                    "Select a CSV to peek at its rows."}
+                </p>
+              </div>
+            </div>
+            {previewLoading ? (
+              <div className="dataset-preview-empty">Loading preview…</div>
+            ) : previewError ? (
+              <div className="error">{previewError}</div>
+            ) : previewResponse ? (
+              <>
+                {previewResponse.headers.length > 0 ? (
+                  <div className="table-container">
+                    <table className="preview-table">
+                      <thead>
+                        <tr>
+                          {previewResponse.headers.map((column) => (
+                            <th key={column}>{column}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {previewResponse.rows.length > 0 ? (
+                          previewResponse.rows.map((row, index) => (
+                            <tr key={index}>
+                              {previewResponse.headers.map((column) => (
+                                <td key={column}>{row[column] ?? ""}</td>
+                              ))}
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td
+                              colSpan={
+                                previewResponse.headers.length || 1
+                              }
+                            >
+                              No rows to display.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="dataset-preview-empty">
+                    CSV preview did not include column headers.
+                  </div>
+                )}
+                <div className="dataset-preview-meta">
+                  <span className="meta-label">
+                    Showing {previewResponse.mode} ({previewResponse.limit} rows)
+                  </span>
+                  <span>
+                    {previewResponse.row_count
+                      ? `${previewResponse.row_count.toLocaleString()} total rows`
+                      : "Row count unknown"}
+                  </span>
+                </div>
+              </>
+            ) : (
+              <div className="dataset-preview-empty">
+                Select a file and click preview to inspect the CSV contents.
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
       <section className="panel">
         <div className="panel-header">
           <h2>CLI preview</h2>
-          <span className="panel-hint">
-            Mirrors the exact arguments that will be sent to the script.
-          </span>
+          <span className="panel-hint">Mirrors the command that will run.</span>
         </div>
         <div className="panel-body">
           <div className="command-preview">

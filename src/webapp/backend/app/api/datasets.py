@@ -1,11 +1,13 @@
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse
 
 from app.models.datasets import (
     DatasetJobStatus,
     DatasetListResponse,
     DatasetPreviewResponse,
+    DatasetRunRenameRequest,
     DatasetRunRequest,
     DatasetRunResponse,
     DatasetRunSummary,
@@ -18,7 +20,10 @@ from app.services.datasets import (
     delete_dataset_run,
     list_dataset_runs,
     preview_dataset_file,
+    get_dataset_file_path,
+    rename_dataset_run,
 )
+from app.services.job_guard import ensure_no_active_jobs
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
@@ -26,11 +31,13 @@ router = APIRouter(prefix="/datasets", tags=["datasets"])
 @router.post("/run", response_model=DatasetRunResponse)
 def run_dataset_route(payload: DatasetRunRequest) -> DatasetRunResponse:
     try:
+        ensure_no_active_jobs()
         return run_dataset(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        status = 409 if "Another job is already running" in str(exc) else 500
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
 def _handle_job_not_found(job_id: str) -> HTTPException:
@@ -45,7 +52,8 @@ def start_dataset_job_route(payload: DatasetRunRequest) -> DatasetJobStatus:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        status = 409 if "Another job is already running" in str(exc) else 500
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
 @router.get("/jobs/{job_id}", response_model=DatasetJobStatus)
@@ -81,11 +89,34 @@ def preview_dataset_file_route(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.get("/runs/file")
+def dataset_file_route(path: str = Query(...)) -> FileResponse:
+    try:
+        file_path = get_dataset_file_path(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(
+        file_path,
+        media_type="text/csv",
+        filename=file_path.name,
+    )
+
+
 @router.delete("/runs", response_model=DatasetRunSummary)
 def delete_dataset_run_route(run_dir: str = Query(...)) -> DatasetRunSummary:
     try:
         return delete_dataset_run(run_dir)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Run {run_dir} not found.")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/runs/rename", response_model=DatasetRunSummary)
+def rename_dataset_run_route(payload: DatasetRunRenameRequest) -> DatasetRunSummary:
+    try:
+        return rename_dataset_run(payload.run_dir, payload.new_name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Run {payload.run_dir} not found.")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

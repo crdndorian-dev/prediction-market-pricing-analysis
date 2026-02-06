@@ -1,0 +1,69 @@
+{
+  "script": "2-calibrate-logit-model-v1.5.py",
+  "model_version": "v1.5.0",
+  "training_timestamp": "2026-02-06T00:21:14.546774+00:00",
+  "git_commit": "7fbb1455039bdda17fc62c8121ec40550fc67075",
+  "git_commit_datetime": "2026-02-02T00:08:52+01:00",
+  "tdays_allowed": [
+    1
+  ],
+  "asof_dow_allowed": null,
+  "asof_date_col": "asof_date",
+  "expiry_date_col": "expiry_close_date_used",
+  "tdays_constant": true,
+  "asof_dow_constant": false,
+  "ticker_col": "ticker",
+  "numeric_features": [
+    "x_logit_prn",
+    "log_m_fwd",
+    "x_m"
+  ],
+  "categorical_features": [
+    "spot_scale_used"
+  ],
+  "required_columns": [
+    "x_logit_prn",
+    "log_m_fwd",
+    "x_m",
+    "spot_scale_used",
+    "ticker",
+    "pRN",
+    "pRN_raw",
+    "K",
+    "S",
+    "T_days",
+    "event_endDate",
+    "snapshot_time_utc",
+    "r",
+    "dividend_yield",
+    "forward_price",
+    "rv20"
+  ],
+  "derived_features": {
+    "x_logit_prn": "logit(pRN) clipped to range 1e-06..0.999999",
+    "log_m": "log(K / S) using the available settled spot",
+    "abs_log_m": "absolute of log_m",
+    "log_m_fwd": "log(K / forward_price) when forward_price is available",
+    "abs_log_m_fwd": "absolute of log_m_fwd",
+    "log_T_days": "log1p(T_days)",
+    "sqrt_T_years": "sqrt(T_days / 365)",
+    "rv20_sqrtT": "rv20 * sqrt_T_years",
+    "log_m_over_volT": "log_m / (rv20 * sqrt_T_years)",
+    "abs_log_m_over_volT": "absolute of log_m_over_volT",
+    "log_m_fwd_over_volT": "log_m_fwd / (rv20 * sqrt_T_years)",
+    "abs_log_m_fwd_over_volT": "absolute of log_m_fwd_over_volT",
+    "log_rel_spread": "log1p(rel_spread_median)",
+    "fallback_any": "binary fallback indicator from asof/expiry fallback days",
+    "had_fallback": "binary indicator for any fallback usage (asof or expiry)",
+    "had_intrinsic_drop": "binary indicator for intrinsic-drop guardrails",
+    "had_band_clip": "binary indicator for band coverage < 1",
+    "prn_raw_gap": "pRN - pRN_raw",
+    "x_prn_x_tdays": "x_logit_prn * T_days",
+    "x_prn_x_rv20": "x_logit_prn * rv20",
+    "x_prn_x_logm": "x_logit_prn * log_m",
+    "x_m": "x_logit_prn * moneyness (log_m_fwd or log_m)",
+    "x_abs_m": "x_logit_prn * abs(moneyness)",
+    "asof_dow": "Day-of-week of as-of timestamp (Mon..Sun, UTC)"
+  },
+  "notes": "Missing columns such as rv20/dividend_yield/forward_price stay NaN until joined from historical data."
+}

@@ -6,10 +6,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.services.job_guard import list_active_jobs
+
 BASE_DIR = Path(__file__).resolve().parents[5]
 DATA_DIR = BASE_DIR / "src" / "data"
 MODELS_DIR = DATA_DIR / "models"
 RAW_DIR = DATA_DIR / "raw"
+PHAT_EDGE_DIR = DATA_DIR / "analysis" / "phat-edge"
 
 _DATASET_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "summary": None}
 
@@ -86,6 +89,19 @@ def _latest_file(directory: Path) -> Optional[Path]:
     return max(files, key=lambda item: item.stat().st_mtime)
 
 
+def _latest_csv_file(directory: Path) -> Optional[Path]:
+    if not directory.exists():
+        return None
+    files = [
+        item
+        for item in directory.iterdir()
+        if item.is_file() and item.suffix.lower() == ".csv"
+    ]
+    if not files:
+        return None
+    return max(files, key=lambda item: item.stat().st_mtime)
+
+
 def _iso_from_mtime(mtime: float) -> str:
     return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
 
@@ -127,9 +143,16 @@ def _find_dataset_file(raw_dir: Path) -> Optional[Path]:
         for item in raw_dir.iterdir()
         if item.is_file() and item.suffix == ".csv" and "drops" not in item.name
     ]
-    if not candidates:
+    if candidates:
+        return max(candidates, key=lambda item: item.stat().st_mtime)
+    nested = [
+        item
+        for item in raw_dir.rglob("*.csv")
+        if item.is_file() and "drops" not in item.name
+    ]
+    if not nested:
         return None
-    return max(candidates, key=lambda item: item.stat().st_mtime)
+    return max(nested, key=lambda item: item.stat().st_mtime)
 
 
 def _count_csv_rows(path: Path) -> int:
@@ -143,6 +166,111 @@ def _count_csv_rows(path: Path) -> int:
         except StopIteration:
             return 0
         return sum(1 for _ in reader)
+
+
+def _summarize_phat_edge() -> Optional[Dict[str, Any]]:
+    latest = _latest_csv_file(PHAT_EDGE_DIR)
+    if not latest:
+        return None
+    max_edge = None
+    max_ticker = None
+    with latest.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames and "edge" in reader.fieldnames:
+            for row in reader:
+                edge_value = _safe_float(row.get("edge"))
+                if edge_value is None:
+                    continue
+                if max_edge is None or edge_value > max_edge:
+                    max_edge = edge_value
+                    max_ticker = row.get("ticker")
+    return {
+        "fileName": latest.name,
+        "path": str(latest.relative_to(BASE_DIR)),
+        "rowCount": _count_csv_rows(latest),
+        "lastModified": _iso_from_mtime(latest.stat().st_mtime),
+        "maxEdge": max_edge,
+        "maxEdgeTicker": max_ticker,
+    }
+
+
+def _pick_polymarket_files(files: List[str]) -> Dict[str, Optional[str]]:
+    dataset = None
+    prn = None
+    ppm = None
+    for name in files:
+        lowered = name.lower()
+        if dataset is None and "dataset" in lowered:
+            dataset = name
+        if prn is None and "prn" in lowered:
+            prn = name
+        if ppm is None and "ppm" in lowered and "dataset" not in lowered:
+            ppm = name
+    return {"dataset": dataset, "prn": prn, "ppm": ppm}
+
+
+def _summarize_polymarket() -> Optional[Dict[str, Any]]:
+    try:
+        from app.services.polymarket_snapshots import (
+            get_latest_snapshot,
+            list_polymarket_runs,
+        )
+    except Exception:
+        return None
+
+    latest_snapshot = None
+    latest_run = None
+    try:
+        latest_snapshot = get_latest_snapshot()
+    except Exception:
+        latest_snapshot = None
+
+    try:
+        runs_response = list_polymarket_runs(limit=1)
+        latest_run = runs_response.runs[0] if runs_response.runs else None
+    except Exception:
+        latest_run = None
+
+    if not latest_snapshot and not latest_run:
+        return None
+
+    run_files = list(latest_run.files) if latest_run and latest_run.files else []
+    snapshot_files = (
+        [file.name for file in latest_snapshot.files]
+        if latest_snapshot and latest_snapshot.files
+        else []
+    )
+    file_names = run_files or snapshot_files
+    selected_files = _pick_polymarket_files(file_names)
+
+    history_file = None
+    if latest_snapshot and latest_snapshot.history_file:
+        history_file = {
+            "name": latest_snapshot.history_file.name,
+            "lastModified": latest_snapshot.history_file.last_modified,
+        }
+
+    size_mb = (
+        round(latest_run.size_bytes / (1024 * 1024), 2)
+        if latest_run and latest_run.size_bytes is not None
+        else None
+    )
+    latest_run_time = None
+    if latest_run:
+        latest_run_time = latest_run.run_time_utc or latest_run.last_modified
+
+    return {
+        "latestRunId": latest_run.run_id if latest_run else None,
+        "latestRunTime": latest_run_time,
+        "latestRunDir": latest_run.run_dir if latest_run else None,
+        "fileCount": latest_run.file_count if latest_run else None,
+        "sizeMB": size_mb,
+        "datasetFile": selected_files["dataset"],
+        "prnFile": selected_files["prn"],
+        "ppmFile": selected_files["ppm"],
+        "latestSnapshotDate": latest_snapshot.date if latest_snapshot else None,
+        "historyFile": history_file,
+    }
 
 
 def _summarize_dataset(path: Path) -> Optional[Dict[str, Any]]:
@@ -405,6 +533,8 @@ def build_dashboard_payload() -> Dict[str, Any]:
         if drops_file.exists()
         else None
     )
+    polymarket_summary = _summarize_polymarket()
+    phat_edge_summary = _summarize_phat_edge()
 
     best_test = None
     best_val = None
@@ -435,10 +565,12 @@ def build_dashboard_payload() -> Dict[str, Any]:
             "lastRunSummary": latest.get("focus") if latest else None,
         },
         "readiness": readiness,
-        "runQueue": [],
+        "runQueue": list_active_jobs(),
         "recentRuns": recent_runs,
         "datasetSummary": dataset_summary,
         "dropsSummary": drops_summary,
+        "polymarketSummary": polymarket_summary,
+        "phatEdgeSummary": phat_edge_summary,
         "modelSummary": {
             "modelCount": len(runs),
             "latestModel": {

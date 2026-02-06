@@ -34,6 +34,26 @@ const formatMetric = (value?: number | null, digits = 3) => {
   return value.toFixed(digits);
 };
 
+const formatCount = (value?: number | null) => {
+  if (value === null || value === undefined) return "--";
+  return value.toLocaleString();
+};
+
+const formatSize = (value?: number | null) => {
+  if (value === null || value === undefined) return "--";
+  return `${value.toFixed(2)} MB`;
+};
+
+const statusVariant = (status: string) => {
+  const normalized = status.toLowerCase();
+  if (normalized === "ready" || normalized === "success") return "success";
+  if (normalized === "running" || normalized === "queued") return "running";
+  if (normalized === "missing" || normalized === "needs review" || normalized === "failed") {
+    return "failed";
+  }
+  return "idle";
+};
+
 export default function DashboardPage() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -63,18 +83,13 @@ export default function DashboardPage() {
   }, []);
 
   const hero = data?.hero;
-  const readiness = data?.readiness ?? [];
   const runQueue = data?.runQueue ?? [];
-  const recentRuns = data?.recentRuns ?? [];
   const snapshot = data?.calibrationSnapshot;
-  const signalBars = data?.signalBars ?? [];
-  const readinessState = readiness.length
-    ? readiness.every((item) => item.status === "Ready")
-      ? "Ready"
-      : "Needs review"
-    : "Awaiting data";
-  const readinessStateVariant =
-    readinessState === "Ready" ? "success" : "failed";
+  const datasetSummary = data?.datasetSummary ?? null;
+  const polymarketSummary = data?.polymarketSummary ?? null;
+  const phatEdgeSummary = data?.phatEdgeSummary ?? null;
+  const modelSummary = data?.modelSummary ?? null;
+  const latestModel = modelSummary?.latestModel ?? null;
 
   const freshnessDays =
     hero?.dataFreshnessDays !== null && hero?.dataFreshnessDays !== undefined
@@ -103,40 +118,97 @@ export default function DashboardPage() {
     : "No runs recorded";
   const lastRunSub = hero?.lastRunSummary ?? "Start a run to capture outputs";
 
-  const quickActions = [
+  const polymarketStatus =
+    polymarketSummary?.latestRunId || polymarketSummary?.latestSnapshotDate
+      ? "Ready"
+      : "Missing";
+  const polymarketDescription = polymarketSummary?.latestRunId
+    ? `Latest run: ${polymarketSummary.latestRunId}`
+    : polymarketSummary?.latestSnapshotDate
+      ? `Latest snapshot: ${formatDate(polymarketSummary.latestSnapshotDate)}`
+      : "No snapshots captured yet.";
+  const polymarketMetaParts = [
+    polymarketSummary?.fileCount
+      ? `${formatCount(polymarketSummary.fileCount)} files`
+      : null,
+    polymarketSummary?.sizeMB !== null && polymarketSummary?.sizeMB !== undefined
+      ? formatSize(polymarketSummary.sizeMB)
+      : null,
+  ].filter(Boolean);
+  const polymarketMeta =
+    polymarketMetaParts.length > 0
+      ? polymarketMetaParts.join(" · ")
+      : "Run snapshot to generate files.";
+  const polymarketFileHint =
+    polymarketSummary?.datasetFile ??
+    polymarketSummary?.ppmFile ??
+    polymarketSummary?.prnFile ??
+    "Outputs stored under src/data/raw/polymarket.";
+
+  const phatEdgeStatus = phatEdgeSummary ? "Ready" : "Missing";
+  const phatEdgeDescription = phatEdgeSummary
+    ? `Latest output: ${phatEdgeSummary.fileName}`
+    : "No Edge output yet.";
+  const phatEdgeMeta = phatEdgeSummary
+    ? `${formatCount(phatEdgeSummary.rowCount)} rows · ${formatDateTime(
+        phatEdgeSummary.lastModified,
+      )}`
+    : "Run inference to generate an Edge CSV.";
+  const phatEdgeTop =
+    phatEdgeSummary?.maxEdgeTicker && phatEdgeSummary.maxEdge !== null
+      ? `Top edge: ${phatEdgeSummary.maxEdgeTicker} (${formatMetric(
+          phatEdgeSummary.maxEdge,
+          4,
+        )})`
+      : "Top edge not available yet.";
+
+  const stageCards = [
     {
-      title: "Run full pipeline",
-      description: "Ingestion -> Calibration -> Analysis using the last saved configuration.",
-      meta: hero?.lastRunId
-        ? `Last run: ${hero.lastRunId}`
-        : "No previous run detected",
-      to: "/pipeline",
-      tone: "primary",
+      key: "dataset",
+      title: "Option chain build",
+      status: datasetSummary ? "Ready" : "Missing",
+      description: datasetSummary
+        ? `${datasetSummary.fileName} - ${formatCount(
+            datasetSummary.rowCount,
+          )} rows`
+        : "No dataset snapshot detected yet.",
+      meta: datasetSummary
+        ? `Updated ${formatDateTime(datasetSummary.lastModified)}`
+        : "Run dataset builder to generate a CSV.",
+      to: "/option-chain",
     },
     {
-      title: "Compare pRN, pHAT, pPM",
-      description: "Line up model outputs and calibration deltas side by side.",
-      meta: recentRuns.length
-        ? `Compare ${recentRuns[0].id} vs ${recentRuns[1]?.id ?? "another"}`
-        : "Choose any two runs",
-      to: "/results",
-      tone: "default",
+      key: "snapshots",
+      title: "Polymarket",
+      status: polymarketStatus,
+      description: polymarketDescription,
+      meta: polymarketMeta,
+      hint: polymarketFileHint,
+      to: "/polymarket",
     },
     {
-      title: "Inspect datasets",
-      description: "Review snapshots, coverage windows, and data health checks.",
-      meta: `${dataSourceLabel} · ${dataFreshnessDate}`,
-      to: "/datasets",
-      tone: "default",
+      key: "calibration",
+      title: "Calibrate models",
+      status: modelSummary?.modelCount ? "Ready" : "Missing",
+      description: latestModel?.id
+        ? `Latest model: ${latestModel.id}`
+        : "No calibration models found.",
+      meta: latestModel?.modifiedAt
+        ? `Updated ${formatDateTime(latestModel.modifiedAt)}`
+        : "Run calibration to produce a model artifact.",
+      to: "/calibrate-models",
     },
     {
-      title: "Resume last run",
-      description: "Continue a paused calibration sweep without resetting inputs.",
-      meta: hero?.lastRunId ? `Run ID: ${hero.lastRunId}` : "No active run",
-      to: "/results",
-      tone: "ghost",
+      key: "edge",
+      title: "Edge",
+      status: phatEdgeStatus,
+      description: phatEdgeDescription,
+      meta: phatEdgeMeta,
+      hint: phatEdgeTop,
+      to: "/edge",
     },
   ];
+
 
   return (
     <section className="page dashboard">
@@ -158,11 +230,11 @@ export default function DashboardPage() {
             Keep pRN, pHAT, and pPM outputs reproducible and easy to audit.
           </p>
           <div className="hero-actions">
-            <Link className="button primary" to="/pipeline">
-              Run full pipeline
+            <Link className="button primary" to="/option-chain">
+              Build option chain
             </Link>
-            <Link className="button light" to="/results">
-              Compare latest outputs
+            <Link className="button light" to="/polymarket">
+              Run Polymarket snapshot
             </Link>
           </div>
           <div className="hero-badges">
@@ -170,7 +242,7 @@ export default function DashboardPage() {
               <div className="badge-label">Data freshness</div>
               <div className="badge-value">{dataFreshnessLabel}</div>
               <div className="badge-sub">
-                {dataSourceLabel} · {dataFreshnessDate}
+                {dataSourceLabel} - {dataFreshnessDate}
               </div>
             </div>
             <div className="badge-card">
@@ -189,59 +261,12 @@ export default function DashboardPage() {
           <div className="panel-card">
             <div className="card-header">
               <div>
-                <h2>Pipeline readiness</h2>
-                <p>Confirm inputs before you run.</p>
-              </div>
-              <span className={`status-pill ${readinessStateVariant}`}>
-                {readinessState}
-              </span>
-            </div>
-            <ul className="checklist">
-              {readiness.length ? (
-                readiness.map((item) => (
-                  <li key={item.title}>
-                    <div className="checklist-row">
-                      <div>
-                        <div className="checklist-title">{item.title}</div>
-                        <div className="checklist-sub">{item.detail}</div>
-                      </div>
-                      <span
-                        className={`status-pill ${
-                          item.status === "Ready" ? "success" : "failed"
-                        }`}
-                      >
-                        {item.status}
-                      </span>
-                    </div>
-                    <div className="progress-bar">
-                      <span
-                        className="progress-fill"
-                        style={{ width: `${item.progress}%` }}
-                      />
-                    </div>
-                  </li>
-                ))
-              ) : (
-                <li className="empty-state">
-                  No readiness data available yet.
-                </li>
-              )}
-            </ul>
-            <div className="panel-actions">
-              <Link className="button ghost" to="/pipeline">
-                Review pipeline settings
-              </Link>
-            </div>
-          </div>
-          <div className="panel-card">
-            <div className="card-header">
-              <div>
                 <h2>Run queue</h2>
                 <p>Watch active and scheduled jobs.</p>
               </div>
-            <span className="status-pill running">
-              {runQueue.length ? `${runQueue.length} jobs` : "Idle"}
-            </span>
+              <span className="status-pill running">
+                {runQueue.length ? `${runQueue.length} jobs` : "Idle"}
+              </span>
             </div>
             <ul className="queue">
               {runQueue.length ? (
@@ -259,7 +284,7 @@ export default function DashboardPage() {
               )}
             </ul>
             <div className="panel-actions">
-              <Link className="button ghost" to="/results">
+              <Link className="button ghost" to="/option-chain">
                 Open run monitor
               </Link>
             </div>
@@ -267,122 +292,39 @@ export default function DashboardPage() {
         </div>
       </section>
 
-      <section className="dashboard-actions reveal delay-2">
-        <div className="section-heading">
-          <div>
-            <h2>Quick actions</h2>
-            <p>Jump into the workflows you use most.</p>
+      <section className="dashboard-overview reveal delay-2">
+          <div className="section-heading">
+            <div>
+              <h2>Pipeline overview</h2>
+              <p>Jump into each stage and track readiness.</p>
+            </div>
           </div>
-          <Link className="button ghost" to="/pipeline">
-            Open pipeline runner
-          </Link>
-        </div>
-        <div className="action-grid">
-          {quickActions.map((action) => (
-            <Link
-              key={action.title}
-              to={action.to}
-              className={`action-card ${action.tone}`}
-            >
-              <div className="action-title">{action.title}</div>
-              <div className="action-body">{action.description}</div>
-              <div className="action-meta">{action.meta}</div>
-            </Link>
+        <div className="stage-grid">
+          {stageCards.map((stage) => (
+            <div key={stage.key} className="stage-card">
+              <div className="stage-card-header">
+                <h3 className="stage-title">{stage.title}</h3>
+                <span
+                  className={`status-pill ${statusVariant(stage.status)}`}
+                >
+                  {stage.status}
+                </span>
+              </div>
+              <p className="stage-description">{stage.description}</p>
+              <div className="stage-meta">{stage.meta}</div>
+              {"hint" in stage && stage.hint ? (
+                <div className="stage-hint">{stage.hint}</div>
+              ) : null}
+              <div className="stage-actions">
+                <Link className="button ghost" to={stage.to}>
+                  Open stage
+                </Link>
+              </div>
+            </div>
           ))}
         </div>
       </section>
 
-      <section className="dashboard-insights reveal delay-3">
-        <div className="insight-card">
-          <div className="card-header">
-            <div>
-              <h2>Recent runs</h2>
-              <p>Review outputs and log summaries.</p>
-            </div>
-            <Link className="button ghost" to="/results">
-              View all runs
-            </Link>
-          </div>
-          <ul className="run-list">
-            {recentRuns.length ? (
-              recentRuns.map((run) => (
-                <li key={run.id}>
-                  <div className="run-main">
-                    <div className="run-title">{run.focus}</div>
-                    <div className="run-meta">
-                      {run.dataset} | {run.id}
-                    </div>
-                  </div>
-                  <div className="run-aside">
-                    <span
-                          className={`status-pill ${
-                            run.status === "Success" ? "success" : "failed"
-                          }`}
-                        >
-                      {run.status}
-                    </span>
-                    <div className="run-time">{formatDateTime(run.time)}</div>
-                  </div>
-                </li>
-              ))
-            ) : (
-              <li className="empty-state">No runs recorded yet.</li>
-            )}
-          </ul>
-        </div>
-        <div className="insight-card">
-          <div className="card-header">
-            <div>
-              <h2>Calibration snapshot</h2>
-              <p>Latest metrics pulled from models.</p>
-            </div>
-            <span className="status-pill running">
-              {snapshot?.split ? snapshot.split : "Awaiting metrics"}
-            </span>
-          </div>
-          <div className="metric-grid">
-            <div className="metric">
-              <div className="metric-label">Logloss</div>
-              <div className="metric-value">
-                {formatMetric(snapshot?.logloss, 3)}
-              </div>
-              <div className="metric-sub">{snapshot?.model ?? "No data"}</div>
-            </div>
-            <div className="metric">
-              <div className="metric-label">Brier score</div>
-              <div className="metric-value">
-                {formatMetric(snapshot?.brier, 3)}
-              </div>
-              <div className="metric-sub">{snapshot?.model ?? "No data"}</div>
-            </div>
-            <div className="metric">
-              <div className="metric-label">ECE</div>
-              <div className="metric-value">
-                {formatMetric(snapshot?.ece, 3)}
-              </div>
-              <div className="metric-sub">{snapshot?.model ?? "No data"}</div>
-            </div>
-          </div>
-          <div className="signal-panel">
-            <div className="signal-header">
-              <div className="signal-title">Calibration stability</div>
-              <div className="signal-sub">Last {signalBars.length || 0} runs</div>
-            </div>
-            {signalBars.length ? (
-              <div className="signal-bars">
-                {signalBars.map((value, index) => (
-                  <span
-                    key={`${value}-${index}`}
-                    style={{ height: `${value}%` }}
-                  />
-                ))}
-              </div>
-            ) : (
-              <div className="empty-state">No signal history yet.</div>
-            )}
-          </div>
-        </div>
-      </section>
     </section>
   );
 }
