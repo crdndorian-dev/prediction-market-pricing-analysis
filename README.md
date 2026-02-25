@@ -1,11 +1,10 @@
 Author: Dorian Cardon
 Institution: Université Paris II Panthéon-Assas  
-Program: College of Economics  
 Year: 2026  
 Contact: crdn.dorian@gmail.com
 GitHub: https://github.com/crdndorian-dev
 
-Abstract
+# Abstract
 
 This project develops a quantitative research framework designed to analyze the pricing structure and potential inefficiencies of Polymarket-style binary prediction markets. The objective is not to claim superior forecasting accuracy, but rather to explore whether prices observed in decentralized prediction markets are consistent with economically grounded benchmarks derived from traditional financial markets.
 
@@ -16,3 +15,13 @@ In contrast, listed equity options markets provide a rich cross-section of arbit
 The central contribution of this project is to construct a systematic and time-safe pipeline that links these two environments. The framework first extracts risk-neutral probabilities from listed options data for events comparable to those traded on Polymarket. It then investigates, through statistical calibration methods, whether a stable relationship can be learned between risk-neutral measures and realized event frequencies. This mapping is subsequently used to generate fair-value probability estimates for Polymarket contracts, allowing for a structured comparison between decentralized market prices and derivative-implied benchmarks.
 
 The project places particular emphasis on dataset design, temporal consistency, and robustness across different market regimes. Rather than assuming persistent inefficiency, it evaluates empirically whether deviations between Polymarket prices and calibrated benchmarks are economically meaningful, statistically significant, or largely attributable to noise. Backtesting procedures are implemented to assess whether observed discrepancies translate into consistent expected value under realistic assumptions.
+
+# How to use
+
+To launch the webapp locally, run:
+
+```bash
+./run-webapp.sh
+```
+
+This script provisions the backend venv/deps, starts FastAPI on port 8000 (or the next free port in 8000-8050), and starts the Vite frontend wired to that API. Use the URL printed by Vite in the terminal. For manual setup, see `src/webapp/README.md`.
