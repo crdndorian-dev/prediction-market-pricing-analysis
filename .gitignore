@@ -1,11 +1,41 @@
+# config files
+
 AGENTS.md
-src/data/raw/polymarket/weekly_history/runs/weekly-history-20260212T014930Z/price_history.csv
 /.claude/
+/.cursor/
+/.vscode/
+!/.vscode/extensions.json
+
+
+.env
+.env.*
+*.env
+
+
 /ci/
 /tests/
 /tools/
 /context/
-/.cursor/
-/.vscode/
 /docs/
-echo "**/.DS_Store" >> .gitignore
+
+
+**/.DS_Store
+
+
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+src/webapp/backend/.venv/
+
+
+src/webapp/frontend/node_modules/
+src/webapp/frontend/dist/
+src/webapp/frontend/dist-ssr/
+
+# src/data/ — all regeneratable
+
+src/data/analysis/
+src/data/cache/
+src/data/models/
+src/data/raw/polymarket/
+src/data/raw/option-chain/
