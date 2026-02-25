@@ -29,6 +29,7 @@ import {
   type PHATEdgeRunResponse,
   type PHATEdgeSummaryResponse,
 } from "../api/phatEdge";
+import PipelineStatusCard from "../components/PipelineStatusCard";
 import { usePhatEdgeJob } from "../contexts/phatEdgeJob";
 import { useAnyJobRunning } from "../contexts/jobGuard";
 import "./PHATEdgePage.css";
@@ -188,7 +189,7 @@ export default function PHATEdgePage() {
   const [models, setModels] = useState<ModelRunSummary[]>([]);
   const [modelError, setModelError] = useState<string | null>(null);
   const [snapshots, setSnapshots] = useState<SnapshotOption[]>([]);
-  const [snapshotRuns, setSnapshotRuns] = useState<PolymarketSnapshotRunSummary[]>([]);
+  const [, setSnapshotRuns] = useState<PolymarketSnapshotRunSummary[]>([]);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [runResult, setRunResult] =
     useState<PHATEdgeRunResponse | null>(() => loadStoredRun());
@@ -220,7 +221,7 @@ export default function PHATEdgePage() {
     useState<"all" | 1 | 3>("all");
   const [excludePrnOutOfRange, setExcludePrnOutOfRange] = useState(false);
   const { jobStatus, setJobId, setJobStatus } = usePhatEdgeJob();
-  const { anyJobRunning, primaryJob } = useAnyJobRunning();
+  const { anyJobRunning, primaryJob, activeJobs } = useAnyJobRunning();
 
   const isRunning =
     jobStatus?.status === "queued" || jobStatus?.status === "running";
@@ -628,11 +629,10 @@ export default function PHATEdgePage() {
             Load an artifact from <code>src/data/models</code>, pick a Polymarket snapshot, and emit a queue of pHAT + edge signals for the trading desk.
           </p>
         </div>
-        <div className="meta-card phat-meta page-goal-card">
-          <span className="meta-label">Goal</span>
-          <span>Score a Polymarket snapshot with the latest calibration to produce pHAT & edge signals.</span>
-          <div className="meta-pill">Outputs stored under src/data/analysis/phat-edge</div>
-        </div>
+        <PipelineStatusCard
+          className="phat-meta"
+          activeJobsCount={activeJobs.length}
+        />
       </header>
 
       <div className="phat-edge-grid">

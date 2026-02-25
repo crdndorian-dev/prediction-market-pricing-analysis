@@ -31,6 +31,7 @@ export type ModelDetailResponse = {
   model_equation?: string | null;
   metadata?: Record<string, unknown> | null;
   feature_manifest?: Record<string, unknown> | null;
+  two_stage_metrics?: TwoStageMetricRow[] | null;
 };
 
 export type ModelListResponse = {
@@ -41,13 +42,13 @@ export type ModelListResponse = {
 export type CalibrateModelRunRequest = {
   csv: string;
   outName?: string;
+  modelKind?: "calibrate" | "mixed" | "both";
   targetCol?: string;
   weekCol?: string;
   tickerCol?: string;
   weightCol?: string;
   foundationTickers?: string;
   foundationWeight?: number;
-  mode?: "baseline" | "pooled" | "two_stage";
   tickerIntercepts?: "none" | "all" | "non_foundation";
   tickerXInteractions?: boolean;
   tickerMinSupport?: number;
@@ -82,6 +83,27 @@ export type CalibrateModelRunRequest = {
   bootstrapB?: number;
   bootstrapSeed?: number;
   bootstrapGroup?: "auto" | "ticker_day" | "day" | "iid";
+  mixedFeatures?: string;
+  mixedOutDir?: string;
+  mixedRunId?: string;
+  mixedModel?: "residual" | "blend";
+  mixedPmCol?: string;
+  mixedPrnCol?: string;
+  mixedLabelCol?: string;
+  mixedFeaturesCols?: string;
+  mixedTrainFrac?: number;
+  mixedWalkForward?: boolean;
+  mixedWfTrainDays?: number;
+  mixedWfTestDays?: number;
+  mixedWfStepDays?: number;
+  mixedMaxSplits?: number;
+  mixedEmbargoDays?: number;
+  mixedMinTimeToResolutionDays?: number;
+  mixedAlpha?: number;
+  twoStageMode?: boolean;
+  twoStagePrnCsv?: string;
+  twoStagePmCsv?: string;
+  twoStageLabelCol?: string;
 };
 
 export type MetricsSummaryStatus = "good" | "unusable";
@@ -126,6 +148,15 @@ export type CalibrateModelRunResponse = {
   auto_out_dir?: string | null;
   features?: string[] | null;
   model_equation?: string | null;
+  two_stage_metrics?: TwoStageMetricRow[] | null;
+};
+
+export type TwoStageMetricRow = {
+  split: string;
+  model: string;
+  logloss: number;
+  brier: number;
+  n: number;
 };
 
 export type CalibrationJobStatus = {
@@ -136,6 +167,16 @@ export type CalibrationJobStatus = {
   error: string | null;
   started_at: string | null;
   finished_at: string | null;
+  progress?: ProgressPayload | null;
+};
+
+export type ProgressPayload = {
+  stage: string;
+  trials_total: number;
+  trials_done: number;
+  trials_failed: number;
+  best_score_so_far: number | null;
+  last_error: string | null;
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
@@ -144,6 +185,14 @@ export async function fetchCalibrationDatasets(): Promise<DatasetListResponse> {
   const response = await fetch(`${API_BASE}/calibrate-models/datasets`);
   if (!response.ok) {
     throw new Error(`Dataset list failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function fetchPolymarketCalibrationDatasets(): Promise<DatasetListResponse> {
+  const response = await fetch(`${API_BASE}/calibrate-models/polymarket-datasets`);
+  if (!response.ok) {
+    throw new Error(`Polymarket dataset list failed: ${response.status}`);
   }
   return response.json();
 }
@@ -198,13 +247,13 @@ export async function runCalibration(
     body: JSON.stringify({
       csv: payload.csv,
       out_name: payload.outName,
+      model_kind: payload.modelKind,
       target_col: payload.targetCol,
       week_col: payload.weekCol,
       ticker_col: payload.tickerCol,
       weight_col: payload.weightCol,
       foundation_tickers: payload.foundationTickers,
       foundation_weight: payload.foundationWeight,
-      mode: payload.mode,
       ticker_intercepts: payload.tickerIntercepts,
       ticker_x_interactions: payload.tickerXInteractions,
       ticker_min_support: payload.tickerMinSupport,
@@ -239,6 +288,27 @@ export async function runCalibration(
       bootstrap_b: payload.bootstrapB,
       bootstrap_seed: payload.bootstrapSeed,
       bootstrap_group: payload.bootstrapGroup,
+      mixed_features: payload.mixedFeatures,
+      mixed_out_dir: payload.mixedOutDir,
+      mixed_run_id: payload.mixedRunId,
+      mixed_model: payload.mixedModel,
+      mixed_pm_col: payload.mixedPmCol,
+      mixed_prn_col: payload.mixedPrnCol,
+      mixed_label_col: payload.mixedLabelCol,
+      mixed_features_cols: payload.mixedFeaturesCols,
+      mixed_train_frac: payload.mixedTrainFrac,
+      mixed_walk_forward: payload.mixedWalkForward,
+      mixed_wf_train_days: payload.mixedWfTrainDays,
+      mixed_wf_test_days: payload.mixedWfTestDays,
+      mixed_wf_step_days: payload.mixedWfStepDays,
+      mixed_max_splits: payload.mixedMaxSplits,
+      mixed_embargo_days: payload.mixedEmbargoDays,
+      mixed_min_time_to_resolution_days: payload.mixedMinTimeToResolutionDays,
+      mixed_alpha: payload.mixedAlpha,
+      two_stage_mode: payload.twoStageMode,
+      two_stage_prn_csv: payload.twoStagePrnCsv,
+      two_stage_pm_csv: payload.twoStagePmCsv,
+      two_stage_label_col: payload.twoStageLabelCol,
     }),
   });
 
@@ -254,8 +324,11 @@ export async function runCalibration(
 
 export type AutoModelRunRequest = {
   csv: string;
+  mode?: "option_only" | "mixed";
+  pmDatasetPath?: string;
   runName?: string;
-  objective?: "logloss";
+  modelKind?: "calibrate" | "mixed" | "both";
+  objective?: "logloss" | "roll_val_logloss" | "test_logloss";
   maxTrials?: number;
   seed?: number;
   parallel?: number;
@@ -268,6 +341,23 @@ export type AutoModelRunRequest = {
   bootstrapB?: number;
   bootstrapSeed?: number;
   bootstrapGroup?: "auto" | "ticker_day" | "day" | "iid";
+  mixedFeatures?: string;
+  mixedOutDir?: string;
+  mixedRunId?: string;
+  mixedModel?: "residual" | "blend";
+  mixedPmCol?: string;
+  mixedPrnCol?: string;
+  mixedLabelCol?: string;
+  mixedFeaturesCols?: string;
+  mixedTrainFrac?: number;
+  mixedWalkForward?: boolean;
+  mixedWfTrainDays?: number;
+  mixedWfTestDays?: number;
+  mixedWfStepDays?: number;
+  mixedMaxSplits?: number;
+  mixedEmbargoDays?: number;
+  mixedMinTimeToResolutionDays?: number;
+  mixedAlpha?: number;
 };
 
 export async function runAutoModelSelection(
@@ -278,7 +368,10 @@ export async function runAutoModelSelection(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       csv: payload.csv,
+      mode: payload.mode,
+      pm_dataset_path: payload.pmDatasetPath,
       run_name: payload.runName,
+      model_kind: payload.modelKind,
       objective: payload.objective,
       max_trials: payload.maxTrials,
       seed: payload.seed,
@@ -292,6 +385,23 @@ export async function runAutoModelSelection(
       bootstrap_b: payload.bootstrapB,
       bootstrap_seed: payload.bootstrapSeed,
       bootstrap_group: payload.bootstrapGroup,
+      mixed_features: payload.mixedFeatures,
+      mixed_out_dir: payload.mixedOutDir,
+      mixed_run_id: payload.mixedRunId,
+      mixed_model: payload.mixedModel,
+      mixed_pm_col: payload.mixedPmCol,
+      mixed_prn_col: payload.mixedPrnCol,
+      mixed_label_col: payload.mixedLabelCol,
+      mixed_features_cols: payload.mixedFeaturesCols,
+      mixed_train_frac: payload.mixedTrainFrac,
+      mixed_walk_forward: payload.mixedWalkForward,
+      mixed_wf_train_days: payload.mixedWfTrainDays,
+      mixed_wf_test_days: payload.mixedWfTestDays,
+      mixed_wf_step_days: payload.mixedWfStepDays,
+      mixed_max_splits: payload.mixedMaxSplits,
+      mixed_embargo_days: payload.mixedEmbargoDays,
+      mixed_min_time_to_resolution_days: payload.mixedMinTimeToResolutionDays,
+      mixed_alpha: payload.mixedAlpha,
     }),
   });
 
@@ -322,7 +432,6 @@ export async function startCalibrationJob(
       weight_col: payload.weightCol,
       foundation_tickers: payload.foundationTickers,
       foundation_weight: payload.foundationWeight,
-      mode: payload.mode,
       ticker_intercepts: payload.tickerIntercepts,
       ticker_x_interactions: payload.tickerXInteractions,
       ticker_min_support: payload.tickerMinSupport,
@@ -378,6 +487,8 @@ export async function startAutoCalibrationJob(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       csv: payload.csv,
+      mode: payload.mode,
+      pm_dataset_path: payload.pmDatasetPath,
       run_name: payload.runName,
       objective: payload.objective,
       max_trials: payload.maxTrials,
@@ -519,6 +630,63 @@ export async function previewCalibrationRegime(
     const detail = await response.text();
     throw new Error(
       `Regime preview failed (${response.status}): ${detail || "unknown error"}`,
+    );
+  }
+
+  return response.json();
+}
+
+export type DatasetTickersResponse = {
+  dataset: string;
+  tickers: string[];
+  count: number;
+};
+
+export type FeatureStat = {
+  missing_pct: number;
+  dtype: string;
+  nunique: number;
+};
+
+export type RegimeInfo = {
+  tdays_mode: number[] | null;
+  is_weekly: boolean | null;
+  is_daily: boolean | null;
+};
+
+export type DatasetFeaturesResponse = {
+  dataset: string;
+  available_columns: string[];
+  feature_stats: Record<string, FeatureStat>;
+  regime_info: RegimeInfo;
+};
+
+export async function fetchDatasetFeatures(
+  dataset: string,
+): Promise<DatasetFeaturesResponse> {
+  const response = await fetch(
+    `${API_BASE}/calibrate-models/datasets/features?dataset=${encodeURIComponent(dataset)}`,
+  );
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      `Failed to fetch dataset features (${response.status}): ${detail || "unknown error"}`,
+    );
+  }
+  return response.json();
+}
+
+export async function fetchDatasetTickers(
+  dataset: string,
+): Promise<DatasetTickersResponse> {
+  const response = await fetch(
+    `${API_BASE}/calibrate-models/datasets/tickers?dataset=${encodeURIComponent(dataset)}`,
+  );
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      `Failed to fetch dataset tickers (${response.status}): ${detail || "unknown error"}`,
     );
   }
 

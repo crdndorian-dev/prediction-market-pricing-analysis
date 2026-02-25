@@ -31,7 +31,7 @@ from app.models.datasets import (
 )
 
 BASE_DIR = Path(__file__).resolve().parents[5]
-SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "1-option-chain-build-historic-dataset-v1.0.py"
+SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "01-option-chain-build-historic-dataset-v1.0.py"
 
 DEFAULT_OUT_DIR = "src/data/raw/option-chain"
 DEFAULT_OUT_NAME = "pRN__history__mon_thu__PM10__v1.6.0.csv"

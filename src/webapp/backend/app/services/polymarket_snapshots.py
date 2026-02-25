@@ -39,7 +39,7 @@ def _unique_dirs(paths: List[Path]) -> List[Path]:
 
 
 BASE_DIR = Path(__file__).resolve().parents[5]
-SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "3-polymarket-fetch-data-v1.0.py"
+SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "05-polymarket-fetch-snapshot-v1.0.py"
 POLYMKT_DATA_DIRS = _unique_dirs(
     [
         BASE_DIR / "src" / "data" / "raw" / "polymarket",
@@ -71,12 +71,13 @@ def _polymarket_base_dirs(existing_only: bool = True) -> List[Path]:
 def _polymarket_history_dirs(existing_only: bool = True) -> List[Path]:
     dirs: List[Path] = []
     for base in _polymarket_base_dirs(existing_only=existing_only):
-        history_dir = base / "history"
-        if history_dir.exists() or not existing_only:
-            dirs.append(history_dir)
+        for name in ("snapshot_history", "history"):
+            history_dir = base / name
+            if history_dir.exists() or not existing_only:
+                dirs.append(history_dir)
     if not dirs:
-        dirs = [(POLYMKT_DATA_DIRS[0] / "history")]
-    return dirs
+        dirs = [(POLYMKT_DATA_DIRS[0] / "snapshot_history")]
+    return _unique_dirs(dirs)
 
 
 def _polymarket_runs_dirs(existing_only: bool = True) -> List[Path]:

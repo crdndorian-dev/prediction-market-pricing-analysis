@@ -1,0 +1,5 @@
+timestamp_utc,market_id,open,high,low,close,volume,trade_count,schema_version
+2026-02-04T00:00:00Z,1301650,0.017,0.017,0.0055,0.0055,,,pm_bars_history_v1.0
+2026-02-04T00:00:00Z,1301650,0.017,0.017,0.0055,0.0055,,,pm_bars_history_v1.0
+2026-02-04T00:00:00Z,1301650,0.017,0.017,0.0055,0.0055,,,pm_bars_history_v1.0
+2026-02-04T00:00:00Z,1301650,0.017,0.017,0.0055,0.0055,,,pm_bars_history_v1.0

@@ -1,0 +1,70 @@
+{
+  "script_version": "v2.0.0",
+  "calibrator_version": "inline-v2.0",
+  "best_C": 0.5,
+  "features": [
+    "x_logit_prn",
+    "log_m_fwd",
+    "abs_log_m_fwd",
+    "x_m",
+    "x_abs_m"
+  ],
+  "features_used_final": [
+    "x_logit_prn",
+    "log_m_fwd",
+    "abs_log_m_fwd",
+    "x_m",
+    "x_abs_m"
+  ],
+  "categorical_features": [
+    "spot_scale_used",
+    "_ticker_feature"
+  ],
+  "categorical_features_used": [
+    "spot_scale_used",
+    "_ticker_feature"
+  ],
+  "ticker_intercepts": "non_foundation",
+  "ticker_col": "ticker",
+  "ticker_feature_col": "_ticker_feature",
+  "target_col": "outcome_ST_gt_K",
+  "train_rows": 55194,
+  "test_rows": 10992,
+  "csv": "/Users/dorianc./Desktop/polyedgetool/prediction-market-pricing-analysis/src/data/raw/option-chain/weekly-4-3-2-1dte-expiring-friday-dataset/training-weekly-4-3-2-1dte-expiring-friday-dataset.csv",
+  "coefficients": [
+    1.3779641549037995,
+    -0.017587584394375348,
+    0.3198364823068073,
+    0.22726623815008615,
+    0.04881541650977959,
+    -0.263597542751717,
+    -0.11990588509689896,
+    0.08662241082583025,
+    0.2320364602020622,
+    0.24093343401203762,
+    0.10924819780340135,
+    0.14767756275849525,
+    0.011931355002257931,
+    0.42330116002413704
+  ],
+  "intercept": 0.5548134628694128,
+  "feature_names_out": [
+    "num__x_logit_prn",
+    "num__log_m_fwd",
+    "num__abs_log_m_fwd",
+    "num__x_m",
+    "num__x_abs_m",
+    "cat__spot_scale_used_split_adj",
+    "cat___ticker_feature_AMD",
+    "cat___ticker_feature_AMZN",
+    "cat___ticker_feature_FOUNDATION",
+    "cat___ticker_feature_GOOGL",
+    "cat___ticker_feature_META",
+    "cat___ticker_feature_MSFT",
+    "cat___ticker_feature_NVDA",
+    "cat___ticker_feature_PLTR"
+  ],
+  "calibration": "platt",
+  "git_commit": "b06fddf4414ef93593560566beadff367e0b9b07",
+  "created_at_utc": "2026-02-23T11:47:35.111715+00:00"
+}

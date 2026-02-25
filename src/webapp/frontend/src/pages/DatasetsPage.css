@@ -10,7 +10,7 @@
 
 .datasets-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-6);
 }
 
@@ -193,22 +193,20 @@
   .run-shell {
     flex-direction: column;
   }
-
-  .dataset-registry-body {
-    grid-template-columns: 1fr;
-  }
 }
 
 .dataset-registry-body {
-  display: grid;
-  grid-template-columns: minmax(0, 360px) minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: var(--space-6);
+  align-items: stretch;
 }
 
 .dataset-runs-list {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  width: 100%;
 }
 
 .dataset-run-item {
@@ -219,6 +217,27 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+}
+
+.dataset-run-toggle {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  border: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.dataset-run-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: var(--radius-lg);
 }
 
 .dataset-run-main {
@@ -255,6 +274,17 @@
   flex-wrap: wrap;
   gap: var(--space-3);
   align-items: center;
+}
+
+.dataset-run-chevron {
+  font-size: 1.1rem;
+  color: var(--ink-500);
+  transition: transform 180ms ease, color 180ms ease;
+}
+
+.dataset-run-item.is-open .dataset-run-chevron {
+  transform: rotate(90deg);
+  color: var(--ink-700);
 }
 
 .dataset-registry-panel .button.small {
@@ -379,6 +409,12 @@
   flex-direction: column;
   gap: var(--space-4);
   min-height: 320px;
+  width: 100%;
+}
+
+.dataset-preview-inline {
+  margin-top: var(--space-3);
+  min-height: 0;
 }
 
 .dataset-preview-header {
@@ -386,12 +422,32 @@
   justify-content: space-between;
   gap: var(--space-4);
   align-items: flex-start;
+  flex-wrap: wrap;
 }
 
 .dataset-preview-title {
   margin: 0;
   font-size: var(--text-lg);
   color: var(--ink-900);
+}
+
+.dataset-preview-controls {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: flex-end;
+}
+
+.dataset-preview-control {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 120px;
+}
+
+.dataset-preview-control .input {
+  min-width: 120px;
 }
 
 .dataset-preview-panel .table-container {

@@ -1,0 +1,67 @@
+{
+  "status": "success",
+  "return_code": 0,
+  "runtime_seconds": 2.1471652500003984,
+  "objective": 0.49373939589232285,
+  "score": 0.49373939589232285,
+  "delta_brier": null,
+  "delta_ece": null,
+  "val_logloss_std": null,
+  "val_logloss_by_window": [],
+  "test_metrics": {
+    "logloss": 0.49373939589232285,
+    "brier": 0.16253742505899552,
+    "ece": 0.07419380290505306,
+    "ece_q": NaN,
+    "baseline_logloss": 0.48034660869525064
+  },
+  "train_weeks_range": null,
+  "test_weeks_range": null,
+  "command": [
+    "/Users/dorianc./Desktop/polyedgetool/prediction-market-pricing-analysis/src/webapp/backend/.venv/bin/python3.12",
+    "/Users/dorianc./Desktop/polyedgetool/prediction-market-pricing-analysis/src/scripts/03-calibrate-logit-model-v2.0.py",
+    "--csv",
+    "/Users/dorianc./Desktop/polyedgetool/prediction-market-pricing-analysis/src/data/raw/option-chain/weekly-4-3-2-1dte-expiring-friday-dataset/training-weekly-4-3-2-1dte-expiring-friday-dataset.csv",
+    "--out-dir",
+    "/Users/dorianc./Desktop/polyedgetool/prediction-market-pricing-analysis/src/data/models/auto-run-20260223T114329Z/trials/313__C=auto__feat=min__ti=all__tx=0__decay=0__cal=none__foundation=off__620fee9d",
+    "--features",
+    "x_logit_prn",
+    "--ticker-intercepts",
+    "all",
+    "--calibrate",
+    "none",
+    "--train-decay-half-life-weeks",
+    "0",
+    "--foundation-tickers",
+    "",
+    "--foundation-weight",
+    "1.0",
+    "--random-state",
+    "354"
+  ],
+  "stdout": "RUNNING SCRIPT: /Users/dorianc./Desktop/polyedgetool/prediction-market-pricing-analysis/src/scripts/03-calibrate-logit-model-v2.0.py\nVERSION: v2.0.0\n[v2.0] Training mode: two_stage\n[v2.0] Feature sources: both\n[v2.0] Compute edge: False\n[base-model] C=5  train=55194  test=10992  features=1num+2cat  out=/Users/dorianc./Desktop/polyedgetool/prediction-market-pricing-analysis/src/data/models/auto-run-20260223T114329Z/trials/313__C=auto__feat=min__ti=all__tx=0__decay=0__cal=none__foundation=off__620fee9d\n",
+  "stderr": "",
+  "config": {
+    "mode": "option_only",
+    "feature_choices": {
+      "volatility": [],
+      "moneyness": [],
+      "interactions": []
+    },
+    "option_features": [
+      "x_logit_prn"
+    ],
+    "pm_features": [],
+    "ticker_intercepts": "all",
+    "train_decay_half_life_weeks": 0,
+    "calibrate": "none",
+    "foundation_enabled": false,
+    "foundation_weight": 1.0,
+    "foundation_tickers": "QQQ,SPY",
+    "enable_x_m": false,
+    "enable_x_abs_m": false,
+    "ticker_x_interactions": false,
+    "group_reweight": "none",
+    "C": null
+  }
+}

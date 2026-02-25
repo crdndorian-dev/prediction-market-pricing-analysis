@@ -18,6 +18,7 @@ export type DashboardData = {
     progress: number;
   }>;
   runQueue: Array<{
+    jobId?: string;
     name: string;
     state: string;
     detail: string;
@@ -78,6 +79,52 @@ export type DashboardData = {
     lastModified: string;
     maxEdge: number | null;
     maxEdgeTicker: string | null;
+  } | null;
+  subgraphSummary?: {
+    latestRunId: string | null;
+    latestRunTime: string | null;
+    latestQuery: string | null;
+    totalEntities: number | null;
+  } | null;
+  marketMapSummary?: {
+    fileName: string;
+    path: string;
+    rowCount: number | null;
+    lastModified: string;
+  } | null;
+  barsSummary?: {
+    barsDir: string;
+    freqs: Record<string, number>;
+    lastModified: string | null;
+  } | null;
+  featuresSummary?: {
+    fileName: string;
+    path: string;
+    lastModified: string;
+    featureCount: number | null;
+    createdAtUtc: string | null;
+  } | null;
+  mixedModelSummary?: {
+    runCount: number;
+    latestRunId: string | null;
+    latestRunTime: string | null;
+    modelType: string | null;
+    rowCount: number | null;
+  } | null;
+  backtestSummary?: {
+    latestRunId: string | null;
+    latestRunTime: string | null;
+    metrics: {
+      trades: number | null;
+      hitRate: number | null;
+      sharpeLike: number | null;
+      maxDrawdown: number | null;
+    } | null;
+  } | null;
+  signalsSummary?: {
+    latestRunId: string | null;
+    latestRunTime: string | null;
+    rowCount: number | null;
   } | null;
   modelSummary?: {
     modelCount: number;

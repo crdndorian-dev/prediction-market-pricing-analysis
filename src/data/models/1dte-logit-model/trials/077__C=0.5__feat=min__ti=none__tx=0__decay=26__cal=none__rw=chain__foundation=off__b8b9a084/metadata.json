@@ -1,7 +1,7 @@
 {
   "script": "2-calibrate-logit-model-v1.5.py",
-  "csv": "/Users/dorianc./Desktop/polyedgetool/polyedgetool/src/data/raw/option-chain/1dte-01-06-23-30-01-26/training-1dte-01-06-23-30-01-26.csv",
-  "out_dir": "/Users/dorianc./Desktop/polyedgetool/polyedgetool/src/data/models/1dte-logit-model/trials/077__C=0.5__feat=min__ti=none__tx=0__decay=26__cal=none__rw=chain__foundation=off__b8b9a084",
+  "csv": "/Users/dorianc./Desktop/polyedgetool/prediction-market-pricing-analysis/src/data/raw/option-chain/1dte-01-06-23-30-01-26/training-1dte-01-06-23-30-01-26.csv",
+  "out_dir": "/Users/dorianc./Desktop/polyedgetool/prediction-market-pricing-analysis/src/data/models/1dte-logit-model/trials/077__C=0.5__feat=min__ti=none__tx=0__decay=26__cal=none__rw=chain__foundation=off__b8b9a084",
   "target_col": "outcome_ST_gt_K",
   "week_col": "week_friday",
   "ticker_col": "ticker",

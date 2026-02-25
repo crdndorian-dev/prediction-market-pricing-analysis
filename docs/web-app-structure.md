@@ -7,7 +7,7 @@ Goal: propose a clear structure for building a local web application that keeps 
 ## Overview (project root)
 
 ```
-polyedgetool/
+prediction-market-pricing-analysis/
 ├─ docs/
 │  ├─ WEB_APP_STRUCTURE.md
 │  └─ ui-ux/

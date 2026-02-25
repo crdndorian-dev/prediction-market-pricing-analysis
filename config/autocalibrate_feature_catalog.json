@@ -1,0 +1,129 @@
+{
+  "version": "1.1",
+  "groups": [
+    {
+      "name": "volatility",
+      "policy": "at_most_one",
+      "options": [
+        "rv20",
+        "rv20_sqrtT"
+      ],
+      "modes": [
+        "option_only",
+        "mixed"
+      ]
+    },
+    {
+      "name": "moneyness",
+      "policy": "any_subset",
+      "options": [
+        "log_m_fwd",
+        "abs_log_m_fwd"
+      ],
+      "modes": [
+        "option_only",
+        "mixed"
+      ]
+    },
+    {
+      "name": "interactions",
+      "policy": "any_subset",
+      "options": [
+        "x_m",
+        "x_abs_m"
+      ],
+      "dependencies": {
+        "x_m": [
+          "log_m_fwd"
+        ],
+        "x_abs_m": [
+          "abs_log_m_fwd"
+        ]
+      },
+      "modes": [
+        "option_only",
+        "mixed"
+      ]
+    },
+    {
+      "name": "pm_signal",
+      "policy": "required_if_mixed",
+      "options": [
+        "pm_mid"
+      ],
+      "modes": [
+        "mixed"
+      ]
+    },
+    {
+      "name": "pm_auxiliary",
+      "policy": "any_subset",
+      "options": [
+        "pm_spread",
+        "pm_liquidity_proxy",
+        "pm_momentum_1h",
+        "pm_momentum_1d",
+        "pm_time_to_resolution"
+      ],
+      "modes": [
+        "mixed"
+      ]
+    }
+  ],
+  "hyperparameters": {
+    "ticker_intercepts": [
+      "none",
+      "non_foundation",
+      "all"
+    ],
+    "train_decay_half_life_weeks": [
+      0,
+      4,
+      8,
+      13,
+      26
+    ],
+    "calibration": [
+      "none",
+      "platt"
+    ],
+    "foundation_enabled": [
+      false,
+      true
+    ],
+    "foundation_weight": [
+      1.0,
+      1.5,
+      2.0
+    ]
+  },
+  "base_features_always_included": [
+    "x_logit_prn"
+  ],
+  "intermediate_features": [
+    "log_m",
+    "abs_log_m",
+    "T_days",
+    "T_years",
+    "log_T_days",
+    "sqrt_T_years",
+    "log_m_over_volT",
+    "abs_log_m_over_volT",
+    "log_m_fwd_over_volT",
+    "abs_log_m_fwd_over_volT",
+    "log_rel_spread",
+    "prn_raw_gap",
+    "fallback_any",
+    "had_fallback",
+    "had_intrinsic_drop",
+    "had_band_clip",
+    "median_dK",
+    "min_dK",
+    "r",
+    "dividend_yield",
+    "x_prn_x_tdays",
+    "x_prn_x_rv20",
+    "x_prn_x_logm"
+  ],
+  "notes": "Features in intermediate_features are allowlisted but not part of the searchable catalog; include them only if explicitly requested in a custom run."
+}

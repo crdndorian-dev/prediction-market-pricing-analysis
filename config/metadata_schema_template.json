@@ -1,0 +1,164 @@
+{
+  "C_grid": [
+    "float"
+  ],
+  "add_interactions": "bool",
+  "asof_date_col": "str",
+  "asof_dow_allowed": "null",
+  "asof_dow_constant": "bool",
+  "auto_drop_near_constant": "bool",
+  "best_C": "float",
+  "bootstrap_B": "int",
+  "bootstrap_ci": "bool",
+  "bootstrap_group": "str",
+  "bootstrap_seed": "int",
+  "calibration_requested": "str",
+  "calibration_used": "str",
+  "categorical_features_requested": [
+    "str"
+  ],
+  "categorical_features_used": [
+    "str"
+  ],
+  "coefficients": [
+    "float"
+  ],
+  "csv": "str",
+  "eceq_bins": "int",
+  "enable_x_abs_m": "bool",
+  "expiry_date_col": "str",
+  "fallback_to_baseline_if_worse": "bool",
+  "fallback_to_baseline_triggered": "bool",
+  "feature_manifest_path": "str",
+  "features": [
+    "str"
+  ],
+  "features_requested": [
+    "str"
+  ],
+  "features_used_final": [
+    "str"
+  ],
+  "fit_weights": {
+    "calib_n": "int",
+    "calib_sum_raw": "float",
+    "fit_weight_renorm": "str",
+    "foundation_weight": "float",
+    "train_decay_half_life_weeks": "float",
+    "trainfit_n": "int",
+    "trainfit_sum_fit": "float",
+    "trainfit_sum_raw": "float"
+  },
+  "forbidden_features_removed": [
+    "unknown"
+  ],
+  "forward_fallback_rows_dropped": "int",
+  "foundation_tickers": [
+    "unknown"
+  ],
+  "foundation_weight": "float",
+  "git_commit": "str",
+  "git_commit_datetime": "str",
+  "group_reweight": {
+    "enabled": "bool",
+    "mode": "str"
+  },
+  "interaction_support": "null",
+  "interaction_support_tickers": "null",
+  "interaction_ticker_col": "null",
+  "intercept": "float",
+  "max_prn_train": "float",
+  "metrics_top_tickers": "int",
+  "min_prn_train": "float",
+  "mode": "str",
+  "model_artifact": "str",
+  "model_kind_deployed": "str",
+  "model_kind_test": "str",
+  "model_kind_val_pool": "str",
+  "model_version": "str",
+  "moneyness_column_used": "str",
+  "n_bins": "int",
+  "near_constant_features_removed": [
+    "unknown"
+  ],
+  "optional_filters": {
+    "drop_prn_extremes": "bool",
+    "max_abs_logm": "null",
+    "prn_eps": "float",
+    "rows_filtered": "int"
+  },
+  "out_dir": "str",
+  "prn_train_range": [
+    "float"
+  ],
+  "random_state": "int",
+  "required_columns": [
+    "str"
+  ],
+  "rolling": {
+    "avg_roll_delta": "float",
+    "avg_roll_logloss_baseline": "float",
+    "avg_roll_logloss_model": "float",
+    "n_windows_used": "int",
+    "test_weeks": "int",
+    "val_window_weeks": "int",
+    "val_windows": "int"
+  },
+  "script": "str",
+  "selection_objective": "str",
+  "splits": {
+    "calib_weeks_range": "null",
+    "n_weeks_pretest": "int",
+    "n_weeks_test": "int",
+    "n_weeks_total": "int",
+    "test_weeks_range": [
+      "str"
+    ],
+    "train_fit_weeks_range": [
+      "str"
+    ],
+    "val_pool_weeks_range": [
+      "str"
+    ]
+  },
+  "target_col": "str",
+  "tdays_allowed": [
+    "int"
+  ],
+  "tdays_constant": "bool",
+  "ticker_col": "str",
+  "ticker_feature_col": "str",
+  "ticker_intercepts": "str",
+  "ticker_min_support": "int",
+  "ticker_min_support_interactions": "int",
+  "ticker_support": {
+    "kept_unique": "int",
+    "mapped_train_rows": "int",
+    "min_support": "int",
+    "train_unique": "int"
+  },
+  "ticker_support_tickers": [
+    "str"
+  ],
+  "ticker_x_interactions": "bool",
+  "train_end_date": "str",
+  "train_tickers": [
+    "unknown"
+  ],
+  "training_timestamp": "str",
+  "two_stage": {
+    "stage1_categorical_features": "null",
+    "stage2_categorical_features": "null"
+  },
+  "val_pool_oos": {
+    "mode": "str",
+    "model_kind": "str",
+    "train_weeks_range": [
+      "str"
+    ],
+    "use_calib": "bool",
+    "used": "bool"
+  },
+  "week_col": "str",
+  "weight_col": "str"
+}

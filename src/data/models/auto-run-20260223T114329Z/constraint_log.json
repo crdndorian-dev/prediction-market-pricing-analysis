@@ -1,0 +1,18 @@
+{
+  "total_combos_before_constraints": 1536,
+  "constraints_applied": [
+    {
+      "name": "pm_features_excluded_in_option_only",
+      "combos_eliminated": 1488
+    },
+    {
+      "name": "x_m_requires_log_m_fwd",
+      "combos_eliminated": 12
+    },
+    {
+      "name": "x_abs_m_requires_abs_log_m_fwd",
+      "combos_eliminated": 9
+    }
+  ],
+  "total_combos_after_constraints": 27
+}

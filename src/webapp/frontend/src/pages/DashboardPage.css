@@ -194,6 +194,21 @@
   color: var(--ink-700);
 }
 
+.doc-card {
+  gap: var(--space-4);
+}
+
+.doc-card .card-header {
+  margin-bottom: 0;
+}
+
+.doc-paragraph {
+  margin: 0;
+  color: var(--ink-500);
+  font-size: var(--text-md);
+  line-height: 1.5;
+}
+
 
 .dashboard-overview {
   margin-top: var(--space-10);

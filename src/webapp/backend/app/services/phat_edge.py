@@ -31,7 +31,7 @@ from app.models.phat_edge import (
 
 BASE_DIR = Path(__file__).resolve().parents[5]
 SCRIPT_PATH = (
-    BASE_DIR / "src" / "scripts" / "4-compute-edge-v1.1.py"
+    BASE_DIR / "src" / "scripts" / "06-compute-edge-v1.1.py"
 )
 OUTPUT_DIR = BASE_DIR / "src" / "data" / "analysis" / "phat-edge"
 

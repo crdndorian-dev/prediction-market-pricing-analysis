@@ -5,6 +5,30 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$ROOT_DIR/src/webapp/backend"
 FRONTEND_DIR="$ROOT_DIR/src/webapp/frontend"
 
+# Prefer a Homebrew Node that satisfies Vite's minimum version.
+for node_prefix in \
+  "/opt/homebrew/opt/node@22" \
+  "/opt/homebrew/opt/node@20" \
+  "/usr/local/opt/node@22" \
+  "/usr/local/opt/node@20"; do
+  if [[ -x "$node_prefix/bin/node" ]]; then
+    export PATH="$node_prefix/bin:$PATH"
+    break
+  fi
+done
+
+# Load .env if present; otherwise fall back to the sample.
+ENV_FILE="$ROOT_DIR/.env"
+if [[ ! -f "$ENV_FILE" && -f "$ROOT_DIR/config/polymarket_subgraph.env.sample" ]]; then
+  ENV_FILE="$ROOT_DIR/config/polymarket_subgraph.env.sample"
+fi
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+fi
+
 PYTHON_BIN="${PYTHON_BIN:-}"
 if [[ -z "$PYTHON_BIN" ]]; then
   if command -v python3 >/dev/null 2>&1; then

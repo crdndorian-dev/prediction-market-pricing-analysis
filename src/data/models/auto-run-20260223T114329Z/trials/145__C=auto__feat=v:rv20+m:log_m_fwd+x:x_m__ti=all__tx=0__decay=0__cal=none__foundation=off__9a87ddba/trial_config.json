@@ -1,0 +1,38 @@
+{
+  "trial_id": 145,
+  "trial_name": "C=auto__feat=v:rv20+m:log_m_fwd+x:x_m__ti=all__tx=0__decay=0__cal=none__foundation=off",
+  "config": {
+    "mode": "option_only",
+    "feature_choices": {
+      "volatility": [
+        "rv20"
+      ],
+      "moneyness": [
+        "log_m_fwd"
+      ],
+      "interactions": [
+        "x_m"
+      ]
+    },
+    "option_features": [
+      "x_logit_prn",
+      "rv20",
+      "log_m_fwd",
+      "x_m"
+    ],
+    "pm_features": [],
+    "ticker_intercepts": "all",
+    "train_decay_half_life_weeks": 0,
+    "calibrate": "none",
+    "foundation_enabled": false,
+    "foundation_weight": 1.0,
+    "foundation_tickers": "QQQ,SPY",
+    "enable_x_m": true,
+    "enable_x_abs_m": false,
+    "ticker_x_interactions": false,
+    "group_reweight": "none",
+    "C": null
+  },
+  "baseline_args": [],
+  "objective": "logloss"
+}

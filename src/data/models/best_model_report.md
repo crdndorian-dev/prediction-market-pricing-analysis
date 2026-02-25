@@ -29,5 +29,5 @@
 
 ## Trial provenance
 - trial id: 24
-- trial dir: /Users/dorianc./Desktop/polyedgetool/polyedgetool/src/data/models/trials/024__C=0.5__feat=moneyness__ti=non_foundation__tx=0__decay=0__platt=none__foundation=off__2a8f138e
+- trial dir: /Users/dorianc./Desktop/polyedgetool/prediction-market-pricing-analysis/src/data/models/trials/024__C=0.5__feat=moneyness__ti=non_foundation__tx=0__decay=0__platt=none__foundation=off__2a8f138e
 - top coefficients summary: not captured (run calibrator manually for coefficient inspection)

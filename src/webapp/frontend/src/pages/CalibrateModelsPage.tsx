@@ -1,8 +1,9 @@
-import { Fragment, useEffect, useMemo, useState, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import katex from "katex";
 
 import {
   fetchCalibrationDatasets,
+  fetchPolymarketCalibrationDatasets,
   fetchCalibrationModels,
   deleteCalibrationModel,
   fetchCalibrationModelDetail,
@@ -11,8 +12,13 @@ import {
   renameCalibrationModel,
   startCalibrationJob,
   startAutoCalibrationJob,
+  fetchDatasetTickers,
+  fetchDatasetFeatures,
   type CalibrateModelRunResponse,
   type DatasetFileSummary,
+  type DatasetTickersResponse,
+  type DatasetFeaturesResponse,
+  type RegimeInfo,
   type ModelDetailResponse,
   type ModelFileContentResponse,
   type ModelFilesListResponse,
@@ -20,6 +26,7 @@ import {
   previewCalibrationRegime,
   type RegimePreviewResponse,
 } from "../api/calibrateModels";
+import PipelineStatusCard from "../components/PipelineStatusCard";
 import { useCalibrationJob } from "../contexts/calibrationJob";
 import { useAnyJobRunning } from "../contexts/jobGuard";
 import "./CalibrateModelsPage.css";
@@ -27,10 +34,12 @@ import "katex/dist/katex.min.css";
 
 type CalibrateFormState = {
   datasetPath: string;
+  pmDatasetPath: string;
+  twoStageMode: boolean;
+  modelKind: "calibrate" | "mixed" | "both";
   outName: string;
   selectedFeatures: string[];
   customFeatures: string;
-  categoricalFeatures: string;
   addInteractions: boolean;
   calibrate: "none" | "platt";
   cGrid: string;
@@ -42,14 +51,13 @@ type CalibrateFormState = {
   valWindowWeeks: string;
   nBins: string;
   randomState: string;
-  foundationTickers: string;
+  foundationTickers: string[];
   foundationWeight: string;
-  mode: "baseline" | "pooled" | "two_stage";
   tickerIntercepts: "none" | "all" | "non_foundation";
   tickerXInteractions: boolean;
   tickerMinSupport: string;
   tickerMinSupportInteractions: string;
-  trainTickers: string;
+  trainTickers: string[];
   metricsTopTickers: string;
   tdaysAllowed: string;
   asofDowAllowed: string;
@@ -66,6 +74,7 @@ type CalibrateFormState = {
   bootstrapB: string;
   bootstrapSeed: string;
   bootstrapGroup: "auto" | "ticker_day" | "day" | "iid";
+  selectedPmFeatures: string[];
 };
 
 type FeatureDefinition = {
@@ -165,6 +174,39 @@ const featureCatalog: FeatureDefinition[] = [
   },
 ];
 
+const PM_FEATURE_CATALOG: FeatureDefinition[] = [
+  { key: "pm_mid", label: "PM mid price", description: "Polymarket mid price (implied probability)." },
+  { key: "pm_spread", label: "PM spread", description: "Bid/ask spread on Polymarket." },
+  { key: "pm_liquidity_proxy", label: "PM liquidity", description: "Liquidity proxy for the Polymarket contract." },
+  { key: "pm_momentum_1h", label: "PM momentum (1h)", description: "1-hour price momentum on Polymarket." },
+  { key: "pm_momentum_1d", label: "PM momentum (1d)", description: "1-day price momentum on Polymarket." },
+  { key: "pm_time_to_resolution", label: "Time to resolution", description: "Days until contract resolution." },
+  { key: "pm_volatility", label: "PM volatility", description: "Price volatility on Polymarket." },
+  { key: "pPM_mid", label: "pPM mid (alt)", description: "Alternate Polymarket mid price column." },
+];
+
+const PM_FEATURE_GROUPS: FeatureGroup[] = [
+  {
+    id: "pm_price",
+    title: "PM price signals",
+    hint: "Core Polymarket implied probability and spread.",
+    keys: ["pm_mid", "pm_spread", "pm_liquidity_proxy", "pPM_mid"],
+  },
+  {
+    id: "pm_dynamics",
+    title: "PM dynamics",
+    hint: "Momentum and time-to-resolution signals.",
+    keys: ["pm_momentum_1h", "pm_momentum_1d", "pm_volatility", "pm_time_to_resolution"],
+  },
+];
+
+const PM_FEATURE_INDEX = PM_FEATURE_CATALOG.reduce(
+  (acc, feature) => { acc[feature.key] = feature; return acc; },
+  {} as Record<string, FeatureDefinition>,
+);
+
+const DEFAULT_PM_FEATURE_SELECTION = ["pm_mid", "pm_spread", "pm_momentum_1h", "pm_time_to_resolution"];
+
 const FEATURE_GROUPS: FeatureGroup[] = [
   {
     id: "core",
@@ -258,49 +300,16 @@ const defaultModelName = () => {
   return `calibration-${stamp}`;
 };
 
-const defaultAutoRunName = () => {
-  const stamp = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15);
-  return `auto-run-${stamp}`;
-};
-
 const MODELS_BASE = "src/data/models";
-
-type AutoFormState = {
-  runName: string;
-  maxTrials: string;
-  seed: string;
-  parallel: string;
-  baselineArgs: string;
-  objective: "logloss";
-  foundationTickers: string;
-  foundationWeight: string;
-  bootstrapCi: boolean;
-  bootstrapB: string;
-  bootstrapSeed: string;
-  bootstrapGroup: "auto" | "ticker_day" | "day" | "iid";
-};
-
-const buildDefaultAutoForm = (): AutoFormState => ({
-  runName: defaultAutoRunName(),
-  maxTrials: "",
-  seed: "42",
-  parallel: "1",
-  baselineArgs: "",
-  objective: "logloss",
-  foundationTickers: "SPY,QQQ,IWM",
-  foundationWeight: "1.0",
-  bootstrapCi: false,
-  bootstrapB: "2000",
-  bootstrapSeed: "0",
-  bootstrapGroup: "auto",
-});
 
 const defaultForm: CalibrateFormState = {
   datasetPath: "",
+  pmDatasetPath: "",
+  twoStageMode: false,
+  modelKind: "calibrate",
   outName: "",
   selectedFeatures: defaultFeatures.split(","),
   customFeatures: "",
-  categoricalFeatures: "spot_scale_used",
   addInteractions: false,
   calibrate: "none",
   cGrid: "0.001,0.002,0.005,0.01,0.02,0.05,0.1,0.2,0.5,1,2,5,10",
@@ -312,14 +321,13 @@ const defaultForm: CalibrateFormState = {
   valWindowWeeks: "10",
   nBins: "15",
   randomState: "7",
-  foundationTickers: "",
+  foundationTickers: [],
   foundationWeight: "1.0",
-  mode: "pooled",
   tickerIntercepts: "non_foundation",
   tickerXInteractions: false,
   tickerMinSupport: "300",
   tickerMinSupportInteractions: "1000",
-  trainTickers: "",
+  trainTickers: [],
   metricsTopTickers: "10",
   tdaysAllowed: "",
   asofDowAllowed: "",
@@ -336,6 +344,7 @@ const defaultForm: CalibrateFormState = {
   bootstrapB: "2000",
   bootstrapSeed: "0",
   bootstrapGroup: "auto",
+  selectedPmFeatures: DEFAULT_PM_FEATURE_SELECTION,
 };
 
 const STORAGE_KEY = "polyedgetool.calibrate.form";
@@ -361,7 +370,26 @@ const loadStoredForm = (): Partial<CalibrateFormState> | null => {
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return null;
-    return parsed as Partial<CalibrateFormState>;
+    const stored = parsed as Partial<CalibrateFormState> & {
+      foundationTickers?: unknown;
+      trainTickers?: unknown;
+    };
+
+    // Migrate old string ticker fields to arrays
+    if (typeof stored.foundationTickers === "string") {
+      stored.foundationTickers = stored.foundationTickers
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean) as any;
+    }
+    if (typeof stored.trainTickers === "string") {
+      stored.trainTickers = stored.trainTickers
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean) as any;
+    }
+
+    return stored;
   } catch {
     return null;
   }
@@ -516,11 +544,18 @@ const buildManualCommandPreview = (
 ): string => {
   const args: string[] = [
     "python",
-    "src/scripts/2-calibrate-logit-model-v1.5.py",
+    "src/scripts/03-calibrate-logit-model-v2.0.py",
   ];
 
-  const addValue = (flag: string, value: string) => {
-    const trimmed = value.trim();
+  const addValue = (flag: string, value: string | string[] | number | null | undefined) => {
+    if (value == null) return;
+    if (Array.isArray(value)) {
+      const trimmed = value.map((item) => String(item).trim()).filter(Boolean);
+      if (trimmed.length === 0) return;
+      args.push(flag, trimmed.join(","));
+      return;
+    }
+    const trimmed = String(value).trim();
     if (!trimmed) return;
     args.push(flag, trimmed);
   };
@@ -537,7 +572,7 @@ const buildManualCommandPreview = (
   addValue("--weight-col", DEFAULT_DATASET_COLUMNS.weight);
   addValue("--foundation-tickers", state.foundationTickers);
   addValue("--foundation-weight", state.foundationWeight);
-  addValue("--mode", state.mode);
+  addValue("--model-kind", state.modelKind);
   addValue("--ticker-intercepts", state.tickerIntercepts);
   addFlag("--ticker-x-interactions", state.tickerXInteractions);
   addValue("--ticker-min-support", state.tickerMinSupport);
@@ -555,7 +590,6 @@ const buildManualCommandPreview = (
     .filter(Boolean);
   const featureList = [...selected, ...custom].join(",");
   addValue("--features", featureList);
-  addValue("--categorical-features", state.categoricalFeatures);
   addFlag("--add-interactions", state.addInteractions);
   addValue("--calibrate", state.calibrate);
   addValue("--C-grid", state.cGrid);
@@ -591,55 +625,10 @@ const buildManualCommandPreview = (
     addValue("--bootstrap-seed", state.bootstrapSeed);
     addValue("--bootstrap-group", state.bootstrapGroup);
   }
-
-  return args.join(" ");
-};
-
-const buildAutoCommandPreview = (
-  datasetPath: string,
-  autoForm: AutoFormState,
-  tdaysAllowed: string,
-  asofDowAllowed: string,
-): string => {
-  const args: string[] = [
-    "python",
-    "src/scripts/2-auto-calibrate-logit-model.py",
-  ];
-
-  const addValue = (flag: string, value: string) => {
-    const trimmed = value.trim();
-    if (!trimmed) return;
-    args.push(flag, trimmed);
-  };
-
-  addValue("--csv", datasetPath);
-  addValue("--out-dir", MODELS_BASE);
-  addValue("--objective", autoForm.objective);
-  addValue("--max-trials", autoForm.maxTrials);
-  addValue("--seed", autoForm.seed);
-  addValue("--parallel", autoForm.parallel);
-  addValue("--tdays-allowed", tdaysAllowed);
-  addValue("--asof-dow-allowed", asofDowAllowed);
-  addValue("--foundation-tickers", autoForm.foundationTickers);
-  addValue("--foundation-weight", autoForm.foundationWeight);
-
-  // Build baseline-args including bootstrap flags
-  const baselineArgParts: string[] = [];
-  if (autoForm.baselineArgs.trim()) {
-    baselineArgParts.push(autoForm.baselineArgs.trim());
-  }
-  if (autoForm.bootstrapCi) {
-    baselineArgParts.push("--bootstrap-ci");
-    if (autoForm.bootstrapB.trim()) {
-      baselineArgParts.push(`--bootstrap-B ${autoForm.bootstrapB.trim()}`);
-    }
-    if (autoForm.bootstrapSeed.trim()) {
-      baselineArgParts.push(`--bootstrap-seed ${autoForm.bootstrapSeed.trim()}`);
-    }
-    baselineArgParts.push(`--bootstrap-group ${autoForm.bootstrapGroup}`);
-  }
-  if (baselineArgParts.length > 0) {
-    addValue("--baseline-args", `"${baselineArgParts.join(" ")}"`);
+  if (state.twoStageMode) {
+    args.push("--two-stage-mode");
+    addValue("--two-stage-prn-csv", state.datasetPath);
+    addValue("--two-stage-pm-csv", state.pmDatasetPath);
   }
 
   return args.join(" ");
@@ -648,9 +637,14 @@ const buildAutoCommandPreview = (
 export default function CalibrateModelsPage() {
   const [defaultName] = useState(() => defaultModelName());
   const [formState, setFormState] = useState<CalibrateFormState>(defaultForm);
+  const [autoMode, setAutoMode] = useState<"option_only" | "mixed">("option_only");
+  const [autoPmDatasetPath, setAutoPmDatasetPath] = useState<string>("");
+  const [autoRunError, setAutoRunError] = useState<string | null>(null);
   const [datasets, setDatasets] = useState<DatasetFileSummary[]>([]);
+  const [pmDatasets, setPmDatasets] = useState<DatasetFileSummary[]>([]);
   const [models, setModels] = useState<ModelRunSummary[]>([]);
   const [datasetError, setDatasetError] = useState<string | null>(null);
+  const [pmDatasetError, setPmDatasetError] = useState<string | null>(null);
   const [modelError, setModelError] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const [runResult, setRunResult] = useState<CalibrateModelRunResponse | null>(
@@ -661,12 +655,13 @@ export default function CalibrateModelsPage() {
   const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
   const [renamingModelId, setRenamingModelId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState<string>("");
-  const [runMode, setRunMode] = useState<"manual" | "auto">("manual");
-  const [autoForm, setAutoForm] = useState<AutoFormState>(
-    () => buildDefaultAutoForm(),
-  );
   const [regimePreview, setRegimePreview] = useState<RegimePreviewResponse | null>(null);
   const [regimePreviewError, setRegimePreviewError] = useState<string | null>(null);
+  const [availableTickers, setAvailableTickers] = useState<string[]>([]);
+  const [tickersFetching, setTickersFetching] = useState(false);
+  const [tickersError, setTickersError] = useState<string | null>(null);
+  const [regimeInfo, setRegimeInfo] = useState<RegimeInfo | null>(null);
+  const [datasetFeatures, setDatasetFeatures] = useState<DatasetFeaturesResponse | null>(null);
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [modelDetail, setModelDetail] = useState<ModelDetailResponse | null>(null);
   const [modelDetailError, setModelDetailError] = useState<string | null>(null);
@@ -676,13 +671,19 @@ export default function CalibrateModelsPage() {
   const [fileContent, setFileContent] = useState<ModelFileContentResponse | null>(null);
   const [isFileLoading, setIsFileLoading] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
-  const { jobStatus, jobId, setJobId, setJobStatus } = useCalibrationJob();
-  const { anyJobRunning, primaryJob } = useAnyJobRunning();
+  const { jobStatus, setJobId, setJobStatus } = useCalibrationJob();
+  const { anyJobRunning, primaryJob, activeJobs } = useAnyJobRunning();
 
   const isRunning =
     jobStatus?.status === "queued" || jobStatus?.status === "running";
-  const activeRunMode = jobStatus?.mode ?? runMode;
-
+  const autoJobActive = jobStatus?.mode === "auto";
+  const autoIsRunning =
+    autoJobActive &&
+    (jobStatus?.status === "queued" || jobStatus?.status === "running");
+  const autoProgress = autoJobActive ? jobStatus?.progress ?? null : null;
+  const autoTrialsTotal = autoProgress?.trials_total ?? 0;
+  const autoTrialsDone = autoProgress?.trials_done ?? 0;
+  const autoTrialsFailed = autoProgress?.trials_failed ?? 0;
   const SPLIT_LABELS: Record<string, string> = {
     test: "Test set",
     val_pool: "Validation pool",
@@ -691,6 +692,14 @@ export default function CalibrateModelsPage() {
   const selectedDataset = useMemo(
     () => datasets.find((item) => item.path === formState.datasetPath),
     [datasets, formState.datasetPath],
+  );
+  const selectedPmDataset = useMemo(
+    () => pmDatasets.find((item) => item.path === formState.pmDatasetPath),
+    [pmDatasets, formState.pmDatasetPath],
+  );
+  const selectedAutoPmDataset = useMemo(
+    () => pmDatasets.find((item) => item.path === autoPmDatasetPath),
+    [pmDatasets, autoPmDatasetPath],
   );
 
   const renderDatasetSection = (showMeta: boolean) => (
@@ -742,17 +751,85 @@ export default function CalibrateModelsPage() {
     </div>
   );
 
+  const renderTwoStageSection = () => (
+    <div className="section-card calibrate-section">
+      <h3 className="section-heading">Two-stage Polymarket overlay</h3>
+      <label className="checkbox checkbox-spaced">
+        <input
+          type="checkbox"
+          checked={formState.twoStageMode}
+          disabled={isTwoStageDisabled}
+          onChange={(event) =>
+            setFormState((prev) => ({
+              ...prev,
+              twoStageMode: event.target.checked,
+            }))
+          }
+        />
+        Enable Polymarket overlay (Stage B)
+        {isTwoStageDisabled && (
+          <span className="field-hint" style={{ color: "var(--ink-600)", marginLeft: "0.5rem" }}>
+            (Not available for 1DTE/daily datasets)
+          </span>
+        )}
+      </label>
+      <span className="field-hint">
+        Stage A uses the pRN dataset above. Stage B runs only when Polymarket features are present; otherwise the
+        base model is used.
+      </span>
+      {formState.twoStageMode ? (
+        <>
+          <div className="field field-spaced">
+            <label htmlFor="pmDatasetSelect">Polymarket dataset</label>
+            <select
+              id="pmDatasetSelect"
+              className="input"
+              value={formState.pmDatasetPath}
+              onChange={(event) =>
+                setFormState((prev) => ({
+                  ...prev,
+                  pmDatasetPath: event.target.value,
+                }))
+              }
+            >
+              {pmDatasets.length === 0 ? (
+                <option value="">No Polymarket datasets available</option>
+              ) : null}
+              {pmDatasets.map((dataset) => (
+                <option key={dataset.path} value={dataset.path}>
+                  {dataset.name}
+                </option>
+              ))}
+            </select>
+            <span className="field-hint">
+              Select a <code>decision_features</code> dataset with labels.
+            </span>
+            {pmDatasetError ? <div className="error">{pmDatasetError}</div> : null}
+          </div>
+          {selectedPmDataset ? (
+            <div className="dataset-meta">
+              <div>
+                <span className="meta-label">Last modified</span>
+                <span>{formatTimestamp(selectedPmDataset.last_modified)}</span>
+              </div>
+              <div>
+                <span className="meta-label">Size</span>
+                <span>{formatBytes(selectedPmDataset.size_bytes)}</span>
+              </div>
+              <div>
+                <span className="meta-label">Path</span>
+                <span>{selectedPmDataset.path}</span>
+              </div>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+
   const commandPreview = useMemo(
-    () =>
-      runMode === "manual"
-        ? buildManualCommandPreview(formState, defaultName)
-        : buildAutoCommandPreview(
-            formState.datasetPath,
-            autoForm,
-            formState.tdaysAllowed,
-            formState.asofDowAllowed,
-          ),
-    [runMode, formState, defaultName, autoForm],
+    () => buildManualCommandPreview(formState, defaultName),
+    [formState, defaultName],
   );
 
   const regimeSpecific = isRegimeSpecific(formState);
@@ -780,6 +857,9 @@ export default function CalibrateModelsPage() {
     });
     return selections;
   }, [selectedFeatureSet]);
+
+  const isMixedModelDisabled = regimeInfo?.is_daily === true;
+  const isTwoStageDisabled = regimeInfo?.is_daily === true;
 
   const redundantFeatures = useMemo(() => {
     const redundant = new Set<string>();
@@ -826,6 +906,26 @@ export default function CalibrateModelsPage() {
       });
   };
 
+  const refreshPmDatasets = () => {
+    fetchPolymarketCalibrationDatasets()
+      .then((data) => {
+        setPmDatasets(data.datasets);
+        if (!formState.pmDatasetPath && data.datasets.length > 0) {
+          setFormState((prev) => ({
+            ...prev,
+            pmDatasetPath: data.datasets[0].path,
+          }));
+        }
+        if (!autoPmDatasetPath && data.datasets.length > 0) {
+          setAutoPmDatasetPath(data.datasets[0].path);
+        }
+        setPmDatasetError(null);
+      })
+      .catch((err: Error) => {
+        setPmDatasetError(err.message);
+      });
+  };
+
   const refreshModels = () => {
     fetchCalibrationModels()
       .then((data) => {
@@ -839,6 +939,7 @@ export default function CalibrateModelsPage() {
 
   useEffect(() => {
     refreshDatasets();
+    refreshPmDatasets();
     refreshModels();
     const storedResult = loadStoredRunResult();
     if (storedResult) {
@@ -903,6 +1004,67 @@ export default function CalibrateModelsPage() {
     return () => window.clearTimeout(timer);
   }, [formState.datasetPath, formState.tdaysAllowed, formState.asofDowAllowed]);
 
+  // Fetch available tickers when dataset changes
+  useEffect(() => {
+    if (!formState.datasetPath) {
+      setAvailableTickers([]);
+      setTickersError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setTickersFetching(true);
+    setTickersError(null);
+
+    fetchDatasetTickers(formState.datasetPath)
+      .then((response) => {
+        if (cancelled) return;
+        setAvailableTickers(response.tickers);
+        setTickersError(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : "Failed to fetch tickers";
+        setTickersError(message);
+        setAvailableTickers([]);
+      })
+      .finally(() => {
+        if (!cancelled) setTickersFetching(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [formState.datasetPath]);
+
+  // Fetch regime info when dataset changes
+  useEffect(() => {
+    if (!formState.datasetPath) {
+      setRegimeInfo(null);
+      setDatasetFeatures(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    fetchDatasetFeatures(formState.datasetPath)
+      .then((response) => {
+        if (cancelled) return;
+        setRegimeInfo(response.regime_info);
+        setDatasetFeatures(response);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error("Failed to fetch dataset features:", err);
+        setRegimeInfo(null);
+        setDatasetFeatures(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [formState.datasetPath]);
+
   useEffect(() => {
     if (!storageReady) return;
     try {
@@ -928,7 +1090,11 @@ export default function CalibrateModelsPage() {
       setRunResult(jobStatus.result);
     }
     if (jobStatus.status === "failed" && jobStatus.error) {
-      setRunError(jobStatus.error);
+      if (jobStatus.mode === "auto") {
+        setAutoRunError(jobStatus.error);
+      } else {
+        setRunError(jobStatus.error);
+      }
     }
     if (jobStatus.status === "finished") {
       refreshModels();
@@ -951,8 +1117,24 @@ export default function CalibrateModelsPage() {
       if (!formState.datasetPath) {
         throw new Error("Select a dataset to calibrate.");
       }
-      if (runMode === "manual") {
-        const selectedFeatures = applyFeatureConstraints(
+      if (formState.twoStageMode && !formState.pmDatasetPath) {
+        throw new Error("Select a Polymarket dataset for the two-stage overlay.");
+      }
+
+      // Validate foundation tickers if provided
+      if (
+        formState.foundationTickers.length > 0 &&
+        availableTickers.length > 0
+      ) {
+        const invalid = formState.foundationTickers.filter((t) => !availableTickers.includes(t));
+        if (invalid.length > 0) {
+          throw new Error(
+            `Foundation ticker(s) not found in dataset: ${invalid.join(", ")}. ` +
+              `Available tickers: ${availableTickers.slice(0, 10).join(", ")}${availableTickers.length > 10 ? ", ..." : ""}`
+          );
+        }
+      }
+      const selectedFeatures = applyFeatureConstraints(
           formState.selectedFeatures,
           regimeSpecific,
         );
@@ -965,20 +1147,23 @@ export default function CalibrateModelsPage() {
         const payload = {
           csv: formState.datasetPath,
           outName: formState.outName.trim() || undefined,
+          modelKind: formState.modelKind,
           targetCol: DEFAULT_DATASET_COLUMNS.target,
           weekCol: DEFAULT_DATASET_COLUMNS.week,
           tickerCol: DEFAULT_DATASET_COLUMNS.ticker,
           weightCol: DEFAULT_DATASET_COLUMNS.weight,
-          foundationTickers: formState.foundationTickers.trim() || undefined,
+          foundationTickers:
+            formState.foundationTickers.length > 0
+              ? formState.foundationTickers.join(",")
+              : undefined,
           foundationWeight: parseOptionalNumber(formState.foundationWeight),
-          mode: formState.mode,
           tickerIntercepts: formState.tickerIntercepts,
           tickerXInteractions: formState.tickerXInteractions,
-          trainTickers: formState.trainTickers.trim() || undefined,
+          trainTickers:
+            formState.trainTickers.length > 0 ? formState.trainTickers.join(",") : undefined,
           tdaysAllowed: formState.tdaysAllowed.trim() || undefined,
           asofDowAllowed: formState.asofDowAllowed.trim() || undefined,
           features: featuresList || undefined,
-          categoricalFeatures: formState.categoricalFeatures.trim() || undefined,
           addInteractions: formState.addInteractions,
           calibrate: formState.calibrate,
           cGrid: formState.cGrid.trim() || undefined,
@@ -1019,42 +1204,78 @@ export default function CalibrateModelsPage() {
           bootstrapGroup: formState.bootstrapCi
             ? formState.bootstrapGroup
             : undefined,
+          twoStageMode: formState.twoStageMode || undefined,
+          twoStagePrnCsv: formState.twoStageMode ? formState.datasetPath : undefined,
+          twoStagePmCsv: formState.twoStageMode ? formState.pmDatasetPath : undefined,
+          mixedFeatures: formState.modelKind !== "calibrate" && formState.pmDatasetPath
+            ? formState.pmDatasetPath
+            : undefined,
+          mixedFeaturesCols: formState.modelKind !== "calibrate" && formState.selectedPmFeatures.length > 0
+            ? formState.selectedPmFeatures.join(",")
+            : undefined,
         };
 
         const status = await startCalibrationJob(payload);
         setJobId(status.job_id);
         setJobStatus(status);
-      } else {
-        const payload = {
-          csv: formState.datasetPath,
-          runName: autoForm.runName.trim() || undefined,
-          objective: autoForm.objective,
-          maxTrials: parseOptionalInt(autoForm.maxTrials),
-          seed: parseOptionalInt(autoForm.seed),
-          parallel: parseOptionalInt(autoForm.parallel),
-          baselineArgs: autoForm.baselineArgs.trim() || undefined,
-          tdaysAllowed: formState.tdaysAllowed.trim() || undefined,
-          asofDowAllowed: formState.asofDowAllowed.trim() || undefined,
-          foundationTickers: autoForm.foundationTickers.trim() || undefined,
-          foundationWeight: parseOptionalNumber(autoForm.foundationWeight),
-          bootstrapCi: autoForm.bootstrapCi || undefined,
-          bootstrapB: autoForm.bootstrapCi
-            ? parseOptionalInt(autoForm.bootstrapB)
-            : undefined,
-          bootstrapSeed: autoForm.bootstrapCi
-            ? parseOptionalInt(autoForm.bootstrapSeed)
-            : undefined,
-          bootstrapGroup: autoForm.bootstrapCi
-            ? autoForm.bootstrapGroup
-            : undefined,
-        };
-        const status = await startAutoCalibrationJob(payload);
-        setJobId(status.job_id);
-        setJobStatus(status);
-      }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
       setRunError(message);
+    }
+  };
+
+  const handleStartAutoCalibration = async () => {
+    if (anyJobRunning) {
+      setAutoRunError(
+        `Another job is running (${primaryJob?.name ?? "unknown"}). Wait for it to finish.`,
+      );
+      return;
+    }
+    setAutoRunError(null);
+    setRunError(null);
+    setRunResult(null);
+    setJobStatus(null);
+
+    try {
+      if (!formState.datasetPath) {
+        throw new Error("Select a dataset to auto-calibrate.");
+      }
+      if (autoMode === "mixed" && !autoPmDatasetPath) {
+        throw new Error("Select a Polymarket dataset for mixed auto-calibration.");
+      }
+
+      if (formState.foundationTickers.length > 0 && availableTickers.length > 0) {
+        const invalid = formState.foundationTickers.filter((t) => !availableTickers.includes(t));
+        if (invalid.length > 0) {
+          throw new Error(
+            `Foundation ticker(s) not found in dataset: ${invalid.join(", ")}.`,
+          );
+        }
+      }
+
+      const payload = {
+        csv: formState.datasetPath,
+        mode: autoMode,
+        pmDatasetPath: autoMode === "mixed" ? autoPmDatasetPath : undefined,
+        tdaysAllowed: formState.tdaysAllowed.trim() || undefined,
+        asofDowAllowed: formState.asofDowAllowed.trim() || undefined,
+        foundationTickers:
+          formState.foundationTickers.length > 0
+            ? formState.foundationTickers.join(",")
+            : undefined,
+        foundationWeight: parseOptionalNumber(formState.foundationWeight),
+        bootstrapCi: formState.bootstrapCi,
+        bootstrapB: parseOptionalNumber(formState.bootstrapB),
+        bootstrapSeed: parseOptionalNumber(formState.bootstrapSeed),
+        bootstrapGroup: formState.bootstrapGroup,
+      };
+
+      const status = await startAutoCalibrationJob(payload);
+      setJobId(status.job_id);
+      setJobStatus(status);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Auto calibration failed.";
+      setAutoRunError(message);
     }
   };
 
@@ -1180,6 +1401,130 @@ export default function CalibrateModelsPage() {
     });
   };
 
+  const handlePmFeatureToggle = (featureKey: string, checked: boolean) => {
+    setFormState((prev) => {
+      let next = prev.selectedPmFeatures.filter((f) => f !== featureKey);
+      if (checked) next = [...next, featureKey];
+      return { ...prev, selectedPmFeatures: next };
+    });
+  };
+
+  const selectedPmFeatureSet = useMemo(
+    () => new Set(formState.selectedPmFeatures),
+    [formState.selectedPmFeatures],
+  );
+
+  const isFeatureAvailable = useCallback(
+    (featureKey: string): boolean => {
+      if (!datasetFeatures) return true; // Safe default
+      return datasetFeatures.available_columns.includes(featureKey);
+    },
+    [datasetFeatures]
+  );
+
+  const getFeatureMissingPct = useCallback(
+    (featureKey: string): number | null => {
+      if (!datasetFeatures?.feature_stats?.[featureKey]) return null;
+      return datasetFeatures.feature_stats[featureKey].missing_pct;
+    },
+    [datasetFeatures]
+  );
+
+  const hasHighMissingData = useCallback(
+    (featureKey: string): boolean => {
+      const missingPct = getFeatureMissingPct(featureKey);
+      return missingPct !== null && missingPct > 10.0;
+    },
+    [getFeatureMissingPct]
+  );
+
+  const handleSelectAllInGroup = useCallback(
+    (groupId: string) => {
+      const group = FEATURE_GROUPS.find((g) => g.id === groupId);
+      if (!group) return;
+
+      const availableFeaturesInGroup = group.keys.filter(isFeatureAvailable);
+
+      setFormState((prev) => {
+        const current = new Set(prev.selectedFeatures);
+
+        if (group.exclusive) {
+          group.keys.forEach((key) => current.delete(key));
+        }
+
+        availableFeaturesInGroup.forEach((key) => {
+          const exclusiveGroupId = EXCLUSIVE_GROUP_BY_KEY[key];
+          if (exclusiveGroupId) {
+            const exclusiveKeys = EXCLUSIVE_GROUPS_BY_ID[exclusiveGroupId];
+            exclusiveKeys.forEach((otherKey) => {
+              if (otherKey !== key) current.delete(otherKey);
+            });
+          }
+          current.add(key);
+        });
+
+        return { ...prev, selectedFeatures: Array.from(current) };
+      });
+    },
+    [isFeatureAvailable]
+  );
+
+  const toggleFoundationTicker = useCallback((ticker: string) => {
+    setFormState((prev) => {
+      const current = new Set(prev.foundationTickers);
+      if (current.has(ticker)) {
+        current.delete(ticker);
+      } else {
+        current.add(ticker);
+      }
+      return { ...prev, foundationTickers: Array.from(current) };
+    });
+  }, []);
+
+  const toggleTrainTicker = useCallback((ticker: string) => {
+    setFormState((prev) => {
+      const current = new Set(prev.trainTickers);
+      if (current.has(ticker)) {
+        current.delete(ticker);
+      } else {
+        current.add(ticker);
+      }
+      return { ...prev, trainTickers: Array.from(current) };
+    });
+  }, []);
+
+  const handleFoundationTickersAction = useCallback(
+    (action: "all" | "clear" | "top5") => {
+      setFormState((prev) => {
+        if (action === "clear") return { ...prev, foundationTickers: [] };
+        if (action === "all") return { ...prev, foundationTickers: [...availableTickers] };
+        if (action === "top5") {
+          const topTickers = ["SPY", "QQQ", "IWM", "DIA", "EEM"].filter((t) =>
+            availableTickers.includes(t)
+          );
+          return { ...prev, foundationTickers: topTickers };
+        }
+        return prev;
+      });
+    },
+    [availableTickers]
+  );
+
+  const handleTrainTickersAction = useCallback(
+    (action: "all" | "clear" | "top5") => {
+      setFormState((prev) => {
+        if (action === "clear") return { ...prev, trainTickers: [] };
+        if (action === "all") return { ...prev, trainTickers: [...availableTickers] };
+        if (action === "top5") {
+          const topTickers = availableTickers.slice(0, 5);
+          return { ...prev, trainTickers: topTickers };
+        }
+        return prev;
+      });
+    },
+    [availableTickers]
+  );
+
   return (
     <section className="page calibrate-page">
       <header className="page-header">
@@ -1191,11 +1536,10 @@ export default function CalibrateModelsPage() {
             the CLI arguments, and generate new model artifacts.
           </p>
         </div>
-        <div className="meta-card calibrate-meta page-goal-card">
-          <span className="meta-label">Goal</span>
-          <span>Train and tune calibration models that drive pHAT scoring.</span>
-          <div className="meta-pill">Models live in src/data/models</div>
-        </div>
+        <PipelineStatusCard
+          className="calibrate-meta"
+          activeJobsCount={activeJobs.length}
+        />
       </header>
 
       <form className="calibrate-grid" onSubmit={handleSubmit}>
@@ -1207,30 +1551,8 @@ export default function CalibrateModelsPage() {
                 Dataset selection is restricted to option-chain outputs.
               </span>
             </div>
-            <div className="run-mode-tabs">
-              <button
-                type="button"
-                className={`run-mode-tab ${
-                  runMode === "manual" ? "active" : ""
-                }`}
-                onClick={() => setRunMode("manual")}
-              >
-                Manual run
-              </button>
-              <button
-                type="button"
-                className={`run-mode-tab ${
-                  runMode === "auto" ? "active" : ""
-                }`}
-                onClick={() => setRunMode("auto")}
-              >
-                Auto run
-              </button>
-            </div>
           </div>
           <div className="panel-body">
-            {runMode === "manual" ? (
-              <>
                 <div className="config-summary">
                   <div>
                     <span className="meta-label">Dataset</span>
@@ -1246,6 +1568,7 @@ export default function CalibrateModelsPage() {
                   </div>
                 </div>
                 {renderDatasetSection(true)}
+                {renderTwoStageSection()}
                 <div className="section-card calibrate-section">
                   <h3 className="section-heading">Horizon regime</h3>
                   <div className="tdays-picker regime-toggle">
@@ -1262,7 +1585,7 @@ export default function CalibrateModelsPage() {
                           }))
                         }
                       >
-                        Train pooled across all snapshots
+                        Train on all data (no regime filters)
                       </button>
                       <button
                         type="button"
@@ -1426,6 +1749,7 @@ export default function CalibrateModelsPage() {
                     const groupLockedAll =
                       regimeSpecific &&
                       group.keys.every((key) => REGIME_LOCKED_FEATURES.has(key));
+                    const availableCount = group.keys.filter(isFeatureAvailable).length;
                     return (
                       <div key={group.id} className="feature-group">
                         <div className="feature-group-header">
@@ -1442,6 +1766,15 @@ export default function CalibrateModelsPage() {
                             {groupLockedAll ? (
                               <span className="feature-tag locked">Locked by regime</span>
                             ) : null}
+                            {!group.exclusive && availableCount > 1 && (
+                              <button
+                                type="button"
+                                className="btn-select-group"
+                                onClick={() => handleSelectAllInGroup(group.id)}
+                              >
+                                Select all ({availableCount})
+                              </button>
+                            )}
                           </div>
                         </div>
                         <div className="feature-grid feature-group-grid">
@@ -1451,18 +1784,22 @@ export default function CalibrateModelsPage() {
                             const isRedundant = redundantFeatures.has(feature.key);
                             const isLocked =
                               regimeSpecific && REGIME_LOCKED_FEATURES.has(feature.key);
+                            const isAvailable = isFeatureAvailable(feature.key);
+                            const missingPct = getFeatureMissingPct(feature.key);
+                            const highMissing = hasHighMissingData(feature.key);
                             const isSelected = selectedFeatureSet.has(feature.key);
+                            const isDisabled = !isAvailable || isLocked;
                             return (
                               <label
                                 key={feature.key}
                                 className={`feature-item${isRedundant ? " is-redundant" : ""}${
-                                  isLocked ? " is-disabled" : ""
+                                  isDisabled ? " is-disabled" : ""
                                 }`}
                               >
                                 <input
                                   type="checkbox"
                                   checked={isSelected}
-                                  disabled={isLocked}
+                                  disabled={isDisabled}
                                   onChange={(event) =>
                                     handleFeatureToggle(feature.key, event.target.checked)
                                   }
@@ -1470,6 +1807,14 @@ export default function CalibrateModelsPage() {
                                 <div>
                                   <div className="feature-title">
                                     {feature.key}
+                                    {!isAvailable && (
+                                      <span className="badge badge-unavailable">Not in dataset</span>
+                                    )}
+                                    {isAvailable && highMissing && (
+                                      <span className="badge badge-warning">
+                                        ⚠ Missing: {missingPct?.toFixed(1)}%
+                                      </span>
+                                    )}
                                     {isRedundant ? (
                                       <span className="feature-tag redundant">
                                         Constant under regime
@@ -1509,49 +1854,42 @@ export default function CalibrateModelsPage() {
                     Comma-separated list appended to the selected features.
                   </span>
                 </div>
-                <div className="field field-spaced">
-                  <label htmlFor="categoricalFeatures">Categorical features</label>
-                  <input
-                    id="categoricalFeatures"
-                    className="input"
-                    value={formState.categoricalFeatures}
-                    onChange={(event) =>
+                <div className="feature-toggle-grid">
+                  <button
+                    type="button"
+                    className={`feature-toggle ${formState.addInteractions ? "selected" : ""}`}
+                    aria-pressed={formState.addInteractions}
+                    onClick={() =>
                       setFormState((prev) => ({
                         ...prev,
-                        categoricalFeatures: event.target.value,
+                        addInteractions: !prev.addInteractions,
                       }))
                     }
-                  />
+                  >
+                    <div className="feature-toggle-title">Add numeric interaction terms</div>
+                    <div className="feature-toggle-desc">
+                      Create x_logit_prn interactions with T_days, rv20, and log-moneyness to capture
+                      non-linear effects.
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    className={`feature-toggle ${formState.enableXAbsM ? "selected" : ""}`}
+                    aria-pressed={formState.enableXAbsM}
+                    onClick={() =>
+                      setFormState((prev) => ({
+                        ...prev,
+                        enableXAbsM: !prev.enableXAbsM,
+                      }))
+                    }
+                  >
+                    <div className="feature-toggle-title">Include absolute-moneyness interaction</div>
+                    <div className="feature-toggle-desc">
+                      Adds x_abs_m = x_logit_prn x |moneyness| (distance from ATM). x_m is
+                      auto-included when log-moneyness exists.
+                    </div>
+                  </button>
                 </div>
-                <label className="checkbox checkbox-spaced">
-                  <input
-                    type="checkbox"
-                    checked={formState.addInteractions}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        addInteractions: event.target.checked,
-                      }))
-                    }
-                  />
-                  Add numeric interactions (x_logit_prn × T_days/rv20/log_m)
-                </label>
-                <label className="checkbox checkbox-spaced">
-                  <input
-                    type="checkbox"
-                    checked={formState.enableXAbsM}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        enableXAbsM: event.target.checked,
-                      }))
-                    }
-                  />
-                  Add x_abs_m feature (|m| × logit(pRN))
-                </label>
-                <span className="field-hint">
-                  x_m is auto-included when log-moneyness exists; x_abs_m needs this toggle.
-                </span>
                 <div className="feature-summary">
                   <span className="meta-label">Selected features</span>
                   <span>
@@ -1562,26 +1900,132 @@ export default function CalibrateModelsPage() {
                 </div>
               </details>
 
+              {formState.modelKind !== "calibrate" && (
+                <details className="advanced">
+                  <summary>Polymarket features</summary>
+                  <div className="feature-groups">
+                    {PM_FEATURE_GROUPS.map((group) => (
+                      <div key={group.id} className="feature-group">
+                        <div className="feature-group-header">
+                          <div>
+                            <div className="feature-group-title">{group.title}</div>
+                            <div className="feature-group-hint">{group.hint}</div>
+                          </div>
+                          <div className="feature-group-meta">
+                            <button
+                              type="button"
+                              className="btn-select-group"
+                              onClick={() =>
+                                setFormState((prev) => {
+                                  const current = new Set(prev.selectedPmFeatures);
+                                  group.keys.forEach((k) => current.add(k));
+                                  return { ...prev, selectedPmFeatures: Array.from(current) };
+                                })
+                              }
+                            >
+                              Select all ({group.keys.length})
+                            </button>
+                          </div>
+                        </div>
+                        <div className="feature-grid feature-group-grid">
+                          {group.keys.map((featureKey) => {
+                            const feature = PM_FEATURE_INDEX[featureKey];
+                            if (!feature) return null;
+                            const isSelected = selectedPmFeatureSet.has(feature.key);
+                            return (
+                              <label key={feature.key} className="feature-item">
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={(event) =>
+                                    handlePmFeatureToggle(feature.key, event.target.checked)
+                                  }
+                                />
+                                <div>
+                                  <div className="feature-title">{feature.key}</div>
+                                  <div className="feature-desc">{feature.description}</div>
+                                </div>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="feature-summary" style={{ marginTop: "var(--space-3)" }}>
+                    <span className="meta-label">Selected PM features</span>
+                    <span>
+                      {formState.selectedPmFeatures.length > 0
+                        ? formState.selectedPmFeatures.join(", ")
+                        : "None selected"}
+                    </span>
+                  </div>
+                </details>
+              )}
+
               <details className="advanced">
               <summary>Model structure</summary>
               <div className="fields-grid">
-                <div className="field">
-                  <label htmlFor="modeSelect">Mode</label>
-                  <select
-                    id="modeSelect"
-                    className="input"
-                    value={formState.mode}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        mode: event.target.value as CalibrateFormState["mode"],
-                      }))
-                    }
-                  >
-                    <option value="baseline">baseline</option>
-                    <option value="pooled">pooled</option>
-                    <option value="two_stage">two_stage</option>
-                  </select>
+                <div className="field field-full-width">
+                  <label>Model type</label>
+                  <div className="radio-group">
+                    <label className="radio-label">
+                      <input
+                        type="radio"
+                        name="modelKind"
+                        value="calibrate"
+                        checked={formState.modelKind === "calibrate"}
+                        onChange={(e) =>
+                          setFormState((prev) => ({
+                            ...prev,
+                            modelKind: e.target.value as CalibrateFormState["modelKind"],
+                          }))
+                        }
+                      />
+                      <span>Calibrate only (pRN logistic model)</span>
+                    </label>
+                    <label className={`radio-label ${isMixedModelDisabled ? "disabled" : ""}`}>
+                      <input
+                        type="radio"
+                        name="modelKind"
+                        value="mixed"
+                        checked={formState.modelKind === "mixed"}
+                        disabled={isMixedModelDisabled}
+                        onChange={(e) =>
+                          setFormState((prev) => ({
+                            ...prev,
+                            modelKind: e.target.value as CalibrateFormState["modelKind"],
+                          }))
+                        }
+                      />
+                      <span>
+                        Mixed only (PM + pRN blend)
+                        {isMixedModelDisabled && (
+                          <span className="field-hint" style={{ marginLeft: "0.5rem" }}>
+                            (Not available for 1DTE/daily datasets)
+                          </span>
+                        )}
+                      </span>
+                    </label>
+                    <label className="radio-label">
+                      <input
+                        type="radio"
+                        name="modelKind"
+                        value="both"
+                        checked={formState.modelKind === "both"}
+                        onChange={(e) =>
+                          setFormState((prev) => ({
+                            ...prev,
+                            modelKind: e.target.value as CalibrateFormState["modelKind"],
+                          }))
+                        }
+                      />
+                      <span>Both (run calibrate + mixed sequentially)</span>
+                    </label>
+                  </div>
+                  <span className="field-hint">
+                    Choose which model(s) to train. "Both" runs calibrate first, then mixed model.
+                  </span>
                 </div>
                 <div className="field">
                   <label htmlFor="tickerIntercepts">Ticker intercepts</label>
@@ -1671,35 +2115,122 @@ export default function CalibrateModelsPage() {
                   </span>
                 </div>
               </div>
-              <div className="field">
-                <label htmlFor="foundationTickers">Foundation tickers</label>
-                <input
-                  id="foundationTickers"
-                  className="input"
-                  placeholder="ticker1,ticker2,..."
-                  value={formState.foundationTickers}
-                  onChange={(event) =>
-                    setFormState((prev) => ({
-                      ...prev,
-                      foundationTickers: event.target.value,
-                    }))
-                  }
-                />
+              <div className="field field-full-width">
+                <label>Foundation tickers</label>
+                <div className="ticker-actions">
+                  <button
+                    type="button"
+                    className="btn-ticker-action"
+                    onClick={() => handleFoundationTickersAction("top5")}
+                    disabled={availableTickers.length === 0}
+                  >
+                    Top 5
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-ticker-action"
+                    onClick={() => handleFoundationTickersAction("all")}
+                    disabled={availableTickers.length === 0}
+                  >
+                    Select All ({availableTickers.length})
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-ticker-action"
+                    onClick={() => handleFoundationTickersAction("clear")}
+                    disabled={formState.foundationTickers.length === 0}
+                  >
+                    Clear All
+                  </button>
+                </div>
+
+                {tickersFetching && <p className="field-hint">Loading tickers...</p>}
+                {tickersError && <p className="field-hint error-text">{tickersError}</p>}
+
+                {!tickersFetching && availableTickers.length > 0 && (
+                  <div className="ticker-grid">
+                    {availableTickers.map((ticker) => {
+                      const isSelected = formState.foundationTickers.includes(ticker);
+                      return (
+                        <button
+                          key={ticker}
+                          type="button"
+                          className={`ticker-chip ${isSelected ? "selected" : ""}`}
+                          aria-pressed={isSelected}
+                          onClick={() => toggleFoundationTicker(ticker)}
+                        >
+                          {ticker}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="ticker-selection-summary">
+                  Selected: {formState.foundationTickers.length > 0
+                    ? formState.foundationTickers.join(", ")
+                    : "None"}
+                </div>
+
+                <span className="field-hint">
+                  Foundation tickers get upweighted and may get special treatment.
+                </span>
               </div>
-              <div className="field">
-                <label htmlFor="trainTickers">Train tickers</label>
-                <input
-                  id="trainTickers"
-                  className="input"
-                  placeholder="ticker1,ticker2,..."
-                  value={formState.trainTickers}
-                  onChange={(event) =>
-                    setFormState((prev) => ({
-                      ...prev,
-                      trainTickers: event.target.value,
-                    }))
-                  }
-                />
+              <div className="field field-full-width">
+                <label>Train tickers</label>
+                <div className="ticker-actions">
+                  <button
+                    type="button"
+                    className="btn-ticker-action"
+                    onClick={() => handleTrainTickersAction("top5")}
+                    disabled={availableTickers.length === 0}
+                  >
+                    Top 5
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-ticker-action"
+                    onClick={() => handleTrainTickersAction("all")}
+                    disabled={availableTickers.length === 0}
+                  >
+                    Select All ({availableTickers.length})
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-ticker-action"
+                    onClick={() => handleTrainTickersAction("clear")}
+                    disabled={formState.trainTickers.length === 0}
+                  >
+                    Clear All
+                  </button>
+                </div>
+
+                {tickersFetching && <p className="field-hint">Loading tickers...</p>}
+                {tickersError && <p className="field-hint error-text">{tickersError}</p>}
+
+                {!tickersFetching && availableTickers.length > 0 && (
+                  <div className="ticker-grid">
+                    {availableTickers.map((ticker) => {
+                      const isSelected = formState.trainTickers.includes(ticker);
+                      return (
+                        <button
+                          key={ticker}
+                          type="button"
+                          className={`ticker-chip ${isSelected ? "selected" : ""}`}
+                          aria-pressed={isSelected}
+                          onClick={() => toggleTrainTicker(ticker)}
+                        >
+                          {ticker}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="ticker-selection-summary">
+                  Selected: {formState.trainTickers.length > 0 ? formState.trainTickers.join(", ") : "None"}
+                </div>
+
                 <span className="field-hint">
                   Restrict training to a subset of tickers.
                 </span>
@@ -2114,355 +2645,139 @@ export default function CalibrateModelsPage() {
                 Reset
               </button>
             </div>
-          </>
-        ) : (
-          <>
-            {renderDatasetSection(false)}
-            <div className="section-card calibrate-section">
-              <h3 className="section-heading">Horizon regime</h3>
-              <div className="tdays-picker regime-toggle">
-                <span className="meta-label">Regime mode</span>
+          {runError ? <div className="error">{runError}</div> : null}
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-header">
+            <div>
+              <h2>Auto-calibrate</h2>
+              <span className="panel-hint">
+                Enumerate feature combos and promote the best trial.
+              </span>
+            </div>
+          </div>
+          <div className="panel-body">
+            <div className="auto-section">
+              <div className="field">
+                <span className="meta-label">Train mode</span>
                 <div className="tdays-chips">
                   <button
                     type="button"
-                    className={`chip ${!regimeSpecific ? "active" : ""}`}
-                    onClick={() =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        tdaysAllowed: "",
-                        asofDowAllowed: "",
-                      }))
-                    }
+                    className={`chip ${autoMode === "option_only" ? "active" : ""}`}
+                    onClick={() => setAutoMode("option_only")}
                   >
-                    Train pooled across all snapshots
+                    Option-only
                   </button>
                   <button
                     type="button"
-                    className={`chip ${regimeSpecific ? "active" : ""}`}
-                    onClick={() => {
-                      if (!regimeSpecific) {
-                        setFormState((prev) => ({
-                          ...prev,
-                          asofDowAllowed: prev.asofDowAllowed || "Mon",
-                        }));
-                      }
-                    }}
+                    className={`chip ${autoMode === "mixed" ? "active" : ""}`}
+                    onClick={() => setAutoMode("mixed")}
                   >
-                    Train a regime-specific model
+                    Mixed (Polymarket + Options)
                   </button>
                 </div>
+                <span className="field-hint">
+                  Uses the options dataset selected above.
+                </span>
               </div>
-              <div className="fields-grid">
+
+              {autoMode === "mixed" ? (
                 <div className="field">
-                  <label htmlFor="asofDowAllowedAuto">Training day-of-week</label>
+                  <label htmlFor="autoPmDatasetSelect">Polymarket dataset</label>
                   <select
-                    id="asofDowAllowedAuto"
+                    id="autoPmDatasetSelect"
                     className="input"
-                    value={formState.asofDowAllowed}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        asofDowAllowed: event.target.value,
-                      }))
-                    }
+                    value={autoPmDatasetPath}
+                    onChange={(event) => setAutoPmDatasetPath(event.target.value)}
                   >
-                    <option value="">Any day</option>
-                    <option value="Mon">Mon</option>
-                    <option value="Tue">Tue</option>
-                    <option value="Wed">Wed</option>
-                    <option value="Thu">Thu</option>
-                    <option value="Fri">Fri</option>
+                    {pmDatasets.length === 0 ? (
+                      <option value="">No Polymarket datasets available</option>
+                    ) : null}
+                    {pmDatasets.map((dataset) => (
+                      <option key={dataset.path} value={dataset.path}>
+                        {dataset.name}
+                      </option>
+                    ))}
                   </select>
                   <span className="field-hint">
-                    Filters snapshots by as-of day. Monday defaults to <code>T_days=4</code>.
+                    Required for mixed mode (decision_features dataset).
                   </span>
+                  {pmDatasetError ? <div className="error">{pmDatasetError}</div> : null}
+                  {selectedAutoPmDataset ? (
+                    <div className="dataset-meta">
+                      <div>
+                        <span className="meta-label">Last modified</span>
+                        <span>{formatTimestamp(selectedAutoPmDataset.last_modified)}</span>
+                      </div>
+                      <div>
+                        <span className="meta-label">Size</span>
+                        <span>{formatBytes(selectedAutoPmDataset.size_bytes)}</span>
+                      </div>
+                      <div>
+                        <span className="meta-label">Path</span>
+                        <span>{selectedAutoPmDataset.path}</span>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
-                <div className="field">
-                  <label htmlFor="tdaysAllowedAuto">Allowed T_days</label>
-                  <input
-                    id="tdaysAllowedAuto"
-                    className="input"
-                    placeholder="Auto"
-                    value={formState.tdaysAllowed}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        tdaysAllowed: event.target.value,
-                      }))
-                    }
-                  />
-                  <span className="field-hint">
-                    Comma-separated list. Leave blank for no filter.
-                  </span>
-                </div>
-              </div>
-              <div className="tdays-picker">
-                <span className="meta-label">Quick T_days</span>
-                <div className="tdays-chips">
-                  <button
-                    type="button"
-                    className={`chip ${formState.tdaysAllowed.trim() ? "" : "active"}`}
-                    onClick={() =>
-                      setFormState((prev) => ({ ...prev, tdaysAllowed: "" }))
-                    }
-                  >
-                    Auto
-                  </button>
-                  {TDAYS_OPTIONS.map((value) => {
-                    const selected = parseTdaysList(formState.tdaysAllowed).includes(value);
-                    return (
-                      <button
-                        key={value}
-                        type="button"
-                        className={`chip ${selected ? "active" : ""}`}
-                        onClick={() => {
-                          const current = parseTdaysList(formState.tdaysAllowed);
-                          const next = selected
-                            ? current.filter((item) => item !== value)
-                            : [...current, value];
-                          setFormState((prev) => ({
-                            ...prev,
-                            tdaysAllowed: formatTdaysList(next),
-                          }));
-                        }}
-                      >
-                        {value}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-              {regimePreviewError ? (
-                <div className="error">{regimePreviewError}</div>
               ) : null}
-              {regimePreview ? (
-                <div className="regime-preview">
+
+              <div className="actions">
+                <button
+                  className="button primary"
+                  type="button"
+                  disabled={autoIsRunning || anyJobRunning || !formState.datasetPath}
+                  onClick={handleStartAutoCalibration}
+                >
+                  {autoIsRunning ? "Auto-calibrating..." : "Run auto-calibration"}
+                </button>
+              </div>
+              {autoRunError ? <div className="error">{autoRunError}</div> : null}
+            </div>
+
+            {autoProgress ? (
+              <div className="auto-progress">
+                <div className="auto-progress-header">
                   <div>
-                    <span className="meta-label">Rows after filter</span>
-                    <span>{regimePreview.rows_after}</span>
+                    <span className="meta-label">Auto calibration</span>
+                    <div>
+                      {autoProgress.stage === "done" ? "Completed" : "Running trials"}
+                    </div>
+                  </div>
+                  {autoIsRunning ? <span className="spinner" /> : null}
+                </div>
+                <p className="auto-progress-message">
+                  Training trial {autoTrialsDone} / {autoTrialsTotal} ({autoTrialsFailed} failed)
+                </p>
+                <progress value={autoTrialsDone} max={autoTrialsTotal || 1} />
+                <div className="auto-progress-details">
+                  <div>
+                    <span className="meta-label">Stage</span>
+                    <span>{autoProgress.stage}</span>
                   </div>
                   <div>
-                    <span className="meta-label">Tickers retained</span>
-                    <span>{regimePreview.tickers_after}</span>
-                  </div>
-                </div>
-              ) : null}
-              {regimePreview &&
-              (regimePreview.rows_after < REGIME_WARNING_MIN_ROWS ||
-                regimePreview.tickers_after < 2) ? (
-                <div className="warning">
-                  Regime filters are very tight. Loosen day/T_days or add more
-                  history before training.
-                </div>
-              ) : null}
-            </div>
-            <div className="section-card auto-section">
-              <h3 className="section-heading">Auto tuner</h3>
-              <div className="field">
-                <label htmlFor="autoRunName">Output folder name</label>
-                <input
-                  id="autoRunName"
-                  className="input"
-                  value={autoForm.runName}
-                  onChange={(event) =>
-                    setAutoForm((prev) => ({ ...prev, runName: event.target.value }))
-                  }
-                />
-                <span className="field-hint">
-                  Best model will be exported to <code>{MODELS_BASE}/{autoForm.runName || 'auto-run'}</code>
-                </span>
-              </div>
-              <div className="fields-grid">
-                <div className="field">
-                  <label htmlFor="autoMaxTrials">Max trials</label>
-                  <input
-                    id="autoMaxTrials"
-                    className="input"
-                    inputMode="numeric"
-                    value={autoForm.maxTrials}
-                    onChange={(event) =>
-                      setAutoForm((prev) => ({ ...prev, maxTrials: event.target.value }))
-                    }
-                  />
-                </div>
-                <div className="field">
-                  <label htmlFor="autoSeed">Seed</label>
-                  <input
-                    id="autoSeed"
-                    className="input"
-                    inputMode="numeric"
-                    value={autoForm.seed}
-                    onChange={(event) =>
-                      setAutoForm((prev) => ({ ...prev, seed: event.target.value }))
-                    }
-                  />
-                </div>
-                <div className="field">
-                  <label htmlFor="autoParallel">Parallel trials</label>
-                  <input
-                    id="autoParallel"
-                    className="input"
-                    inputMode="numeric"
-                    value={autoForm.parallel}
-                    onChange={(event) =>
-                      setAutoForm((prev) => ({ ...prev, parallel: event.target.value }))
-                    }
-                  />
-                </div>
-              </div>
-              <div className="field">
-                <label htmlFor="baselineArgs">Baseline args</label>
-                <textarea
-                  id="baselineArgs"
-                  className="input"
-                  value={autoForm.baselineArgs}
-                  onChange={(event) =>
-                    setAutoForm((prev) => ({ ...prev, baselineArgs: event.target.value }))
-                  }
-                />
-                <span className="field-hint">
-                  Extra calibrator args (e.g. <code>--mode pooled</code>).
-                </span>
-              </div>
-              <div className="fields-grid">
-                <div className="field">
-                  <label htmlFor="autoFoundationTickers">Foundation tickers</label>
-                  <input
-                    id="autoFoundationTickers"
-                    className="input"
-                    value={autoForm.foundationTickers}
-                    onChange={(event) =>
-                      setAutoForm((prev) => ({
-                        ...prev,
-                        foundationTickers: event.target.value,
-                      }))
-                    }
-                  />
-                </div>
-                <div className="field">
-                  <label htmlFor="autoFoundationWeight">Foundation weight</label>
-                  <input
-                    id="autoFoundationWeight"
-                    className="input"
-                    inputMode="decimal"
-                    value={autoForm.foundationWeight}
-                    onChange={(event) =>
-                      setAutoForm((prev) => ({
-                        ...prev,
-                        foundationWeight: event.target.value,
-                      }))
-                    }
-                  />
-                </div>
-              </div>
-
-              <details className="advanced">
-                <summary>Bootstrap confidence intervals</summary>
-                <label className="checkbox checkbox-spaced">
-                  <input
-                    type="checkbox"
-                    checked={autoForm.bootstrapCi}
-                    onChange={(event) =>
-                      setAutoForm((prev) => ({
-                        ...prev,
-                        bootstrapCi: event.target.checked,
-                      }))
-                    }
-                  />
-                  Compute bootstrap CIs for delta metrics
-                </label>
-                <div className="fields-grid">
-                  <div className="field">
-                    <label htmlFor="autoBootstrapB">Resamples (B)</label>
-                    <input
-                      id="autoBootstrapB"
-                      className="input"
-                      inputMode="numeric"
-                      value={autoForm.bootstrapB}
-                      onChange={(event) =>
-                        setAutoForm((prev) => ({
-                          ...prev,
-                          bootstrapB: event.target.value,
-                        }))
-                      }
-                      disabled={!autoForm.bootstrapCi}
-                    />
-                    <span className="field-hint">
-                      Number of bootstrap resamples (default 2000).
+                    <span className="meta-label">Best score</span>
+                    <span>
+                      {autoProgress.best_score_so_far != null
+                        ? autoProgress.best_score_so_far.toFixed(4)
+                        : "—"}
                     </span>
                   </div>
-                  <div className="field">
-                    <label htmlFor="autoBootstrapSeed">Seed</label>
-                    <input
-                      id="autoBootstrapSeed"
-                      className="input"
-                      inputMode="numeric"
-                      value={autoForm.bootstrapSeed}
-                      onChange={(event) =>
-                        setAutoForm((prev) => ({
-                          ...prev,
-                          bootstrapSeed: event.target.value,
-                        }))
-                      }
-                      disabled={!autoForm.bootstrapCi}
-                    />
-                  </div>
-                  <div className="field">
-                    <label htmlFor="autoBootstrapGroup">Group strategy</label>
-                    <select
-                      id="autoBootstrapGroup"
-                      className="input"
-                      value={autoForm.bootstrapGroup}
-                      onChange={(event) =>
-                        setAutoForm((prev) => ({
-                          ...prev,
-                          bootstrapGroup: event.target
-                            .value as AutoFormState["bootstrapGroup"],
-                        }))
-                      }
-                      disabled={!autoForm.bootstrapCi}
-                    >
-                      <option value="auto">auto (ticker+date+expiry)</option>
-                      <option value="ticker_day">ticker + date</option>
-                      <option value="day">date only</option>
-                      <option value="iid">iid (no blocking)</option>
-                    </select>
-                    <span className="field-hint">
-                      Block bootstrap groups for correlated data.
-                    </span>
+                  <div>
+                    <span className="meta-label">Failed</span>
+                    <span>{autoTrialsFailed}</span>
                   </div>
                 </div>
-              </details>
-
-            <div className="auto-summary">
-                <p>
-                  Auto runs log trials under <code>{MODELS_BASE}</code>.
-                </p>
-                <p>
-                  Final artifacts are linked into <code>src/data/models</code>.
-                </p>
+                {autoProgress.last_error ? (
+                  <details className="command-details">
+                    <summary>Last error</summary>
+                    <code>{autoProgress.last_error}</code>
+                  </details>
+                ) : null}
               </div>
-            </div>
-            <div className="actions">
-              <button
-                className="button primary"
-                type="submit"
-                disabled={isRunning || anyJobRunning || !formState.datasetPath}
-              >
-                {isRunning ? "Running auto tuner..." : "Start auto tuner"}
-              </button>
-              <button
-                className="button ghost"
-                type="button"
-                disabled={isRunning || anyJobRunning}
-                onClick={() => setAutoForm(buildDefaultAutoForm())}
-              >
-                Reset
-              </button>
-            </div>
-          </>
-        )}
-          {runError ? <div className="error">{runError}</div> : null}
+            ) : null}
           </div>
         </section>
 
@@ -2474,31 +2789,7 @@ export default function CalibrateModelsPage() {
             </span>
           </div>
           <div className="panel-body">
-            {isRunning && activeRunMode === "auto" ? (
-              <div className="auto-progress">
-                <div className="auto-progress-header">
-                  <span className="meta-label">Auto-select in progress</span>
-                  <div className="spinner"></div>
-                </div>
-                <p className="auto-progress-message">
-                  Running automated model selection. This may take several minutes depending on the number of trials and parallelization settings.
-                </p>
-                <div className="auto-progress-details">
-                  <div>
-                    <span className="meta-label">Max trials</span>
-                    <span>{autoForm.maxTrials || "Not set"}</span>
-                  </div>
-                  <div>
-                    <span className="meta-label">Parallel</span>
-                    <span>{autoForm.parallel || "1"}</span>
-                  </div>
-                  <div>
-                    <span className="meta-label">Objective</span>
-                    <span>{autoForm.objective}</span>
-                  </div>
-                </div>
-              </div>
-            ) : !runResult ? (
+            {!runResult ? (
               <div className="empty">No calibration run yet.</div>
             ) : (
               <div className="run-output">
@@ -2735,23 +3026,69 @@ export default function CalibrateModelsPage() {
                     </div>
                   </div>
                 ) : null}
-                {runResult.model_equation ? (
+                {runResult.two_stage_metrics && runResult.two_stage_metrics.length > 0 ? (
+                  <div className="metrics-summary">
+                    <div className="metrics-summary-header">
+                      <span className="meta-label">Two-stage overlay metrics</span>
+                      <span className="metrics-summary-note">
+                        Test split metrics for Stage A, Polymarket baseline, and two-stage output.
+                      </span>
+                    </div>
+                    <div className="run-extra">
+                      <span className="meta-label">Stage selection</span>
+                      <span>Stage B runs when Polymarket features are present; otherwise Stage A is used.</span>
+                    </div>
+                    <div className="metrics-summary-grid">
+                      {runResult.two_stage_metrics.map((row) => (
+                        <div key={`${row.split}-${row.model}`} className="metrics-card">
+                          <div className="metrics-card-heading">
+                            <span>{row.model.replace("_", " ")}</span>
+                            <span className="status-pill idle">{row.split}</span>
+                          </div>
+                          <div className="metrics-card-row">
+                            <span>Logloss</span>
+                            <strong>{row.logloss.toFixed(4)}</strong>
+                          </div>
+                          <div className="metrics-card-row">
+                            <span>Brier</span>
+                            <strong>{row.brier.toFixed(4)}</strong>
+                          </div>
+                          <div className="metrics-card-row">
+                            <span>N</span>
+                            <strong>{row.n}</strong>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                {runResult.is_two_stage ? (
+                  <div className="two-stage-equations">
+                    {runResult.stage1_equation ? (
+                      <div className="equation-summary">
+                        <span className="meta-label">Stage 1: Base pRN Model</span>
+                        <div className="equation-display">
+                          <LatexEquation latex={runResult.stage1_equation} />
+                        </div>
+                      </div>
+                    ) : null}
+                    {runResult.two_stage_equation ? (
+                      <div className="equation-summary">
+                        <span className="meta-label">Stage 2: Polymarket Overlay</span>
+                        <div className="equation-display">
+                          <LatexEquation latex={runResult.two_stage_equation} />
+                        </div>
+                        <div className="equation-hint">
+                          Final prediction combines base pRN model (Stage 1) with Polymarket features.
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : runResult.model_equation ? (
                   <div className="equation-summary">
                     <span className="meta-label">pHAT equation</span>
                     <div className="equation-display">
                       <LatexEquation latex={runResult.model_equation} />
-                    </div>
-                  </div>
-                ) : null}
-                {runMode === "auto" && runResult.features && runResult.features.length > 0 ? (
-                  <div className="features-summary">
-                    <span className="meta-label">Features selected</span>
-                    <div className="features-list">
-                      {runResult.features.map((feature, idx) => (
-                        <span key={idx} className="feature-chip">
-                          {feature}
-                        </span>
-                      ))}
                     </div>
                   </div>
                 ) : null}
@@ -2929,7 +3266,29 @@ export default function CalibrateModelsPage() {
                                     </span>
                                   )}
                                 </div>
-                                {modelDetail.model_equation ? (
+                                {modelDetail.is_two_stage ? (
+                                  <div className="two-stage-equations">
+                                    {modelDetail.stage1_equation ? (
+                                      <div className="equation-summary">
+                                        <span className="meta-label">Stage 1: Base pRN Model</span>
+                                        <div className="equation-display">
+                                          <LatexEquation latex={modelDetail.stage1_equation} />
+                                        </div>
+                                      </div>
+                                    ) : null}
+                                    {modelDetail.two_stage_equation ? (
+                                      <div className="equation-summary">
+                                        <span className="meta-label">Stage 2: Polymarket Overlay</span>
+                                        <div className="equation-display">
+                                          <LatexEquation latex={modelDetail.two_stage_equation} />
+                                        </div>
+                                        <div className="equation-hint">
+                                          Final prediction combines base pRN model (Stage 1) with Polymarket features.
+                                        </div>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                ) : modelDetail.model_equation ? (
                                   <div className="equation-summary">
                                     <span className="meta-label">pHAT equation</span>
                                     <div className="equation-display">

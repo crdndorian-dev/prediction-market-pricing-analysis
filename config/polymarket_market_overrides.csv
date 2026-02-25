@@ -1,0 +1,1 @@
+market_id,condition_id,slug,ticker,threshold,expiry_date_utc,resolution_time_utc,outcome_yes_token_id,outcome_no_token_id,source,mapping_confidence

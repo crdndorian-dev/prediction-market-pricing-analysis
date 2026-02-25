@@ -33,6 +33,14 @@ Run the server:
 uvicorn main:app --reload --port 8000
 ```
 
+## Job concurrency
+
+By default, the web app allows multiple jobs to run at the same time. To cap
+concurrency, set:
+
+- Backend: `MAX_ACTIVE_JOBS` (set to `1` to restore single-job behavior)
+- Frontend: `VITE_MAX_ACTIVE_JOBS` (set in `frontend/.env` to mirror the limit)
+
 ## Frontend setup
 
 ```bash

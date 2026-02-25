@@ -20,6 +20,7 @@ import {
   type DatasetRunResponse,
   type DatasetRunSummary,
 } from "../api/datasets";
+import PipelineStatusCard from "../components/PipelineStatusCard";
 import { useDatasetJob } from "../contexts/datasetJob";
 import { useAnyJobRunning } from "../contexts/jobGuard";
 import "./DatasetsPage.css";
@@ -365,7 +366,14 @@ const formatByteCount = (bytes?: number | null): string => {
 const formatTimestamp = (value?: string | null): string =>
   value ? new Date(value).toLocaleString() : "Unknown";
 
-const PREVIEW_LIMIT = 20;
+type PreviewMode = "head" | "tail";
+
+const PREVIEW_LIMIT_DEFAULT = 20;
+const PREVIEW_LIMIT_OPTIONS = [20, 50, 100] as const;
+const PREVIEW_MODE_OPTIONS: { value: PreviewMode; label: string }[] = [
+  { value: "head", label: "First" },
+  { value: "tail", label: "Last" },
+];
 
 type PreviewTarget = {
   label: string;
@@ -427,7 +435,7 @@ const countMondaysInRange = (start: string, end: string): number | null => {
 const buildCommandPreview = (state: DatasetFormState): string => {
   const args: string[] = [
     "python",
-    "src/scripts/1-option-chain-build-historic-dataset-v1.0.py",
+    "src/scripts/01-option-chain-build-historic-dataset-v1.0.py",
   ];
 
   const addValue = (flag: string, value: string) => {
@@ -526,7 +534,7 @@ export default function DatasetsPage() {
   const [storageReady, setStorageReady] = useState(false);
   const { jobStatus, jobId, setJobId, setJobStatus: setGlobalJobStatus } =
     useDatasetJob();
-  const { anyJobRunning, primaryJob } = useAnyJobRunning();
+  const { anyJobRunning, primaryJob, activeJobs } = useAnyJobRunning();
   const [killLoading, setKillLoading] = useState(false);
   const [datasetRuns, setDatasetRuns] = useState<DatasetRunSummary[]>([]);
   const [runsLoading, setRunsLoading] = useState(false);
@@ -536,12 +544,19 @@ export default function DatasetsPage() {
     useState<DatasetPreviewResponse | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewMode, setPreviewMode] = useState<PreviewMode>("head");
+  const [previewLimit, setPreviewLimit] = useState<number>(
+    PREVIEW_LIMIT_DEFAULT,
+  );
   const [deleteConfirmRun, setDeleteConfirmRun] = useState<string | null>(null);
   const [deleteLoadingRun, setDeleteLoadingRun] = useState<string | null>(null);
   const [renamingRunId, setRenamingRunId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState<string>("");
   const [renameError, setRenameError] = useState<string | null>(null);
   const [renameLoading, setRenameLoading] = useState(false);
+  // Accordion: tracks which run's CSV file list is expanded — null means all collapsed.
+  // Single value ensures only one run can be open at a time without per-item flags.
+  const [openRunId, setOpenRunId] = useState<string | null>(null);
   const [customTickerInput, setCustomTickerInput] = useState("");
   const refreshDatasetRuns = useCallback(async () => {
     setRunsLoading(true);
@@ -758,7 +773,7 @@ export default function DatasetsPage() {
     let cancelled = false;
     setPreviewLoading(true);
     setPreviewError(null);
-    previewDatasetFile(previewTarget.path, "head", PREVIEW_LIMIT)
+    previewDatasetFile(previewTarget.path, previewMode, previewLimit)
       .then((result) => {
         if (cancelled) return;
         setPreviewResponse(result);
@@ -775,7 +790,7 @@ export default function DatasetsPage() {
     return () => {
       cancelled = true;
     };
-  }, [previewTarget]);
+  }, [previewTarget, previewMode, previewLimit]);
 
   useEffect(() => {
     const stored = loadStoredForm();
@@ -1004,11 +1019,10 @@ export default function DatasetsPage() {
             Generate the option-chain dataset that feeds calibration and keep every CLI input tracked in one place.
           </p>
         </div>
-        <div className="meta-card datasets-meta page-goal-card">
-          <span className="meta-label">Goal</span>
-          <span>Produce the reproducible option-chain dataset that powers calibration.</span>
-          <div className="meta-pill">Outputs stored under src/data/raw/option-chain</div>
-        </div>
+        <PipelineStatusCard
+          className="datasets-meta"
+          activeJobsCount={activeJobs.length}
+        />
       </header>
 
       <div className="datasets-grid">
@@ -2285,10 +2299,24 @@ export default function DatasetsPage() {
                   ? `Training: ${trainingFile.name}`
                   : "Training file missing";
                 const isRenaming = renamingRunId === run.id;
+                const isPreviewingRun = Boolean(
+                  previewTarget?.path.startsWith(run.run_dir),
+                );
+                // Derived from single openRunId state — no per-item boolean flags
+                const isOpen = openRunId === run.id;
                 return (
-                  <article key={run.id} className="dataset-run-item">
-                    <div className="dataset-run-main">
-                      {isRenaming ? (
+                  <article
+                    key={run.id}
+                    className={`dataset-run-item${isOpen ? " is-open" : ""}`}
+                  >
+                    {/* ── Accordion Header ────────────────────────────────────────
+                        Rename mode  : plain <div> — no toggle while input is active.
+                        Display mode : native <button> acts as the accordion trigger;
+                                       Enter/Space activation handled by the browser.
+                        No chevron or expand behavior when there are no CSV files.
+                    ─────────────────────────────────────────────────────────────── */}
+                    {isRenaming ? (
+                      <div className="dataset-run-main">
                         <div className="rename-input-wrapper">
                           <input
                             className="input rename-input"
@@ -2330,16 +2358,51 @@ export default function DatasetsPage() {
                             </button>
                           </div>
                         </div>
-                      ) : (
-                        <div className="dataset-run-title">{runName}</div>
-                      )}
-                      <div className="dataset-run-meta">
-                        <span>{formatTimestamp(run.last_modified)}</span>
-                        <span>{filesLabel}</span>
-                        <span>{trainingLabel}</span>
+                        <div className="dataset-run-meta">
+                          <span>{formatTimestamp(run.last_modified)}</span>
+                          <span>{filesLabel}</span>
+                          <span>{trainingLabel}</span>
+                        </div>
+                        <div className="dataset-run-path">{run.run_dir}</div>
                       </div>
-                      <div className="dataset-run-path">{run.run_dir}</div>
-                    </div>
+                    ) : (
+                      // Display mode: button is the accordion trigger.
+                      // Clicking toggles this run open; clicking again collapses it.
+                      // Only one run may be open at a time (single openRunId state).
+                      <button
+                        type="button"
+                        className="dataset-run-toggle"
+                        aria-expanded={fileCount > 0 ? isOpen : undefined}
+                        aria-controls={
+                          fileCount > 0 ? `run-files-${run.id}` : undefined
+                        }
+                        onClick={() => {
+                          // No-op when no CSV files exist; otherwise toggle open/closed.
+                          // Clicking the same open run collapses it (single-accordion).
+                          if (fileCount > 0) {
+                            setOpenRunId((prev) =>
+                              prev === run.id ? null : run.id,
+                            );
+                          }
+                        }}
+                      >
+                        <div className="dataset-run-main">
+                          <div className="dataset-run-title">{runName}</div>
+                          <div className="dataset-run-meta">
+                            <span>{formatTimestamp(run.last_modified)}</span>
+                            <span>{filesLabel}</span>
+                            <span>{trainingLabel}</span>
+                          </div>
+                          <div className="dataset-run-path">{run.run_dir}</div>
+                        </div>
+                        {/* Chevron: ▸ rotates 90° via CSS when .is-open is on the article */}
+                        {fileCount > 0 ? (
+                          <span className="dataset-run-chevron" aria-hidden="true">
+                            ▸
+                          </span>
+                        ) : null}
+                      </button>
+                    )}
                     <div className="dataset-run-actions">
                       <button
                         type="button"
@@ -2387,130 +2450,197 @@ export default function DatasetsPage() {
                         </div>
                       ) : null}
                     </div>
-                    <div className="dataset-run-files">
-                      {files.length === 0 ? (
-                        <div className="dataset-run-files-empty">
-                          No CSV files found in this run.
-                        </div>
-                      ) : (
-                        files.map((file) => {
-                          const isTraining = trainingPath === file.path;
-                          return (
-                            <div key={file.path} className="dataset-run-file">
-                              <div className="dataset-run-file-info">
-                                <div className="dataset-run-file-name">
-                                  {file.name}
+                    {/* ── Collapsible Drawer ────────────────────────────────────────
+                        Hidden by default via the `hidden` attribute.
+                        Not rendered when there are no CSV files in this run.
+                        The id links to aria-controls on the button.
+                    ─────────────────────────────────────────────────────────────── */}
+                    {fileCount > 0 ? (
+                      <div
+                        id={`run-files-${run.id}`}
+                        className={`dataset-run-files-drawer${isOpen ? " is-open" : ""}`}
+                        hidden={!isOpen}
+                      >
+                        <div className="dataset-run-files">
+                          {files.map((file) => {
+                            const isTraining = trainingPath === file.path;
+                            return (
+                              <div key={file.path} className="dataset-run-file">
+                                <div className="dataset-run-file-info">
+                                  <div className="dataset-run-file-name">
+                                    {file.name}
+                                  </div>
+                                  <div className="dataset-run-file-meta">
+                                    {isTraining ? (
+                                      <span className="dataset-run-file-tag">
+                                        Training
+                                      </span>
+                                    ) : null}
+                                    <span>{formatByteCount(file.size_bytes)}</span>
+                                  </div>
                                 </div>
-                                <div className="dataset-run-file-meta">
-                                  {isTraining ? (
-                                    <span className="dataset-run-file-tag">
-                                      Training
-                                    </span>
-                                  ) : null}
-                                  <span>{formatByteCount(file.size_bytes)}</span>
+                                <div className="dataset-run-file-actions">
+                                  <button
+                                    type="button"
+                                    className="button light small"
+                                    onClick={() =>
+                                      handlePreviewSelection({
+                                        label: `${file.name}${isTraining ? " (training)" : ""}`,
+                                        path: file.path,
+                                      })
+                                    }
+                                  >
+                                    Preview
+                                  </button>
+                                  <a
+                                    href={getDatasetFileUrl(file.path)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="button light small"
+                                  >
+                                    Open
+                                  </a>
                                 </div>
                               </div>
-                              <div className="dataset-run-file-actions">
-                                <button
-                                  type="button"
-                                  className="button light small"
-                                  onClick={() =>
-                                    handlePreviewSelection({
-                                      label: `${file.name}${isTraining ? " (training)" : ""}`,
-                                      path: file.path,
-                                    })
-                                  }
-                                >
-                                  Preview
-                                </button>
-                                <a
-                                  href={getDatasetFileUrl(file.path)}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="button light small"
-                                >
-                                  Open
-                                </a>
+                            );
+                          })}
+                        </div>
+                        {isPreviewingRun ? (
+                          <div className="dataset-preview-panel dataset-preview-inline">
+                            <div className="dataset-preview-header">
+                              <div>
+                                <span className="meta-label">CSV preview</span>
+                                <p className="dataset-preview-title">
+                                  {previewTarget?.label ??
+                                    "Select a CSV to peek at its rows."}
+                                </p>
+                              </div>
+                              <div className="dataset-preview-controls">
+                                <label className="dataset-preview-control">
+                                  <span className="meta-label">Range</span>
+                                  <select
+                                    className="input"
+                                    value={previewMode}
+                                    onChange={(event) =>
+                                      setPreviewMode(
+                                        event.target.value as PreviewMode,
+                                      )
+                                    }
+                                  >
+                                    {PREVIEW_MODE_OPTIONS.map((option) => (
+                                      <option
+                                        key={option.value}
+                                        value={option.value}
+                                      >
+                                        {option.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <label className="dataset-preview-control">
+                                  <span className="meta-label">Rows</span>
+                                  <select
+                                    className="input"
+                                    value={previewLimit}
+                                    onChange={(event) => {
+                                      const next = Number.parseInt(
+                                        event.target.value,
+                                        10,
+                                      );
+                                      setPreviewLimit(
+                                        Number.isFinite(next)
+                                          ? next
+                                          : PREVIEW_LIMIT_DEFAULT,
+                                      );
+                                    }}
+                                  >
+                                    {PREVIEW_LIMIT_OPTIONS.map((limit) => (
+                                      <option key={limit} value={limit}>
+                                        {limit} rows
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
                               </div>
                             </div>
-                          );
-                        })
-                      )}
-                    </div>
+                            {previewLoading ? (
+                              <div className="dataset-preview-empty">
+                                Loading preview…
+                              </div>
+                            ) : previewError ? (
+                              <div className="error">{previewError}</div>
+                            ) : previewResponse ? (
+                              <>
+                                {previewResponse.headers.length > 0 ? (
+                                  <div className="table-container">
+                                    <table className="preview-table">
+                                      <thead>
+                                        <tr>
+                                          {previewResponse.headers.map(
+                                            (column) => (
+                                              <th key={column}>{column}</th>
+                                            ),
+                                          )}
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {previewResponse.rows.length > 0 ? (
+                                          previewResponse.rows.map(
+                                            (row, index) => (
+                                              <tr key={index}>
+                                                {previewResponse.headers.map(
+                                                  (column) => (
+                                                    <td key={column}>
+                                                      {row[column] ?? ""}
+                                                    </td>
+                                                  ),
+                                                )}
+                                              </tr>
+                                            ),
+                                          )
+                                        ) : (
+                                          <tr>
+                                            <td
+                                              colSpan={
+                                                previewResponse.headers
+                                                  .length || 1
+                                              }
+                                            >
+                                              No rows to display.
+                                            </td>
+                                          </tr>
+                                        )}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                ) : (
+                                  <div className="dataset-preview-empty">
+                                    CSV preview did not include column headers.
+                                  </div>
+                                )}
+                                <div className="dataset-preview-meta">
+                                  <span className="meta-label">
+                                    Showing{" "}
+                                    {previewResponse.mode === "tail"
+                                      ? "last"
+                                      : "first"}{" "}
+                                    ({previewResponse.limit} rows)
+                                  </span>
+                                  <span>
+                                    {previewResponse.row_count
+                                      ? `${previewResponse.row_count.toLocaleString()} total rows`
+                                      : "Row count unknown"}
+                                  </span>
+                                </div>
+                              </>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </article>
                 );
               })
-            )}
-          </div>
-          <div className="dataset-preview-panel">
-            <div className="dataset-preview-header">
-              <div>
-                <span className="meta-label">CSV preview</span>
-                <p className="dataset-preview-title">
-                  {previewTarget?.label ??
-                    "Select a CSV to peek at its rows."}
-                </p>
-              </div>
-            </div>
-            {previewLoading ? (
-              <div className="dataset-preview-empty">Loading preview…</div>
-            ) : previewError ? (
-              <div className="error">{previewError}</div>
-            ) : previewResponse ? (
-              <>
-                {previewResponse.headers.length > 0 ? (
-                  <div className="table-container">
-                    <table className="preview-table">
-                      <thead>
-                        <tr>
-                          {previewResponse.headers.map((column) => (
-                            <th key={column}>{column}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {previewResponse.rows.length > 0 ? (
-                          previewResponse.rows.map((row, index) => (
-                            <tr key={index}>
-                              {previewResponse.headers.map((column) => (
-                                <td key={column}>{row[column] ?? ""}</td>
-                              ))}
-                            </tr>
-                          ))
-                        ) : (
-                          <tr>
-                            <td
-                              colSpan={
-                                previewResponse.headers.length || 1
-                              }
-                            >
-                              No rows to display.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="dataset-preview-empty">
-                    CSV preview did not include column headers.
-                  </div>
-                )}
-                <div className="dataset-preview-meta">
-                  <span className="meta-label">
-                    Showing {previewResponse.mode} ({previewResponse.limit} rows)
-                  </span>
-                  <span>
-                    {previewResponse.row_count
-                      ? `${previewResponse.row_count.toLocaleString()} total rows`
-                      : "Row count unknown"}
-                  </span>
-                </div>
-              </>
-            ) : (
-              <div className="dataset-preview-empty">
-                Select a file and click preview to inspect the CSV contents.
-              </div>
             )}
           </div>
         </div>

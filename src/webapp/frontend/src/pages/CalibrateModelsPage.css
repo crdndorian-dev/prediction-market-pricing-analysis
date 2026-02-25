@@ -151,6 +151,52 @@
   margin: var(--space-4) 0;
 }
 
+.feature-toggle-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-3);
+  margin: var(--space-4) 0;
+}
+
+.feature-toggle {
+  text-align: left;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--outline);
+  background: var(--surface);
+  padding: var(--space-3);
+  cursor: pointer;
+  transition: all 160ms ease;
+  color: var(--ink-700);
+  width: 100%;
+}
+
+.feature-toggle:hover {
+  border-color: var(--accent);
+  background: var(--surface-soft);
+}
+
+.feature-toggle.selected {
+  background: var(--accent-fill);
+  border-color: var(--accent-active);
+  color: var(--ink-900);
+  transform: translateY(-1px);
+}
+
+.feature-toggle-title {
+  font-weight: 600;
+  color: var(--ink-900);
+  margin-bottom: var(--space-1);
+}
+
+.feature-toggle-desc {
+  font-size: var(--text-xs);
+  color: var(--ink-500);
+}
+
+.feature-toggle.selected .feature-toggle-desc {
+  color: var(--ink-700);
+}
+
 .metrics-summary {
   border-radius: var(--radius-lg);
   border: 1px solid var(--outline);
@@ -603,4 +649,155 @@
   .latest-run-panel {
     grid-column: 1;
   }
+}
+
+/* Phase 5: Dynamic feature selection badges and buttons */
+
+.btn-select-group {
+  padding: 0.25rem 0.75rem;
+  font-size: var(--text-xs);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--outline);
+  background: var(--surface);
+  color: var(--accent);
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+
+.btn-select-group:hover {
+  background: var(--surface-soft);
+  border-color: var(--accent);
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.125rem 0.5rem;
+  font-size: var(--text-xs);
+  border-radius: var(--radius-full);
+  margin-left: 0.5rem;
+  font-weight: 500;
+}
+
+.badge-unavailable {
+  background: var(--surface-soft);
+  color: var(--ink-500);
+  border: 1px solid var(--outline);
+}
+
+.badge-warning {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fbbf24;
+}
+
+.badge-locked {
+  background: var(--surface-soft);
+  color: var(--ink-600);
+  border: 1px dashed var(--outline);
+}
+
+.feature-item.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Phase 7: Model kind selector */
+
+.radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.radio-label {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  transition: background 160ms ease;
+}
+
+.radio-label:hover:not(.disabled) {
+  background: var(--surface-soft);
+}
+
+.radio-label.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.field-full-width {
+  grid-column: 1 / -1;
+}
+
+/* Phase 8: Ticker selection chips */
+
+.ticker-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+}
+
+.ticker-chip {
+  border-radius: var(--radius-full);
+  border: 1px solid var(--outline);
+  background: var(--surface);
+  color: var(--ink-700);
+  font-size: var(--text-sm);
+  padding: 0.35rem 0.9rem;
+  cursor: pointer;
+  transition: all 160ms ease;
+}
+
+.ticker-chip:hover {
+  border-color: var(--accent);
+  color: var(--ink-900);
+}
+
+.ticker-chip.selected {
+  background: var(--accent-fill);
+  border-color: var(--accent-active);
+  color: var(--ink-900);
+  transform: translateY(-1px);
+}
+
+.ticker-selection-summary {
+  margin-top: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--ink-600);
+}
+
+.ticker-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-2);
+}
+
+.btn-ticker-action {
+  padding: 0.25rem 0.75rem;
+  font-size: var(--text-sm);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--outline);
+  background: var(--surface);
+  color: var(--ink-700);
+  cursor: pointer;
+  transition: all 160ms ease;
+}
+
+.btn-ticker-action:hover:not(:disabled) {
+  background: var(--surface-soft);
+  border-color: var(--accent);
+}
+
+.btn-ticker-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.error-text {
+  color: var(--danger);
 }

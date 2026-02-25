@@ -1,0 +1,23 @@
+{
+  "bars_partitions": 74,
+  "created_at_utc": "2026-02-23T11:44:39.993417+00:00",
+  "cutoff_utc": "2026-02-23T11:00:00+00:00",
+  "markets": 74,
+  "price_rows_appended": 888,
+  "prn_rows_appended": 888,
+  "run_id": "weekly-history-20260212T014930Z",
+  "script_version": "1.0.0",
+  "tickers": [
+    "AAPL",
+    "GOOGL",
+    "MSFT",
+    "META",
+    "AMZN",
+    "PLTR",
+    "NVDA",
+    "TSLA",
+    "NFLX",
+    "OPEN"
+  ],
+  "week_friday": "2026-02-27"
+}

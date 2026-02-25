@@ -39,5 +39,5 @@
 
 ## Trial provenance
 - trial id: 52
-- trial dir: /Users/dorianc./Desktop/polyedgetool/polyedgetool/src/data/models/1dte-logit-model/trials/052__C=0.05__feat=min__ti=none__tx=0__decay=26__cal=none__foundation=off__8635e52e
+- trial dir: /Users/dorianc./Desktop/polyedgetool/prediction-market-pricing-analysis/src/data/models/1dte-logit-model/trials/052__C=0.05__feat=min__ti=none__tx=0__decay=26__cal=none__foundation=off__8635e52e
 - top coefficients summary: not captured (run calibrator manually for coefficient inspection)

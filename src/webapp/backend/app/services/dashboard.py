@@ -13,6 +13,21 @@ DATA_DIR = BASE_DIR / "src" / "data"
 MODELS_DIR = DATA_DIR / "models"
 RAW_DIR = DATA_DIR / "raw"
 PHAT_EDGE_DIR = DATA_DIR / "analysis" / "phat-edge"
+SUBGRAPH_RUNS_DIR = RAW_DIR / "polymarket" / "subgraph" / "runs"
+BACKTESTS_DIR = DATA_DIR / "analysis" / "backtests"
+SIGNALS_DIR = DATA_DIR / "analysis" / "signals"
+POLYMARKET_MODELS_DIR = MODELS_DIR / "polymarket"
+MIXED_MODELS_DIR = MODELS_DIR / "mixed"
+BARS_DIR = DATA_DIR / "analysis" / "polymarket" / "bars"
+DIM_MARKET_PATHS = (
+    POLYMARKET_MODELS_DIR / "dim_market.parquet",
+    POLYMARKET_MODELS_DIR / "dim_market.csv",
+)
+FEATURES_PATHS = (
+    POLYMARKET_MODELS_DIR / "decision_features.parquet",
+    POLYMARKET_MODELS_DIR / "decision_features.csv",
+)
+FEATURES_MANIFEST = POLYMARKET_MODELS_DIR / "feature_manifest.json"
 
 _DATASET_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "summary": None}
 
@@ -168,6 +183,34 @@ def _count_csv_rows(path: Path) -> int:
         return sum(1 for _ in reader)
 
 
+def _count_parquet_rows(path: Path) -> Optional[int]:
+    try:
+        import pyarrow.parquet as pq  # type: ignore
+
+        return int(pq.ParquetFile(path).metadata.num_rows)
+    except Exception:
+        pass
+    try:
+        import pandas as pd  # type: ignore
+
+        return int(len(pd.read_parquet(path)))
+    except Exception:
+        return None
+
+
+def _count_table_rows(path: Path) -> Optional[int]:
+    if path.suffix.lower() == ".parquet":
+        return _count_parquet_rows(path)
+    return _count_csv_rows(path)
+
+
+def _pick_existing(paths: tuple[Path, ...]) -> Optional[Path]:
+    for path in paths:
+        if path.exists() and path.is_file():
+            return path
+    return None
+
+
 def _summarize_phat_edge() -> Optional[Dict[str, Any]]:
     latest = _latest_csv_file(PHAT_EDGE_DIR)
     if not latest:
@@ -191,6 +234,216 @@ def _summarize_phat_edge() -> Optional[Dict[str, Any]]:
         "lastModified": _iso_from_mtime(latest.stat().st_mtime),
         "maxEdge": max_edge,
         "maxEdgeTicker": max_ticker,
+    }
+
+
+def _summarize_subgraph() -> Optional[Dict[str, Any]]:
+    if not SUBGRAPH_RUNS_DIR.exists():
+        return None
+    latest_run: Optional[Path] = None
+    latest_manifest: Optional[Dict[str, Any]] = None
+    latest_key: Optional[str] = None
+
+    for run_dir in SUBGRAPH_RUNS_DIR.iterdir():
+        if not run_dir.is_dir():
+            continue
+        manifest = _load_json(run_dir / "manifest.json") or {}
+        run_time = manifest.get("finished_at_utc") or manifest.get("started_at_utc")
+        sort_key = run_time or _iso_from_mtime(run_dir.stat().st_mtime)
+        if latest_key is None or sort_key > latest_key:
+            latest_key = sort_key
+            latest_run = run_dir
+            latest_manifest = manifest
+
+    if not latest_run:
+        return None
+
+    return {
+        "latestRunId": latest_run.name,
+        "latestRunTime": (
+            latest_manifest.get("finished_at_utc")
+            or latest_manifest.get("started_at_utc")
+            if latest_manifest
+            else _iso_from_mtime(latest_run.stat().st_mtime)
+        ),
+        "latestQuery": latest_manifest.get("query_name") if latest_manifest else None,
+        "totalEntities": latest_manifest.get("total_entities") if latest_manifest else None,
+    }
+
+
+def _summarize_market_map() -> Optional[Dict[str, Any]]:
+    path = _pick_existing(DIM_MARKET_PATHS)
+    if not path:
+        return None
+    row_count = _count_table_rows(path)
+    return {
+        "fileName": path.name,
+        "path": str(path.relative_to(BASE_DIR)),
+        "rowCount": row_count,
+        "lastModified": _iso_from_mtime(path.stat().st_mtime),
+    }
+
+
+def _summarize_bars() -> Optional[Dict[str, Any]]:
+    if not BARS_DIR.exists():
+        return None
+    freqs: Dict[str, int] = {}
+    latest_mtime: Optional[float] = None
+    has_files = False
+    for freq in ["1m", "5m", "1h"]:
+        files = list((BARS_DIR / freq).glob("market_id=*/date=*/bars.csv"))
+        if files:
+            has_files = True
+        total = 0
+        for path in files:
+            total += _count_csv_rows(path)
+            if latest_mtime is None or path.stat().st_mtime > latest_mtime:
+                latest_mtime = path.stat().st_mtime
+        freqs[freq] = total
+    if not has_files:
+        return None
+    return {
+        "barsDir": str(BARS_DIR.relative_to(BASE_DIR)),
+        "freqs": freqs,
+        "lastModified": _iso_from_mtime(latest_mtime) if latest_mtime else None,
+    }
+
+
+def _summarize_features() -> Optional[Dict[str, Any]]:
+    path = _pick_existing(FEATURES_PATHS)
+    if not path:
+        return None
+    manifest = _load_json(FEATURES_MANIFEST) or {}
+    features = manifest.get("features")
+    feature_count = len(features) if isinstance(features, list) else None
+    created_at = manifest.get("created_at_utc") if isinstance(manifest, dict) else None
+    return {
+        "fileName": path.name,
+        "path": str(path.relative_to(BASE_DIR)),
+        "lastModified": _iso_from_mtime(path.stat().st_mtime),
+        "featureCount": feature_count,
+        "createdAtUtc": created_at,
+    }
+
+
+def _parse_mixed_run_time(run_id: str) -> Optional[str]:
+    candidate = run_id
+    if candidate.startswith("mixed-"):
+        candidate = candidate[len("mixed-"):]
+    try:
+        dt = datetime.strptime(candidate, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        return dt.isoformat()
+    except ValueError:
+        return None
+
+
+def _summarize_mixed_model() -> Optional[Dict[str, Any]]:
+    if not MIXED_MODELS_DIR.exists():
+        return None
+
+    run_dirs = [item for item in MIXED_MODELS_DIR.iterdir() if item.is_dir()]
+    if not run_dirs:
+        return None
+
+    latest_run: Optional[Path] = None
+    latest_key: Optional[str] = None
+    latest_meta: Optional[Dict[str, Any]] = None
+
+    for run_dir in run_dirs:
+        metadata = _load_json(run_dir / "metadata.json") or {}
+        run_time = (
+            metadata.get("trained_at_utc")
+            or _parse_mixed_run_time(run_dir.name)
+            or _iso_from_mtime(run_dir.stat().st_mtime)
+        )
+        if latest_key is None or run_time > latest_key:
+            latest_key = run_time
+            latest_run = run_dir
+            latest_meta = metadata
+
+    if not latest_run:
+        return None
+
+    return {
+        "runCount": len(run_dirs),
+        "latestRunId": latest_run.name,
+        "latestRunTime": latest_key,
+        "modelType": latest_meta.get("model_type") if latest_meta else None,
+        "rowCount": latest_meta.get("rows") if latest_meta else None,
+    }
+
+
+def _parse_backtest_run_time(run_id: str) -> Optional[str]:
+    candidate = run_id
+    if candidate.startswith("backtest-"):
+        candidate = candidate[len("backtest-"):]
+    try:
+        dt = datetime.strptime(candidate, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        return dt.isoformat()
+    except ValueError:
+        return None
+
+
+def _summarize_backtests() -> Optional[Dict[str, Any]]:
+    if not BACKTESTS_DIR.exists():
+        return None
+
+    latest_run: Optional[Path] = None
+    latest_key: Optional[str] = None
+    latest_metrics: Optional[Dict[str, Any]] = None
+
+    for run_dir in BACKTESTS_DIR.iterdir():
+        if not run_dir.is_dir():
+            continue
+        run_time = _parse_backtest_run_time(run_dir.name)
+        sort_key = run_time or _iso_from_mtime(run_dir.stat().st_mtime)
+        if latest_key is None or sort_key > latest_key:
+            latest_key = sort_key
+            latest_run = run_dir
+            latest_metrics = _load_json(run_dir / "metrics.json")
+
+    if not latest_run:
+        return None
+
+    metrics_summary = None
+    if isinstance(latest_metrics, dict):
+        metrics_summary = {
+            "trades": latest_metrics.get("trades"),
+            "hitRate": latest_metrics.get("hit_rate"),
+            "sharpeLike": latest_metrics.get("sharpe_like"),
+            "maxDrawdown": latest_metrics.get("max_drawdown"),
+        }
+
+    return {
+        "latestRunId": latest_run.name,
+        "latestRunTime": latest_key,
+        "metrics": metrics_summary,
+    }
+
+
+def _summarize_signals() -> Optional[Dict[str, Any]]:
+    if not SIGNALS_DIR.exists():
+        return None
+
+    run_dirs = [item for item in SIGNALS_DIR.iterdir() if item.is_dir()]
+    if not run_dirs:
+        return None
+
+    latest_run = max(run_dirs, key=lambda item: item.stat().st_mtime)
+    summary = _load_json(latest_run / "summary.json")
+    signals_csv = latest_run / "signals.csv"
+    row_count = _count_csv_rows(signals_csv) if signals_csv.exists() else None
+
+    latest_time = None
+    if isinstance(summary, dict):
+        latest_time = summary.get("created_at_utc")
+    if not latest_time:
+        latest_time = _iso_from_mtime(latest_run.stat().st_mtime)
+
+    return {
+        "latestRunId": latest_run.name,
+        "latestRunTime": latest_time,
+        "rowCount": row_count,
     }
 
 
@@ -450,7 +703,7 @@ def build_dashboard_payload() -> Dict[str, Any]:
             {
                 "title": "Ingestion snapshot",
                 "detail": (
-                    "1-option-chain-build-historic-dataset-v1.0.py"
+                    "01-option-chain-build-historic-dataset-v1.0.py"
                     f" · {dataset_summary.get('fileName')} · {dataset_summary.get('rowCount', 0)} rows"
                 ),
                 "status": "Ready",
@@ -471,7 +724,7 @@ def build_dashboard_payload() -> Dict[str, Any]:
         calibration = latest_meta.get("calibration", "unknown")
         features = latest_meta.get("features") or latest_meta.get("features_used")
         feature_count = len(features) if isinstance(features, list) else None
-        detail = f"2-calibrate-logit-model-v1.5.py · Calibration: {calibration}"
+        detail = f"03-calibrate-logit-model-v1.5.py · Calibration: {calibration}"
         if feature_count is not None:
             detail = f"{detail} · {feature_count} features"
         readiness.append(
@@ -535,6 +788,13 @@ def build_dashboard_payload() -> Dict[str, Any]:
     )
     polymarket_summary = _summarize_polymarket()
     phat_edge_summary = _summarize_phat_edge()
+    subgraph_summary = _summarize_subgraph()
+    market_map_summary = _summarize_market_map()
+    bars_summary = _summarize_bars()
+    features_summary = _summarize_features()
+    mixed_model_summary = _summarize_mixed_model()
+    backtest_summary = _summarize_backtests()
+    signals_summary = _summarize_signals()
 
     best_test = None
     best_val = None
@@ -571,6 +831,13 @@ def build_dashboard_payload() -> Dict[str, Any]:
         "dropsSummary": drops_summary,
         "polymarketSummary": polymarket_summary,
         "phatEdgeSummary": phat_edge_summary,
+        "subgraphSummary": subgraph_summary,
+        "marketMapSummary": market_map_summary,
+        "barsSummary": bars_summary,
+        "featuresSummary": features_summary,
+        "mixedModelSummary": mixed_model_summary,
+        "backtestSummary": backtest_summary,
+        "signalsSummary": signals_summary,
         "modelSummary": {
             "modelCount": len(runs),
             "latestModel": {

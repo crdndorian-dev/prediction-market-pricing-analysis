@@ -2,7 +2,7 @@
   "version": "1.0",
   "run_tag": "sample_june_2023",
   "stage1": {
-    "script": "src/scripts/1-option-chain-build-historic-dataset-v1.0.py",
+    "script": "src/scripts/01-option-chain-build-historic-dataset-v1.0.py",
     "args": {
       "out_dir": "src/data/raw",
       "out_name": "options_chain_dataset.csv",
@@ -23,7 +23,7 @@
     }
   },
   "stage2": {
-    "script": "src/scripts/2-calibrate-logit-model-v1.5.py",
+    "script": "src/scripts/03-calibrate-logit-model-v1.5.py",
     "args": {
       "csv": "src/data/raw/options_chain_dataset.csv",
       "out_dir": "src/data/models/v1-5-ticker-intercepts",

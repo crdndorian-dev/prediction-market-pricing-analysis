@@ -420,9 +420,31 @@ def ensure_engineered_features(df: pd.DataFrame, requested_features: List[str]) 
         "pRN",
         "pRN_raw",
         "x_logit_prn",
+        "pm_mid",
     ]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    if "pm_mid" not in df.columns and "pPM_mid" in df.columns:
+        df["pm_mid"] = pd.to_numeric(df["pPM_mid"], errors="coerce")
+
+    need_x_logit_prn = (
+        "x_logit_prn" in requested_features
+        or "x_m" in requested_features
+        or "x_abs_m" in requested_features
+    )
+    if need_x_logit_prn and "x_logit_prn" not in df.columns:
+        if "pRN" not in df.columns:
+            raise ValueError("Missing pRN required to compute x_logit_prn.")
+        prn = _numeric_series(df, "pRN").clip(EPS, 1.0 - EPS)
+        df["x_logit_prn"] = _logit(prn.to_numpy(dtype=float))
+
+    if "x_logit_pm" in requested_features:
+        if "pm_mid" in df.columns:
+            pm = _numeric_series(df, "pm_mid").clip(EPS, 1.0 - EPS)
+            df["x_logit_pm"] = _logit(pm.to_numpy(dtype=float))
+        else:
+            df["x_logit_pm"] = np.nan
 
     if "log_m" in requested_features and "log_m" not in df.columns:
         if ("K" in df.columns) and ("S_asof_close" in df.columns):
@@ -765,6 +787,9 @@ def validate_feature_availability(
     unknown = []
 
     for feat in requested_features:
+        if feat.startswith("pm_") or feat in {"x_logit_pm"}:
+            valid.append(feat)
+            continue
         # Check if it's a baseline column (directly available)
         if feat in baseline_columns:
             if feat in nan_prone_columns:
@@ -842,6 +867,13 @@ class FinalModelBundle:
                 raise ValueError("Missing pRN required to compute x_logit_prn.")
             data["pRN"] = pd.to_numeric(data["pRN"], errors="coerce").clip(self.eps, 1.0 - self.eps)
             data["x_logit_prn"] = _logit(data["pRN"].to_numpy(dtype=float))
+        if "x_logit_pm" in self.numeric_features:
+            if "pm_mid" not in data.columns and "pPM_mid" in data.columns:
+                data["pm_mid"] = data["pPM_mid"]
+            if "pm_mid" not in data.columns:
+                raise ValueError("Missing pm_mid required to compute x_logit_pm.")
+            data["pm_mid"] = pd.to_numeric(data["pm_mid"], errors="coerce").clip(self.eps, 1.0 - self.eps)
+            data["x_logit_pm"] = _logit(data["pm_mid"].to_numpy(dtype=float))
 
         foundation_set = {normalize_ticker(t) for t in (self.foundation_tickers or [])}
         if foundation_set:
@@ -938,6 +970,53 @@ class FinalModelBundle:
         raise ValueError(f"Unknown mode: {self.mode}")
 
 
+@dataclass
+class TwoStageBundle:
+    base_bundle: FinalModelBundle
+    stage2_pipeline: Any
+    stage2_feature_cols: List[str]
+    pm_primary_col: Optional[str] = None
+    platt_calibrator: Optional[LogisticRegression] = None
+    eps: float = EPS
+
+    def predict_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        data = ensure_engineered_features(df, self.base_bundle.numeric_features)
+        p_base = self.base_bundle.predict_proba_from_df(data)
+        p_base = np.clip(p_base, self.eps, 1.0 - self.eps)
+        p_final = p_base.copy()
+        stage_used = np.array(["stage_a"] * len(p_base), dtype=object)
+
+        if self.pm_primary_col and self.pm_primary_col in data.columns:
+            pm_series = pd.to_numeric(data[self.pm_primary_col], errors="coerce")
+            mask = pm_series.notna().to_numpy()
+            if np.any(mask):
+                data = data.copy()
+                data["p_base"] = p_base
+                X = data.loc[mask, self.stage2_feature_cols]
+                if self.platt_calibrator is not None and hasattr(self.stage2_pipeline, "decision_function"):
+                    logits = self.stage2_pipeline.decision_function(X)
+                    p_stage2 = apply_platt(self.platt_calibrator, logits)
+                elif hasattr(self.stage2_pipeline, "predict_proba"):
+                    p_stage2 = self.stage2_pipeline.predict_proba(X)[:, 1]
+                elif hasattr(self.stage2_pipeline, "decision_function"):
+                    logits = self.stage2_pipeline.decision_function(X)
+                    p_stage2 = expit(logits)
+                else:
+                    raise ValueError("Stage 2 pipeline lacks predict_proba/decision_function.")
+
+                p_final[mask] = p_stage2
+                stage_used[mask] = "stage_b"
+
+        p_final = np.clip(p_final, self.eps, 1.0 - self.eps)
+        return pd.DataFrame(
+            {
+                "p_base": p_base,
+                "p_final": p_final,
+                "stage_used": stage_used,
+            }
+        )
+
+
 def validate_snapshot_schema(
     df: pd.DataFrame,
     *,
@@ -990,6 +1069,8 @@ def validate_snapshot_schema(
     # Check if required features can be computed
     if required_features:
         for feat in required_features:
+            if feat.startswith("pm_") or feat in {"x_logit_pm"}:
+                continue
             if feat in df.columns:
                 frac = df[feat].isna().mean()
                 if frac > 0.5:

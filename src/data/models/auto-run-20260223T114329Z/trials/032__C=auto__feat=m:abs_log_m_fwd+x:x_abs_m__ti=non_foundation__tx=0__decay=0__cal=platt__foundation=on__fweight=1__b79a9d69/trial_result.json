@@ -1,0 +1,73 @@
+{
+  "status": "success",
+  "return_code": 0,
+  "runtime_seconds": 2.266800665998744,
+  "objective": 0.49185633191854317,
+  "score": 0.49185633191854317,
+  "delta_brier": null,
+  "delta_ece": null,
+  "val_logloss_std": null,
+  "val_logloss_by_window": [],
+  "test_metrics": {
+    "logloss": 0.49185633191854317,
+    "brier": 0.16169030841916882,
+    "ece": 0.0726205427606045,
+    "ece_q": NaN,
+    "baseline_logloss": 0.48034660869525064
+  },
+  "train_weeks_range": null,
+  "test_weeks_range": null,
+  "command": [
+    "/Users/dorianc./Desktop/polyedgetool/prediction-market-pricing-analysis/src/webapp/backend/.venv/bin/python3.12",
+    "/Users/dorianc./Desktop/polyedgetool/prediction-market-pricing-analysis/src/scripts/03-calibrate-logit-model-v2.0.py",
+    "--csv",
+    "/Users/dorianc./Desktop/polyedgetool/prediction-market-pricing-analysis/src/data/raw/option-chain/weekly-4-3-2-1dte-expiring-friday-dataset/training-weekly-4-3-2-1dte-expiring-friday-dataset.csv",
+    "--out-dir",
+    "/Users/dorianc./Desktop/polyedgetool/prediction-market-pricing-analysis/src/data/models/auto-run-20260223T114329Z/trials/032__C=auto__feat=m:abs_log_m_fwd+x:x_abs_m__ti=non_foundation__tx=0__decay=0__cal=platt__foundation=on__fweight=1__b79a9d69",
+    "--features",
+    "x_logit_prn,abs_log_m_fwd,x_abs_m",
+    "--ticker-intercepts",
+    "non_foundation",
+    "--calibrate",
+    "platt",
+    "--train-decay-half-life-weeks",
+    "0",
+    "--foundation-tickers",
+    "QQQ,SPY",
+    "--foundation-weight",
+    "1.0",
+    "--random-state",
+    "73"
+  ],
+  "stdout": "RUNNING SCRIPT: /Users/dorianc./Desktop/polyedgetool/prediction-market-pricing-analysis/src/scripts/03-calibrate-logit-model-v2.0.py\nVERSION: v2.0.0\n[v2.0] Training mode: two_stage\n[v2.0] Feature sources: both\n[v2.0] Compute edge: False\n[base-model] C=2  train=55194  test=10992  features=3num+2cat  out=/Users/dorianc./Desktop/polyedgetool/prediction-market-pricing-analysis/src/data/models/auto-run-20260223T114329Z/trials/032__C=auto__feat=m:abs_log_m_fwd+x:x_abs_m__ti=non_foundation__tx=0__decay=0__cal=platt__foundation=on__fweight=1__b79a9d69\n",
+  "stderr": "/Users/dorianc./Desktop/polyedgetool/prediction-market-pricing-analysis/src/webapp/backend/.venv/lib/python3.12/site-packages/sklearn/linear_model/_logistic.py:1135: FutureWarning: 'penalty' was deprecated in version 1.8 and will be removed in 1.10. To avoid this warning, leave 'penalty' set to its default value and use 'l1_ratio' or 'C' instead. Use l1_ratio=0 instead of penalty='l2', l1_ratio=1 instead of penalty='l1', and C=np.inf instead of penalty=None.\n  warnings.warn(\n",
+  "config": {
+    "mode": "option_only",
+    "feature_choices": {
+      "volatility": [],
+      "moneyness": [
+        "abs_log_m_fwd"
+      ],
+      "interactions": [
+        "x_abs_m"
+      ]
+    },
+    "option_features": [
+      "x_logit_prn",
+      "abs_log_m_fwd",
+      "x_abs_m"
+    ],
+    "pm_features": [],
+    "ticker_intercepts": "non_foundation",
+    "train_decay_half_life_weeks": 0,
+    "calibrate": "platt",
+    "foundation_enabled": true,
+    "foundation_weight": 1.0,
+    "foundation_tickers": "QQQ,SPY",
+    "enable_x_m": false,
+    "enable_x_abs_m": true,
+    "ticker_x_interactions": false,
+    "group_reweight": "none",
+    "C": null
+  }
+}
