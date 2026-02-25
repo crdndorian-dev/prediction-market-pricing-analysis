@@ -35,7 +35,7 @@ export default function App() {
                     <div className="app-nav-inner">
                       <div className="app-brand">
                         <div>
-                          <div className="brand-title">PolyEdge</div>
+                          <div className="brand-title">Polymarket Pricing Analysis</div>
                           <div className="brand-subtitle">Local Pipeline Workbench</div>
                         </div>
                       </div>
