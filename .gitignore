@@ -1,4 +1,4 @@
-/.AGENTS
+/AGENTS.md
 src/data/raw/polymarket/weekly_history/runs/weekly-history-20260212T014930Z/price_history.csv
 /.claude/
 /ci/
