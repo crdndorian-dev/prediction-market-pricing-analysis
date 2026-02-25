@@ -40,8 +40,10 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+if str(REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from calibrate_common import (
+from calibration.calibrate_common import (
     EPS,
     FinalModelBundle,
     TwoStageBundle,
@@ -125,8 +127,10 @@ MIN_STAGE2_CALIB_ROWS = 50
 def _build_env() -> dict:
     env = os.environ.copy()
     root = str(REPO_ROOT)
+    src = str(REPO_ROOT / "src")
     existing = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = f"{root}{os.pathsep}{existing}" if existing else root
+    base = f"{root}{os.pathsep}{src}"
+    env["PYTHONPATH"] = f"{base}{os.pathsep}{existing}" if existing else base
     return env
 
 

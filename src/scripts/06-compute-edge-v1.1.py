@@ -23,8 +23,10 @@ import pandas as pd
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+if str(REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from calibrate_common import (
+from calibration.calibrate_common import (
     FinalModelBundle,
     dedupe_preserve_order,
     ensure_engineered_features,
@@ -268,7 +270,7 @@ def _run_main() -> None:
     # Validate snapshot schema against baseline contract
     print("\n=== VALIDATING SNAPSHOT SCHEMA ===")
     try:
-        from calibrate_common import validate_snapshot_schema
+        from calibration.calibrate_common import validate_snapshot_schema
         all_required_features = list(set(
             list(numeric_features) + list(categorical_features) +
             ["pRN", "K", "S", "T_days", "ticker"]

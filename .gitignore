@@ -7,3 +7,5 @@ src/data/raw/polymarket/weekly_history/runs/weekly-history-20260212T014930Z/pric
 /context/
 /.cursor/
 /.vscode/
+/docs/
+echo "**/.DS_Store" >> .gitignore

@@ -750,6 +750,9 @@ def load_schema_contract(config_dir: Optional[Path] = None) -> Dict[str, Any]:
         if not config_dir.exists():
             # Try parent directory
             config_dir = script_dir.parent / "config"
+        if not config_dir.exists():
+            # Try grandparent directory (repo root when file lives under src/<pkg>/)
+            config_dir = script_dir.parents[1] / "config"
 
     contract_path = config_dir / "pipeline_schema_contract.json"
     if not contract_path.exists():

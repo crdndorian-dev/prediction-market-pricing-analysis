@@ -34,8 +34,10 @@ DEFAULT_CALIBRATOR_SCRIPT = REPO_ROOT / "src" / "scripts" / "03-calibrate-logit-
 def _build_env() -> Dict[str, str]:
     env = os.environ.copy()
     root = str(REPO_ROOT)
+    src = str(REPO_ROOT / "src")
     existing = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = f"{root}{os.pathsep}{existing}" if existing else root
+    base = f"{root}{os.pathsep}{src}"
+    env["PYTHONPATH"] = f"{base}{os.pathsep}{existing}" if existing else base
     return env
 
 
