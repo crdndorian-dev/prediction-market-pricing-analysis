@@ -3,10 +3,10 @@
 A local webapp and research pipeline for comparing Polymarket-style binary prices to option-implied benchmarks.
 Run the full data ingestion, calibration, and analysis workflow on your machine with reproducible outputs.
 
-Author: Dorian Cardon  
-Year: 2025-2026  
-Contact: crdn.dorian@gmail.com  
-GitHub: https://github.com/crdndorian-dev
+Author : Dorian Cardon  
+Year : 2025-2026  
+Contact : crdn.dorian@gmail.com  
+GitHub : https://github.com/crdndorian-dev
 
 # Abstract
 
@@ -53,18 +53,6 @@ The project places particular emphasis on dataset design, temporal consistency, 
   ```
 - Notes: `run-webapp.sh` loads `.env` if present and otherwise falls back to `config/polymarket_subgraph.env.sample`. If you do not set `GRAPH_API_KEY`, Polymarket subgraph jobs will fail but the UI still loads. On Windows, use WSL or follow the manual setup steps. For more webapp details, see `src/webapp/README.md`.
 
-# How to use
-
-- Dashboard (`/`): check data freshness, run queue, and quick actions.
-- Option Chain History Builder (`/option-chain`): build the pRN option-chain dataset and write outputs to `src/data/raw/option-chain`.
-- Polymarket History Builder (`/polymarket-pipeline`): fetch markets, build `dim_market`, and run history jobs (requires `GRAPH_API_KEY`).
-- Snapshot capture (`/polymarket`): generate the latest Polymarket snapshot files under `src/data/raw/polymarket`.
-- Calibrate (`/calibrate-models`): train calibration models and write outputs to `src/data/models`.
-- Markets (`/markets`): refresh and inspect market metadata and series summaries.
-- Backtests (`/backtests`): experimental per-strike price explorer with pRN overlays.
-- Documentation (`/docs`): in-app guides for every page, input, and output.
-- Edge scoring (`/edge`, not linked in the nav yet): score a snapshot with a saved calibration and write outputs to `src/data/analysis/phat-edge`.
-
 # Configuration
 
 - `BACKEND_PORT`: backend port for `run-webapp.sh` (default 8000, auto-fallback to 8000-8050).
@@ -76,4 +64,4 @@ The project places particular emphasis on dataset design, temporal consistency, 
 
 # Future work
 
-Future work includes expanding backtests with trade simulation, PnL metrics, and report exports, adding multi-ticker and multi-strike comparison views, introducing persistent storage for multi-user deployments, and adding production deployment assets (Docker, CI/CD) with authentication for shared environments.
+Future work includes expanding backtests with trade simulation, PnL metrics, and report exports.
