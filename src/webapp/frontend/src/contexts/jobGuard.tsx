@@ -3,8 +3,6 @@ import { useMemo } from "react";
 import { useCalibrationJob } from "./calibrationJob";
 import { useDatasetJob } from "./datasetJob";
 import { useMarketsJob } from "./marketsJob";
-import { usePhatEdgeJob } from "./phatEdgeJob";
-import { usePolymarketJob } from "./polymarketJob";
 import { usePolymarketHistoryJob } from "./polymarketHistoryJob";
 import { useMarketMapJob } from "./marketMapJob";
 
@@ -30,9 +28,7 @@ const parseMaxActiveJobs = (): number | null => {
 export function useAnyJobRunning() {
   const dataset = useDatasetJob();
   const calibration = useCalibrationJob();
-  const polymarket = usePolymarketJob();
   const polymarketHistory = usePolymarketHistoryJob();
-  const phatEdge = usePhatEdgeJob();
   const marketMap = useMarketMapJob();
   const markets = useMarketsJob();
 
@@ -51,22 +47,10 @@ export function useAnyJobRunning() {
         status: calibration.jobStatus?.status ?? null,
       },
       {
-        key: "polymarket",
-        name: "Snapshot",
-        jobId: polymarket.jobId,
-        status: polymarket.jobStatus?.status ?? null,
-      },
-      {
         key: "polymarket-history",
         name: "Polymarket weekly history",
         jobId: polymarketHistory.jobId,
         status: polymarketHistory.jobStatus?.status ?? null,
-      },
-      {
-        key: "phat-edge",
-        name: "Edge compute",
-        jobId: phatEdge.jobId,
-        status: phatEdge.jobStatus?.status ?? null,
       },
       {
         key: "market-map",
@@ -86,12 +70,8 @@ export function useAnyJobRunning() {
       dataset.jobStatus?.status,
       calibration.jobId,
       calibration.jobStatus?.status,
-      polymarket.jobId,
-      polymarket.jobStatus?.status,
       polymarketHistory.jobId,
       polymarketHistory.jobStatus?.status,
-      phatEdge.jobId,
-      phatEdge.jobStatus?.status,
       marketMap.jobId,
       marketMap.jobStatus?.status,
       markets.jobId,

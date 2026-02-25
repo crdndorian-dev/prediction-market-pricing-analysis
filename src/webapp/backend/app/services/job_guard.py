@@ -23,10 +23,8 @@ def list_active_jobs() -> List[Dict[str, str]]:
 
     from app.services.datasets import JOB_MANAGER as DATASET_JOB_MANAGER
     from app.services.calibrate_models import CALIBRATION_JOB_MANAGER
-    from app.services.polymarket_snapshots import POLYMARKET_JOB_MANAGER
     from app.services.polymarket_history import POLYMARKET_HISTORY_JOB_MANAGER
     from app.services.markets import MARKETS_JOB_MANAGER
-    from app.services.phat_edge import PHAT_EDGE_JOB_MANAGER
     from app.services.polymarket_subgraph import SUBGRAPH_JOB_MANAGER
     from app.services.market_map import MARKET_MAP_JOB_MANAGER
     from app.services.build_bars import BUILD_BARS_JOB_MANAGER
@@ -65,18 +63,6 @@ def list_active_jobs() -> List[Dict[str, str]]:
             }
         )
 
-    for status in POLYMARKET_JOB_MANAGER.list_jobs():
-        if status.status not in RUNNING_STATUSES:
-            continue
-        items.append(
-            {
-                "jobId": status.job_id,
-                "name": "Snapshot",
-                "detail": "Snapshot fetch",
-                "state": status.status,
-            }
-        )
-
     for status in POLYMARKET_HISTORY_JOB_MANAGER.list_jobs():
         if status.status not in RUNNING_STATUSES:
             continue
@@ -98,18 +84,6 @@ def list_active_jobs() -> List[Dict[str, str]]:
                 "jobId": status.job_id,
                 "name": "Markets refresh",
                 "detail": detail,
-                "state": status.status,
-            }
-        )
-
-    for status in PHAT_EDGE_JOB_MANAGER.list_jobs():
-        if status.status not in RUNNING_STATUSES:
-            continue
-        items.append(
-            {
-                "jobId": status.job_id,
-                "name": "Edge compute",
-                "detail": "pHAT inference",
                 "state": status.status,
             }
         )

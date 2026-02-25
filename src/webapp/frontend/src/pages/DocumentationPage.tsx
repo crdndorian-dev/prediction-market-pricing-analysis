@@ -14,7 +14,6 @@ const docPages: DocPageLink[] = [
   { id: "calibrate", label: "Calibrate", route: "/calibrate-models" },
   { id: "markets", label: "Markets", route: "/markets" },
   { id: "backtests", label: "Backtests", route: "/backtests" },
-  { id: "polymarket-snapshots", label: "Polymarket Snapshots", route: "/polymarket" },
 ];
 
 const optionChainDoc = (

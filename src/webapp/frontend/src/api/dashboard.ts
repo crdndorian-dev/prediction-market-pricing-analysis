@@ -57,29 +57,6 @@ export type DashboardData = {
     path: string;
     rowCount: number;
   } | null;
-  polymarketSummary?: {
-    latestRunId: string | null;
-    latestRunTime: string | null;
-    latestRunDir: string | null;
-    fileCount: number | null;
-    sizeMB: number | null;
-    datasetFile: string | null;
-    prnFile: string | null;
-    ppmFile: string | null;
-    latestSnapshotDate: string | null;
-    historyFile: {
-      name: string;
-      lastModified: string;
-    } | null;
-  } | null;
-  phatEdgeSummary?: {
-    fileName: string;
-    path: string;
-    rowCount: number;
-    lastModified: string;
-    maxEdge: number | null;
-    maxEdgeTicker: string | null;
-  } | null;
   subgraphSummary?: {
     latestRunId: string | null;
     latestRunTime: string | null;

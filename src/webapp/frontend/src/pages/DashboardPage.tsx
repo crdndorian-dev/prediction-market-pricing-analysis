@@ -116,8 +116,8 @@ export default function DashboardPage() {
             <Link className="button primary" to="/option-chain">
               Build option chain
             </Link>
-            <Link className="button light" to="/polymarket">
-              Run snapshot
+            <Link className="button light" to="/polymarket-pipeline">
+              Run history builder
             </Link>
           </div>
           <div className="hero-badges">
