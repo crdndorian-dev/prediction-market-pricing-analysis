@@ -4,3 +4,6 @@ src/data/raw/polymarket/weekly_history/runs/weekly-history-20260212T014930Z/pric
 /ci/
 /tests/
 /tools/
+/context/
+/.cursor/
+/.vscode/
