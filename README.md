@@ -74,13 +74,6 @@ The project places particular emphasis on dataset design, temporal consistency, 
 - `POLYMARKET_SUBGRAPH_ID`, `ORDERBOOK_SUBGRAPH_ID`, `PNL_SUBGRAPH_ID`, `POLYMARKET_SUBGRAPH_URL`: subgraph routing overrides.
 - `THETA_TERMINAL_CMD`, `THETA_TERMINAL_JAR`, `THETA_TERMINAL_WORKDIR`, `THETA_TERMINAL_CREDS`, `THETA_TERMINAL_LOG`, `THETA_TERMINAL_STARTUP_WAIT`: optional Theta Terminal launcher settings.
 
-# Data outputs
-
-- `src/data/raw/option-chain`: option-chain history runs (pRN datasets).
-- `src/data/raw/polymarket`: Polymarket snapshots, history, and subgraph runs.
-- `src/data/models`: calibration models and `dim_market` outputs.
-- `src/data/analysis/phat-edge`: edge scoring outputs.
-
 # Future work
 
 Future work includes expanding backtests with trade simulation, PnL metrics, and report exports, adding multi-ticker and multi-strike comparison views, introducing persistent storage for multi-user deployments, and adding production deployment assets (Docker, CI/CD) with authentication for shared environments.
