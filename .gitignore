@@ -32,7 +32,7 @@ src/webapp/frontend/node_modules/
 src/webapp/frontend/dist/
 src/webapp/frontend/dist-ssr/
 
-# src/data/ — all regeneratable
+# src/data/ 
 
 src/data/analysis/
 src/data/cache/

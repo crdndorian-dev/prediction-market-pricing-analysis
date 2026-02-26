@@ -69,6 +69,7 @@
   --text-xl: 1rem;
   --text-2xl: 1.05rem;
   --text-3xl: 1.6rem;
+  --app-nav-height: 0px;
 }
 
 * {

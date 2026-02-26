@@ -49,10 +49,10 @@ export default function DashboardPage() {
             probability estimates and audit the comparison.
           </p>
           <div className="hero-actions">
-            <Link className="button primary" to="/option-chain">
+            <Link className="button primary" to="/option-chain-history-builder">
               Build option chain
             </Link>
-            <Link className="button light" to="/polymarket-pipeline">
+            <Link className="button light" to="/polymarket-history-builder">
               Run history builder
             </Link>
           </div>

@@ -41,7 +41,6 @@ const TRADING_UNIVERSE_TICKERS = [
 const defaultForm = {
   overrides: "config/polymarket_market_overrides.csv",
   tickers: TRADING_UNIVERSE_TICKERS.join(", "),
-  strict: false,
   useWeeklyHistory: true,
   historyStartDate: "",
   historyEndDate: "",
@@ -491,7 +490,7 @@ export default function PolymarketPipelinePage() {
           tickers: formatTickerList(selectedTickers),
           prnDataset: undefined,
           out: undefined,
-          strict: form.strict,
+          strict: false,
         });
         setMapJobId(status.job_id);
       }
@@ -638,7 +637,6 @@ export default function PolymarketPipelinePage() {
   const mapProgressLabel = mapRunning ? "Running pipeline..." : pipelineStatusLabel;
   const mapMonitorItems = [
     { label: "Tickers", value: `${selectedTickers.length} selected` },
-    { label: "Strict", value: form.strict ? "Yes" : "No" },
     { label: "Overrides", value: form.overrides || "--" },
     { label: "Run ID", value: mapRunId },
     { label: "Output file", value: mapOutputLabel },
@@ -649,6 +647,7 @@ export default function PolymarketPipelinePage() {
 
   return (
     <section className="page polymarket-pipeline-page">
+      <PipelineStatusCard className="page-sticky-meta" activeJobsCount={activeJobs.length} />
       <header className="page-header">
         <div>
           <p className="page-kicker">Polymarket</p>
@@ -657,7 +656,6 @@ export default function PolymarketPipelinePage() {
             Run the pipeline against live markets or switch to weekly history backfill for closed events.
           </p>
         </div>
-        <PipelineStatusCard activeJobsCount={activeJobs.length} />
       </header>
 
       <div className="pipeline-grid">
@@ -700,25 +698,14 @@ export default function PolymarketPipelinePage() {
                   <span className="field-hint">
                     Pick from the core trading universe. Only these tickers are allowed.
                   </span>
-                  <div className="field-hint">
-                    Selected: {selectedTickers.join(", ")}
-                  </div>
+                <div className="field-hint">
+                  Selected: {selectedTickers.join(", ")}
                 </div>
               </div>
-              <label className="checkbox">
-                <input
-                  type="checkbox"
-                  checked={form.strict}
-                  disabled={usingWeeklyHistory}
-                  onChange={(event) =>
-                    setForm((prev) => ({ ...prev, strict: event.target.checked }))
-                  }
-                />
-                Strict mapping enforcement (fail if any market lacks ticker/threshold)
-              </label>
+            </div>
 
-              {usingWeeklyHistory ? (
-                <div className="fields-grid">
+            {usingWeeklyHistory ? (
+              <div className="fields-grid">
                   <div className="field">
                     <label>History start date (UTC)</label>
                     <input

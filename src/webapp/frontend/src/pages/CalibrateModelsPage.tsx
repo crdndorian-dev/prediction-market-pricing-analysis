@@ -637,6 +637,7 @@ const buildManualCommandPreview = (
 export default function CalibrateModelsPage() {
   const [defaultName] = useState(() => defaultModelName());
   const [formState, setFormState] = useState<CalibrateFormState>(defaultForm);
+  const [runMode, setRunMode] = useState<"manual" | "auto">("manual");
   const [autoMode, setAutoMode] = useState<"option_only" | "mixed">("option_only");
   const [autoPmDatasetPath, setAutoPmDatasetPath] = useState<string>("");
   const [autoRunError, setAutoRunError] = useState<string | null>(null);
@@ -825,6 +826,227 @@ export default function CalibrateModelsPage() {
         </>
       ) : null}
     </div>
+  );
+
+  const renderRegimeSection = () => (
+    <div className="section-card calibrate-section">
+      <h3 className="section-heading">Horizon regime</h3>
+      <div className="tdays-picker regime-toggle">
+        <span className="meta-label">Regime mode</span>
+        <div className="tdays-chips">
+          <button
+            type="button"
+            className={`chip ${!regimeSpecific ? "active" : ""}`}
+            onClick={() =>
+              setFormState((prev) => ({
+                ...prev,
+                tdaysAllowed: "",
+                asofDowAllowed: "",
+              }))
+            }
+          >
+            Train on all data (no regime filters)
+          </button>
+          <button
+            type="button"
+            className={`chip ${regimeSpecific ? "active" : ""}`}
+            onClick={() => {
+              if (!regimeSpecific) {
+                setFormState((prev) => ({
+                  ...prev,
+                  asofDowAllowed: prev.asofDowAllowed || "Mon",
+                }));
+              }
+            }}
+          >
+            Train a regime-specific model
+          </button>
+        </div>
+      </div>
+      <div className="fields-grid">
+        <div className="field">
+          <label htmlFor="asofDowAllowed">Training day-of-week</label>
+          <select
+            id="asofDowAllowed"
+            className="input"
+            value={formState.asofDowAllowed}
+            onChange={(event) =>
+              setFormState((prev) => ({
+                ...prev,
+                asofDowAllowed: event.target.value,
+              }))
+            }
+          >
+            <option value="">Any day</option>
+            <option value="Mon">Mon</option>
+            <option value="Tue">Tue</option>
+            <option value="Wed">Wed</option>
+            <option value="Thu">Thu</option>
+            <option value="Fri">Fri</option>
+          </select>
+          <span className="field-hint">
+            Filters snapshots by as-of day. Monday defaults to <code>T_days=4</code>.
+          </span>
+        </div>
+        <div className="field">
+          <label htmlFor="tdaysAllowed">Allowed T_days</label>
+          <input
+            id="tdaysAllowed"
+            className="input"
+            placeholder="Auto"
+            value={formState.tdaysAllowed}
+            onChange={(event) =>
+              setFormState((prev) => ({
+                ...prev,
+                tdaysAllowed: event.target.value,
+              }))
+            }
+          />
+          <span className="field-hint">
+            Comma-separated list. Leave blank for no filter.
+          </span>
+        </div>
+      </div>
+      <div className="tdays-picker">
+        <span className="meta-label">Quick T_days</span>
+        <div className="tdays-chips">
+          <button
+            type="button"
+            className={`chip ${formState.tdaysAllowed.trim() ? "" : "active"}`}
+            onClick={() =>
+              setFormState((prev) => ({ ...prev, tdaysAllowed: "" }))
+            }
+          >
+            Auto
+          </button>
+          {TDAYS_OPTIONS.map((value) => {
+            const selected = parseTdaysList(formState.tdaysAllowed).includes(value);
+            return (
+              <button
+                key={value}
+                type="button"
+                className={`chip ${selected ? "active" : ""}`}
+                onClick={() => {
+                  const current = parseTdaysList(formState.tdaysAllowed);
+                  const next = selected
+                    ? current.filter((item) => item !== value)
+                    : [...current, value];
+                  setFormState((prev) => ({
+                    ...prev,
+                    tdaysAllowed: formatTdaysList(next),
+                  }));
+                }}
+              >
+                {value}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      {regimePreviewError ? (
+        <div className="error">{regimePreviewError}</div>
+      ) : null}
+      {regimePreview ? (
+        <div className="regime-preview">
+          <div>
+            <span className="meta-label">Rows after filter</span>
+            <span>{regimePreview.rows_after}</span>
+          </div>
+          <div>
+            <span className="meta-label">Tickers retained</span>
+            <span>{regimePreview.tickers_after}</span>
+          </div>
+        </div>
+      ) : null}
+      {regimePreview &&
+      (regimePreview.rows_after < REGIME_WARNING_MIN_ROWS ||
+        regimePreview.tickers_after < 2) ? (
+        <div className="warning">
+          Regime filters are very tight. Loosen day/T_days or add more
+          history before training.
+        </div>
+      ) : null}
+    </div>
+  );
+
+  const renderBootstrapSection = () => (
+    <details className="advanced">
+      <summary>Bootstrap confidence intervals</summary>
+      <label className="checkbox checkbox-spaced">
+        <input
+          type="checkbox"
+          checked={formState.bootstrapCi}
+          onChange={(event) =>
+            setFormState((prev) => ({
+              ...prev,
+              bootstrapCi: event.target.checked,
+            }))
+          }
+        />
+        Compute bootstrap CIs for delta metrics
+      </label>
+      <div className="fields-grid">
+        <div className="field">
+          <label htmlFor="bootstrapB">Resamples (B)</label>
+          <input
+            id="bootstrapB"
+            className="input"
+            inputMode="numeric"
+            value={formState.bootstrapB}
+            onChange={(event) =>
+              setFormState((prev) => ({
+                ...prev,
+                bootstrapB: event.target.value,
+              }))
+            }
+            disabled={!formState.bootstrapCi}
+          />
+          <span className="field-hint">
+            Number of bootstrap resamples (default 2000).
+          </span>
+        </div>
+        <div className="field">
+          <label htmlFor="bootstrapSeed">Seed</label>
+          <input
+            id="bootstrapSeed"
+            className="input"
+            inputMode="numeric"
+            value={formState.bootstrapSeed}
+            onChange={(event) =>
+              setFormState((prev) => ({
+                ...prev,
+                bootstrapSeed: event.target.value,
+              }))
+            }
+            disabled={!formState.bootstrapCi}
+          />
+        </div>
+        <div className="field">
+          <label htmlFor="bootstrapGroup">Group strategy</label>
+          <select
+            id="bootstrapGroup"
+            className="input"
+            value={formState.bootstrapGroup}
+            onChange={(event) =>
+              setFormState((prev) => ({
+                ...prev,
+                bootstrapGroup: event.target
+                  .value as CalibrateFormState["bootstrapGroup"],
+              }))
+            }
+            disabled={!formState.bootstrapCi}
+          >
+            <option value="auto">auto (ticker+date+expiry)</option>
+            <option value="ticker_day">ticker + date</option>
+            <option value="day">date only</option>
+            <option value="iid">iid (no blocking)</option>
+          </select>
+          <span className="field-hint">
+            Block bootstrap groups for correlated data.
+          </span>
+        </div>
+      </div>
+    </details>
   );
 
   const commandPreview = useMemo(
@@ -1103,6 +1325,9 @@ export default function CalibrateModelsPage() {
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (runMode !== "manual") {
+      return;
+    }
     if (anyJobRunning) {
       setRunError(
         `Another job is running (${primaryJob?.name ?? "unknown"}). Wait for it to finish.`,
@@ -1527,6 +1752,10 @@ export default function CalibrateModelsPage() {
 
   return (
     <section className="page calibrate-page">
+      <PipelineStatusCard
+        className="page-sticky-meta calibrate-meta"
+        activeJobsCount={activeJobs.length}
+      />
       <header className="page-header">
         <div>
           <p className="page-kicker">Calibrate models</p>
@@ -1536,10 +1765,6 @@ export default function CalibrateModelsPage() {
             the CLI arguments, and generate new model artifacts.
           </p>
         </div>
-        <PipelineStatusCard
-          className="calibrate-meta"
-          activeJobsCount={activeJobs.length}
-        />
       </header>
 
       <form className="calibrate-grid" onSubmit={handleSubmit}>
@@ -1551,8 +1776,28 @@ export default function CalibrateModelsPage() {
                 Dataset selection is restricted to option-chain outputs.
               </span>
             </div>
+            <div className="run-mode-tabs">
+              <button
+                type="button"
+                className={`run-mode-tab ${runMode === "manual" ? "active" : ""}`}
+                aria-pressed={runMode === "manual"}
+                onClick={() => setRunMode("manual")}
+              >
+                Manual run
+              </button>
+              <button
+                type="button"
+                className={`run-mode-tab ${runMode === "auto" ? "active" : ""}`}
+                aria-pressed={runMode === "auto"}
+                onClick={() => setRunMode("auto")}
+              >
+                Auto-calibrate run
+              </button>
+            </div>
           </div>
           <div className="panel-body">
+            {runMode === "manual" ? (
+              <>
                 <div className="config-summary">
                   <div>
                     <span className="meta-label">Dataset</span>
@@ -1569,1215 +1814,1100 @@ export default function CalibrateModelsPage() {
                 </div>
                 {renderDatasetSection(true)}
                 {renderTwoStageSection()}
+                {renderRegimeSection()}
                 <div className="section-card calibrate-section">
-                  <h3 className="section-heading">Horizon regime</h3>
-                  <div className="tdays-picker regime-toggle">
-                    <span className="meta-label">Regime mode</span>
-                    <div className="tdays-chips">
-                      <button
-                        type="button"
-                        className={`chip ${!regimeSpecific ? "active" : ""}`}
-                        onClick={() =>
-                          setFormState((prev) => ({
-                            ...prev,
-                            tdaysAllowed: "",
-                            asofDowAllowed: "",
-                          }))
-                        }
-                      >
-                        Train on all data (no regime filters)
-                      </button>
-                      <button
-                        type="button"
-                        className={`chip ${regimeSpecific ? "active" : ""}`}
-                        onClick={() => {
-                          if (!regimeSpecific) {
-                            setFormState((prev) => ({
-                              ...prev,
-                              asofDowAllowed: prev.asofDowAllowed || "Mon",
-                            }));
-                          }
-                        }}
-                      >
-                        Train a regime-specific model
-                      </button>
-                    </div>
+                  <h3 className="section-heading">Output</h3>
+                  <div className="field">
+                    <label>Output directory</label>
+                    <div className="input readonly">src/data/models</div>
                   </div>
-                  <div className="fields-grid">
-                    <div className="field">
-                      <label htmlFor="asofDowAllowed">Training day-of-week</label>
-                      <select
-                        id="asofDowAllowed"
-                        className="input"
-                        value={formState.asofDowAllowed}
-                        onChange={(event) =>
-                          setFormState((prev) => ({
-                            ...prev,
-                            asofDowAllowed: event.target.value,
-                          }))
-                        }
-                      >
-                        <option value="">Any day</option>
-                        <option value="Mon">Mon</option>
-                        <option value="Tue">Tue</option>
-                        <option value="Wed">Wed</option>
-                        <option value="Thu">Thu</option>
-                        <option value="Fri">Fri</option>
-                      </select>
-                      <span className="field-hint">
-                        Filters snapshots by as-of day. Monday defaults to <code>T_days=4</code>.
-                      </span>
-                    </div>
-                    <div className="field">
-                      <label htmlFor="tdaysAllowed">Allowed T_days</label>
-                      <input
-                        id="tdaysAllowed"
-                        className="input"
-                        placeholder="Auto"
-                        value={formState.tdaysAllowed}
-                        onChange={(event) =>
-                          setFormState((prev) => ({
-                            ...prev,
-                            tdaysAllowed: event.target.value,
-                          }))
-                        }
-                      />
-                      <span className="field-hint">
-                        Comma-separated list. Leave blank for no filter.
-                      </span>
-                    </div>
+                  <div className="field">
+                    <label htmlFor="outName">Model folder name</label>
+                    <input
+                      id="outName"
+                      className="input"
+                      placeholder={defaultName}
+                      value={formState.outName}
+                      onChange={(event) =>
+                        setFormState((prev) => ({
+                          ...prev,
+                          outName: event.target.value,
+                        }))
+                      }
+                    />
+                    <span className="field-hint">
+                      Leave blank to use <code>{effectiveOutName}</code>.
+                    </span>
                   </div>
-                  <div className="tdays-picker">
-                    <span className="meta-label">Quick T_days</span>
-                    <div className="tdays-chips">
-                      <button
-                        type="button"
-                        className={`chip ${formState.tdaysAllowed.trim() ? "" : "active"}`}
-                        onClick={() =>
-                          setFormState((prev) => ({ ...prev, tdaysAllowed: "" }))
-                        }
-                      >
-                        Auto
-                      </button>
-                      {TDAYS_OPTIONS.map((value) => {
-                        const selected = parseTdaysList(formState.tdaysAllowed).includes(value);
+                </div>
+
+                <div className="features-controls-stack">
+                  <details className="advanced">
+                    <summary>Features control</summary>
+                    {regimeSpecific ? (
+                      <div className="warning feature-warning">
+                        Regime-specific training locks: {Array.from(REGIME_LOCKED_FEATURES).join(", ")}.
+                      </div>
+                    ) : null}
+                    <div className="feature-groups">
+                      {FEATURE_GROUPS.map((group) => {
+                        const groupSelection = group.exclusive
+                          ? exclusiveSelections[group.id]
+                          : null;
+                        const groupLockedAll =
+                          regimeSpecific &&
+                          group.keys.every((key) => REGIME_LOCKED_FEATURES.has(key));
+                        const availableCount = group.keys.filter(isFeatureAvailable).length;
                         return (
-                          <button
-                            key={value}
-                            type="button"
-                            className={`chip ${selected ? "active" : ""}`}
-                            onClick={() => {
-                              const current = parseTdaysList(formState.tdaysAllowed);
-                              const next = selected
-                                ? current.filter((item) => item !== value)
-                                : [...current, value];
-                              setFormState((prev) => ({
-                                ...prev,
-                                tdaysAllowed: formatTdaysList(next),
-                              }));
-                            }}
-                          >
-                            {value}
-                          </button>
+                          <div key={group.id} className="feature-group">
+                            <div className="feature-group-header">
+                              <div>
+                                <div className="feature-group-title">{group.title}</div>
+                                <div className="feature-group-hint">{group.hint}</div>
+                              </div>
+                              <div className="feature-group-meta">
+                                {group.exclusive ? (
+                                  <span className="feature-tag">
+                                    {groupSelection ? `Using ${groupSelection}` : "Choose one"}
+                                  </span>
+                                ) : null}
+                                {groupLockedAll ? (
+                                  <span className="feature-tag locked">Locked by regime</span>
+                                ) : null}
+                                {!group.exclusive && availableCount > 1 && (
+                                  <button
+                                    type="button"
+                                    className="btn-select-group"
+                                    onClick={() => handleSelectAllInGroup(group.id)}
+                                  >
+                                    Select all ({availableCount})
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                            <div className="feature-grid feature-group-grid">
+                              {group.keys.map((featureKey) => {
+                                const feature = FEATURE_INDEX[featureKey];
+                                if (!feature) return null;
+                                const isRedundant = redundantFeatures.has(feature.key);
+                                const isLocked =
+                                  regimeSpecific && REGIME_LOCKED_FEATURES.has(feature.key);
+                                const isAvailable = isFeatureAvailable(feature.key);
+                                const missingPct = getFeatureMissingPct(feature.key);
+                                const highMissing = hasHighMissingData(feature.key);
+                                const isSelected = selectedFeatureSet.has(feature.key);
+                                const isDisabled = !isAvailable || isLocked;
+                                return (
+                                  <label
+                                    key={feature.key}
+                                    className={`feature-item${isRedundant ? " is-redundant" : ""}${
+                                      isDisabled ? " is-disabled" : ""
+                                    }`}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={isSelected}
+                                      disabled={isDisabled}
+                                      onChange={(event) =>
+                                        handleFeatureToggle(feature.key, event.target.checked)
+                                      }
+                                    />
+                                    <div>
+                                      <div className="feature-title">
+                                        {feature.key}
+                                        {!isAvailable && (
+                                          <span className="badge badge-unavailable">Not in dataset</span>
+                                        )}
+                                        {isAvailable && highMissing && (
+                                          <span className="badge badge-warning">
+                                            ⚠ Missing: {missingPct?.toFixed(1)}%
+                                          </span>
+                                        )}
+                                        {isRedundant ? (
+                                          <span className="feature-tag redundant">
+                                            Constant under regime
+                                          </span>
+                                        ) : null}
+                                        {isLocked ? (
+                                          <span className="feature-tag locked">
+                                            Locked by regime
+                                          </span>
+                                        ) : null}
+                                      </div>
+                                      <div className="feature-desc">{feature.description}</div>
+                                    </div>
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          </div>
                         );
                       })}
                     </div>
-                  </div>
-                  {regimePreviewError ? (
-                    <div className="error">{regimePreviewError}</div>
-                  ) : null}
-                  {regimePreview ? (
-                    <div className="regime-preview">
-                      <div>
-                        <span className="meta-label">Rows after filter</span>
-                        <span>{regimePreview.rows_after}</span>
-                      </div>
-                      <div>
-                        <span className="meta-label">Tickers retained</span>
-                        <span>{regimePreview.tickers_after}</span>
-                      </div>
-                    </div>
-                  ) : null}
-                  {regimePreview &&
-                  (regimePreview.rows_after < REGIME_WARNING_MIN_ROWS ||
-                    regimePreview.tickers_after < 2) ? (
-                    <div className="warning">
-                      Regime filters are very tight. Loosen day/T_days or add more
-                      history before training.
-                    </div>
-                  ) : null}
-                </div>
-            <div className="section-card calibrate-section">
-              <h3 className="section-heading">Output</h3>
-              <div className="field">
-                <label>Output directory</label>
-                <div className="input readonly">src/data/models</div>
-              </div>
-              <div className="field">
-                <label htmlFor="outName">Model folder name</label>
-                <input
-                  id="outName"
-                  className="input"
-                  placeholder={defaultName}
-                  value={formState.outName}
-                  onChange={(event) =>
-                    setFormState((prev) => ({
-                      ...prev,
-                      outName: event.target.value,
-                    }))
-                  }
-                />
-                <span className="field-hint">
-                  Leave blank to use <code>{effectiveOutName}</code>.
-                </span>
-              </div>
-            </div>
-
-            <div className="features-controls-stack">
-              <details className="advanced">
-                <summary>Features control</summary>
-                {regimeSpecific ? (
-                  <div className="warning feature-warning">
-                    Regime-specific training locks: {Array.from(REGIME_LOCKED_FEATURES).join(", ")}.
-                  </div>
-                ) : null}
-                <div className="feature-groups">
-                  {FEATURE_GROUPS.map((group) => {
-                    const groupSelection = group.exclusive
-                      ? exclusiveSelections[group.id]
-                      : null;
-                    const groupLockedAll =
-                      regimeSpecific &&
-                      group.keys.every((key) => REGIME_LOCKED_FEATURES.has(key));
-                    const availableCount = group.keys.filter(isFeatureAvailable).length;
-                    return (
-                      <div key={group.id} className="feature-group">
-                        <div className="feature-group-header">
-                          <div>
-                            <div className="feature-group-title">{group.title}</div>
-                            <div className="feature-group-hint">{group.hint}</div>
-                          </div>
-                          <div className="feature-group-meta">
-                            {group.exclusive ? (
-                              <span className="feature-tag">
-                                {groupSelection ? `Using ${groupSelection}` : "Choose one"}
-                              </span>
-                            ) : null}
-                            {groupLockedAll ? (
-                              <span className="feature-tag locked">Locked by regime</span>
-                            ) : null}
-                            {!group.exclusive && availableCount > 1 && (
-                              <button
-                                type="button"
-                                className="btn-select-group"
-                                onClick={() => handleSelectAllInGroup(group.id)}
-                              >
-                                Select all ({availableCount})
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                        <div className="feature-grid feature-group-grid">
-                          {group.keys.map((featureKey) => {
-                            const feature = FEATURE_INDEX[featureKey];
-                            if (!feature) return null;
-                            const isRedundant = redundantFeatures.has(feature.key);
-                            const isLocked =
-                              regimeSpecific && REGIME_LOCKED_FEATURES.has(feature.key);
-                            const isAvailable = isFeatureAvailable(feature.key);
-                            const missingPct = getFeatureMissingPct(feature.key);
-                            const highMissing = hasHighMissingData(feature.key);
-                            const isSelected = selectedFeatureSet.has(feature.key);
-                            const isDisabled = !isAvailable || isLocked;
-                            return (
-                              <label
-                                key={feature.key}
-                                className={`feature-item${isRedundant ? " is-redundant" : ""}${
-                                  isDisabled ? " is-disabled" : ""
-                                }`}
-                              >
-                                <input
-                                  type="checkbox"
-                                  checked={isSelected}
-                                  disabled={isDisabled}
-                                  onChange={(event) =>
-                                    handleFeatureToggle(feature.key, event.target.checked)
-                                  }
-                                />
-                                <div>
-                                  <div className="feature-title">
-                                    {feature.key}
-                                    {!isAvailable && (
-                                      <span className="badge badge-unavailable">Not in dataset</span>
-                                    )}
-                                    {isAvailable && highMissing && (
-                                      <span className="badge badge-warning">
-                                        ⚠ Missing: {missingPct?.toFixed(1)}%
-                                      </span>
-                                    )}
-                                    {isRedundant ? (
-                                      <span className="feature-tag redundant">
-                                        Constant under regime
-                                      </span>
-                                    ) : null}
-                                    {isLocked ? (
-                                      <span className="feature-tag locked">
-                                        Locked by regime
-                                      </span>
-                                    ) : null}
-                                  </div>
-                                  <div className="feature-desc">{feature.description}</div>
-                                </div>
-                              </label>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-                <div className="field field-spaced">
-                  <label htmlFor="customFeatures">Custom features</label>
-                  <input
-                    id="customFeatures"
-                    className="input"
-                    placeholder="extra_feature_a,extra_feature_b"
-                    value={formState.customFeatures}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        customFeatures: event.target.value,
-                      }))
-                    }
-                  />
-                  <span className="field-hint">
-                    Comma-separated list appended to the selected features.
-                  </span>
-                </div>
-                <div className="feature-toggle-grid">
-                  <button
-                    type="button"
-                    className={`feature-toggle ${formState.addInteractions ? "selected" : ""}`}
-                    aria-pressed={formState.addInteractions}
-                    onClick={() =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        addInteractions: !prev.addInteractions,
-                      }))
-                    }
-                  >
-                    <div className="feature-toggle-title">Add numeric interaction terms</div>
-                    <div className="feature-toggle-desc">
-                      Create x_logit_prn interactions with T_days, rv20, and log-moneyness to capture
-                      non-linear effects.
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    className={`feature-toggle ${formState.enableXAbsM ? "selected" : ""}`}
-                    aria-pressed={formState.enableXAbsM}
-                    onClick={() =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        enableXAbsM: !prev.enableXAbsM,
-                      }))
-                    }
-                  >
-                    <div className="feature-toggle-title">Include absolute-moneyness interaction</div>
-                    <div className="feature-toggle-desc">
-                      Adds x_abs_m = x_logit_prn x |moneyness| (distance from ATM). x_m is
-                      auto-included when log-moneyness exists.
-                    </div>
-                  </button>
-                </div>
-                <div className="feature-summary">
-                  <span className="meta-label">Selected features</span>
-                  <span>
-                    {selectedFeatureLabels.length > 0
-                      ? selectedFeatureLabels.join(", ")
-                      : "None selected"}
-                  </span>
-                </div>
-              </details>
-
-              {formState.modelKind !== "calibrate" && (
-                <details className="advanced">
-                  <summary>Polymarket features</summary>
-                  <div className="feature-groups">
-                    {PM_FEATURE_GROUPS.map((group) => (
-                      <div key={group.id} className="feature-group">
-                        <div className="feature-group-header">
-                          <div>
-                            <div className="feature-group-title">{group.title}</div>
-                            <div className="feature-group-hint">{group.hint}</div>
-                          </div>
-                          <div className="feature-group-meta">
-                            <button
-                              type="button"
-                              className="btn-select-group"
-                              onClick={() =>
-                                setFormState((prev) => {
-                                  const current = new Set(prev.selectedPmFeatures);
-                                  group.keys.forEach((k) => current.add(k));
-                                  return { ...prev, selectedPmFeatures: Array.from(current) };
-                                })
-                              }
-                            >
-                              Select all ({group.keys.length})
-                            </button>
-                          </div>
-                        </div>
-                        <div className="feature-grid feature-group-grid">
-                          {group.keys.map((featureKey) => {
-                            const feature = PM_FEATURE_INDEX[featureKey];
-                            if (!feature) return null;
-                            const isSelected = selectedPmFeatureSet.has(feature.key);
-                            return (
-                              <label key={feature.key} className="feature-item">
-                                <input
-                                  type="checkbox"
-                                  checked={isSelected}
-                                  onChange={(event) =>
-                                    handlePmFeatureToggle(feature.key, event.target.checked)
-                                  }
-                                />
-                                <div>
-                                  <div className="feature-title">{feature.key}</div>
-                                  <div className="feature-desc">{feature.description}</div>
-                                </div>
-                              </label>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="feature-summary" style={{ marginTop: "var(--space-3)" }}>
-                    <span className="meta-label">Selected PM features</span>
-                    <span>
-                      {formState.selectedPmFeatures.length > 0
-                        ? formState.selectedPmFeatures.join(", ")
-                        : "None selected"}
-                    </span>
-                  </div>
-                </details>
-              )}
-
-              <details className="advanced">
-              <summary>Model structure</summary>
-              <div className="fields-grid">
-                <div className="field field-full-width">
-                  <label>Model type</label>
-                  <div className="radio-group">
-                    <label className="radio-label">
+                    <div className="field field-spaced">
+                      <label htmlFor="customFeatures">Custom features</label>
                       <input
-                        type="radio"
-                        name="modelKind"
-                        value="calibrate"
-                        checked={formState.modelKind === "calibrate"}
-                        onChange={(e) =>
+                        id="customFeatures"
+                        className="input"
+                        placeholder="extra_feature_a,extra_feature_b"
+                        value={formState.customFeatures}
+                        onChange={(event) =>
                           setFormState((prev) => ({
                             ...prev,
-                            modelKind: e.target.value as CalibrateFormState["modelKind"],
+                            customFeatures: event.target.value,
                           }))
                         }
                       />
-                      <span>Calibrate only (pRN logistic model)</span>
-                    </label>
-                    <label className={`radio-label ${isMixedModelDisabled ? "disabled" : ""}`}>
-                      <input
-                        type="radio"
-                        name="modelKind"
-                        value="mixed"
-                        checked={formState.modelKind === "mixed"}
-                        disabled={isMixedModelDisabled}
-                        onChange={(e) =>
-                          setFormState((prev) => ({
-                            ...prev,
-                            modelKind: e.target.value as CalibrateFormState["modelKind"],
-                          }))
-                        }
-                      />
-                      <span>
-                        Mixed only (PM + pRN blend)
-                        {isMixedModelDisabled && (
-                          <span className="field-hint" style={{ marginLeft: "0.5rem" }}>
-                            (Not available for 1DTE/daily datasets)
-                          </span>
-                        )}
+                      <span className="field-hint">
+                        Comma-separated list appended to the selected features.
                       </span>
-                    </label>
-                    <label className="radio-label">
-                      <input
-                        type="radio"
-                        name="modelKind"
-                        value="both"
-                        checked={formState.modelKind === "both"}
-                        onChange={(e) =>
+                    </div>
+                    <div className="feature-toggle-grid">
+                      <button
+                        type="button"
+                        className={`feature-toggle ${formState.addInteractions ? "selected" : ""}`}
+                        aria-pressed={formState.addInteractions}
+                        onClick={() =>
                           setFormState((prev) => ({
                             ...prev,
-                            modelKind: e.target.value as CalibrateFormState["modelKind"],
+                            addInteractions: !prev.addInteractions,
+                          }))
+                        }
+                      >
+                        <div className="feature-toggle-title">Add numeric interaction terms</div>
+                        <div className="feature-toggle-desc">
+                          Create x_logit_prn interactions with T_days, rv20, and log-moneyness to capture
+                          non-linear effects.
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        className={`feature-toggle ${formState.enableXAbsM ? "selected" : ""}`}
+                        aria-pressed={formState.enableXAbsM}
+                        onClick={() =>
+                          setFormState((prev) => ({
+                            ...prev,
+                            enableXAbsM: !prev.enableXAbsM,
+                          }))
+                        }
+                      >
+                        <div className="feature-toggle-title">Include absolute-moneyness interaction</div>
+                        <div className="feature-toggle-desc">
+                          Adds x_abs_m = x_logit_prn x |moneyness| (distance from ATM). x_m is
+                          auto-included when log-moneyness exists.
+                        </div>
+                      </button>
+                    </div>
+                    <div className="feature-summary">
+                      <span className="meta-label">Selected features</span>
+                      <span>
+                        {selectedFeatureLabels.length > 0
+                          ? selectedFeatureLabels.join(", ")
+                          : "None selected"}
+                      </span>
+                    </div>
+                  </details>
+
+                  {formState.modelKind !== "calibrate" && (
+                    <details className="advanced">
+                      <summary>Polymarket features</summary>
+                      <div className="feature-groups">
+                        {PM_FEATURE_GROUPS.map((group) => (
+                          <div key={group.id} className="feature-group">
+                            <div className="feature-group-header">
+                              <div>
+                                <div className="feature-group-title">{group.title}</div>
+                                <div className="feature-group-hint">{group.hint}</div>
+                              </div>
+                              <div className="feature-group-meta">
+                                <button
+                                  type="button"
+                                  className="btn-select-group"
+                                  onClick={() =>
+                                    setFormState((prev) => {
+                                      const current = new Set(prev.selectedPmFeatures);
+                                      group.keys.forEach((k) => current.add(k));
+                                      return { ...prev, selectedPmFeatures: Array.from(current) };
+                                    })
+                                  }
+                                >
+                                  Select all ({group.keys.length})
+                                </button>
+                              </div>
+                            </div>
+                            <div className="feature-grid feature-group-grid">
+                              {group.keys.map((featureKey) => {
+                                const feature = PM_FEATURE_INDEX[featureKey];
+                                if (!feature) return null;
+                                const isSelected = selectedPmFeatureSet.has(feature.key);
+                                return (
+                                  <label key={feature.key} className="feature-item">
+                                    <input
+                                      type="checkbox"
+                                      checked={isSelected}
+                                      onChange={(event) =>
+                                        handlePmFeatureToggle(feature.key, event.target.checked)
+                                      }
+                                    />
+                                    <div>
+                                      <div className="feature-title">{feature.key}</div>
+                                      <div className="feature-desc">{feature.description}</div>
+                                    </div>
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="feature-summary" style={{ marginTop: "var(--space-3)" }}>
+                        <span className="meta-label">Selected PM features</span>
+                        <span>
+                          {formState.selectedPmFeatures.length > 0
+                            ? formState.selectedPmFeatures.join(", ")
+                            : "None selected"}
+                        </span>
+                      </div>
+                    </details>
+                  )}
+
+                  <details className="advanced">
+                  <summary>Model structure</summary>
+                  <div className="fields-grid">
+                    <div className="field field-full-width">
+                      <label>Model type</label>
+                      <div className="radio-group">
+                        <label className="radio-label">
+                          <input
+                            type="radio"
+                            name="modelKind"
+                            value="calibrate"
+                            checked={formState.modelKind === "calibrate"}
+                            onChange={(e) =>
+                              setFormState((prev) => ({
+                                ...prev,
+                                modelKind: e.target.value as CalibrateFormState["modelKind"],
+                              }))
+                            }
+                          />
+                          <span>Calibrate only (pRN logistic model)</span>
+                        </label>
+                        <label className={`radio-label ${isMixedModelDisabled ? "disabled" : ""}`}>
+                          <input
+                            type="radio"
+                            name="modelKind"
+                            value="mixed"
+                            checked={formState.modelKind === "mixed"}
+                            disabled={isMixedModelDisabled}
+                            onChange={(e) =>
+                              setFormState((prev) => ({
+                                ...prev,
+                                modelKind: e.target.value as CalibrateFormState["modelKind"],
+                              }))
+                            }
+                          />
+                          <span>
+                            Mixed only (PM + pRN blend)
+                            {isMixedModelDisabled && (
+                              <span className="field-hint" style={{ marginLeft: "0.5rem" }}>
+                                (Not available for 1DTE/daily datasets)
+                              </span>
+                            )}
+                          </span>
+                        </label>
+                        <label className="radio-label">
+                          <input
+                            type="radio"
+                            name="modelKind"
+                            value="both"
+                            checked={formState.modelKind === "both"}
+                            onChange={(e) =>
+                              setFormState((prev) => ({
+                                ...prev,
+                                modelKind: e.target.value as CalibrateFormState["modelKind"],
+                              }))
+                            }
+                          />
+                          <span>Both (run calibrate + mixed sequentially)</span>
+                        </label>
+                      </div>
+                      <span className="field-hint">
+                        Choose which model(s) to train. "Both" runs calibrate first, then mixed model.
+                      </span>
+                    </div>
+                    <div className="field">
+                      <label htmlFor="tickerIntercepts">Ticker intercepts</label>
+                      <select
+                        id="tickerIntercepts"
+                        className="input"
+                        value={formState.tickerIntercepts}
+                        onChange={(event) =>
+                          setFormState((prev) => ({
+                            ...prev,
+                            tickerIntercepts: event.target.value as CalibrateFormState["tickerIntercepts"],
+                          }))
+                        }
+                      >
+                        <option value="none">none</option>
+                        <option value="all">all</option>
+                        <option value="non_foundation">non_foundation</option>
+                      </select>
+                    </div>
+                    <div className="field">
+                      <label htmlFor="foundationWeight">Foundation weight</label>
+                      <input
+                        id="foundationWeight"
+                        className="input"
+                        inputMode="decimal"
+                        value={formState.foundationWeight}
+                        onChange={(event) =>
+                          setFormState((prev) => ({
+                            ...prev,
+                            foundationWeight: event.target.value,
                           }))
                         }
                       />
-                      <span>Both (run calibrate + mixed sequentially)</span>
+                    </div>
+                    <div className="field">
+                      <label htmlFor="metricsTopTickers">Metrics top tickers</label>
+                      <input
+                        id="metricsTopTickers"
+                        className="input"
+                        inputMode="numeric"
+                        value={formState.metricsTopTickers}
+                        onChange={(event) =>
+                          setFormState((prev) => ({
+                            ...prev,
+                            metricsTopTickers: event.target.value,
+                          }))
+                        }
+                      />
+                      <span className="field-hint">
+                        How many top tickers to include in diagnostics.
+                      </span>
+                    </div>
+                    <div className="field">
+                      <label htmlFor="tickerMinSupport">Ticker min support</label>
+                      <input
+                        id="tickerMinSupport"
+                        className="input"
+                        inputMode="numeric"
+                        value={formState.tickerMinSupport}
+                        onChange={(event) =>
+                          setFormState((prev) => ({
+                            ...prev,
+                            tickerMinSupport: event.target.value,
+                          }))
+                        }
+                      />
+                      <span className="field-hint">
+                        Min TRAIN_FIT rows to keep ticker intercepts (others → OTHER).
+                      </span>
+                    </div>
+                    <div className="field">
+                      <label htmlFor="tickerMinSupportInteractions">Ticker min support (interactions)</label>
+                      <input
+                        id="tickerMinSupportInteractions"
+                        className="input"
+                        inputMode="numeric"
+                        value={formState.tickerMinSupportInteractions}
+                        onChange={(event) =>
+                          setFormState((prev) => ({
+                            ...prev,
+                            tickerMinSupportInteractions: event.target.value,
+                          }))
+                        }
+                      />
+                      <span className="field-hint">
+                        Stricter support threshold for ticker × logit interactions.
+                      </span>
+                    </div>
+                  </div>
+                  <div className="field field-full-width">
+                    <label>Foundation tickers</label>
+                    <div className="ticker-actions">
+                      <button
+                        type="button"
+                        className="btn-ticker-action"
+                        onClick={() => handleFoundationTickersAction("top5")}
+                        disabled={availableTickers.length === 0}
+                      >
+                        Top 5
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-ticker-action"
+                        onClick={() => handleFoundationTickersAction("all")}
+                        disabled={availableTickers.length === 0}
+                      >
+                        Select All ({availableTickers.length})
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-ticker-action"
+                        onClick={() => handleFoundationTickersAction("clear")}
+                        disabled={formState.foundationTickers.length === 0}
+                      >
+                        Clear All
+                      </button>
+                    </div>
+
+                    {tickersFetching && <p className="field-hint">Loading tickers...</p>}
+                    {tickersError && <p className="field-hint error-text">{tickersError}</p>}
+
+                    {!tickersFetching && availableTickers.length > 0 && (
+                      <div className="ticker-grid">
+                        {availableTickers.map((ticker) => {
+                          const isSelected = formState.foundationTickers.includes(ticker);
+                          return (
+                            <button
+                              key={ticker}
+                              type="button"
+                              className={`ticker-chip ${isSelected ? "selected" : ""}`}
+                              aria-pressed={isSelected}
+                              onClick={() => toggleFoundationTicker(ticker)}
+                            >
+                              {ticker}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    <div className="ticker-selection-summary">
+                      Selected: {formState.foundationTickers.length > 0
+                        ? formState.foundationTickers.join(", ")
+                        : "None"}
+                    </div>
+
+                    <span className="field-hint">
+                      Foundation tickers get upweighted and may get special treatment.
+                    </span>
+                  </div>
+                  <div className="field field-full-width">
+                    <label>Train tickers</label>
+                    <div className="ticker-actions">
+                      <button
+                        type="button"
+                        className="btn-ticker-action"
+                        onClick={() => handleTrainTickersAction("top5")}
+                        disabled={availableTickers.length === 0}
+                      >
+                        Top 5
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-ticker-action"
+                        onClick={() => handleTrainTickersAction("all")}
+                        disabled={availableTickers.length === 0}
+                      >
+                        Select All ({availableTickers.length})
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-ticker-action"
+                        onClick={() => handleTrainTickersAction("clear")}
+                        disabled={formState.trainTickers.length === 0}
+                      >
+                        Clear All
+                      </button>
+                    </div>
+
+                    {tickersFetching && <p className="field-hint">Loading tickers...</p>}
+                    {tickersError && <p className="field-hint error-text">{tickersError}</p>}
+
+                    {!tickersFetching && availableTickers.length > 0 && (
+                      <div className="ticker-grid">
+                        {availableTickers.map((ticker) => {
+                          const isSelected = formState.trainTickers.includes(ticker);
+                          return (
+                            <button
+                              key={ticker}
+                              type="button"
+                              className={`ticker-chip ${isSelected ? "selected" : ""}`}
+                              aria-pressed={isSelected}
+                              onClick={() => toggleTrainTicker(ticker)}
+                            >
+                              {ticker}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    <div className="ticker-selection-summary">
+                      Selected: {formState.trainTickers.length > 0 ? formState.trainTickers.join(", ") : "None"}
+                    </div>
+
+                    <span className="field-hint">
+                      Restrict training to a subset of tickers.
+                    </span>
+                  </div>
+                  <label className="checkbox checkbox-spaced">
+                    <input
+                      type="checkbox"
+                      checked={formState.tickerXInteractions}
+                      onChange={(event) =>
+                        setFormState((prev) => ({
+                          ...prev,
+                          tickerXInteractions: event.target.checked,
+                        }))
+                      }
+                    />
+                    Enable per-ticker interactions (ticker × x_logit_prn)
+                  </label>
+                  </details>
+
+                  <details className="advanced">
+                  <summary>Calibration & validation</summary>
+                    <div className="fields-grid">
+                      <div className="field">
+                        <label htmlFor="calibrate">Calibration</label>
+                        <select
+                          id="calibrate"
+                          className="input"
+                          value={formState.calibrate}
+                          onChange={(event) =>
+                            setFormState((prev) => ({
+                              ...prev,
+                              calibrate: event.target.value as CalibrateFormState["calibrate"],
+                            }))
+                          }
+                        >
+                          <option value="none">none</option>
+                          <option value="platt">platt</option>
+                        </select>
+                      </div>
+                      <div className="field">
+                        <label htmlFor="cGrid">C grid</label>
+                        <input
+                          id="cGrid"
+                          className="input"
+                          value={formState.cGrid}
+                          onChange={(event) =>
+                            setFormState((prev) => ({
+                              ...prev,
+                              cGrid: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="field">
+                        <label htmlFor="trainDecay">Train decay half-life</label>
+                        <input
+                          id="trainDecay"
+                          className="input"
+                          inputMode="decimal"
+                          value={formState.trainDecayHalfLifeWeeks}
+                          onChange={(event) =>
+                            setFormState((prev) => ({
+                              ...prev,
+                              trainDecayHalfLifeWeeks: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="field">
+                        <label htmlFor="calibFrac">Calib frac of train</label>
+                        <input
+                          id="calibFrac"
+                          className="input"
+                          inputMode="decimal"
+                          value={formState.calibFracOfTrain}
+                          onChange={(event) =>
+                            setFormState((prev) => ({
+                              ...prev,
+                              calibFracOfTrain: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="field">
+                        <label htmlFor="fitWeightRenorm">Fit weight renorm</label>
+                        <select
+                          id="fitWeightRenorm"
+                          className="input"
+                          value={formState.fitWeightRenorm}
+                          onChange={(event) =>
+                            setFormState((prev) => ({
+                              ...prev,
+                              fitWeightRenorm:
+                                event.target.value as CalibrateFormState["fitWeightRenorm"],
+                            }))
+                          }
+                        >
+                          <option value="mean1">mean1</option>
+                          <option value="none">none</option>
+                        </select>
+                      </div>
+                      <div className="field">
+                        <label htmlFor="testWeeks">Test weeks</label>
+                        <input
+                          id="testWeeks"
+                          className="input"
+                          inputMode="numeric"
+                          value={formState.testWeeks}
+                          onChange={(event) =>
+                            setFormState((prev) => ({
+                              ...prev,
+                              testWeeks: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="field">
+                        <label htmlFor="valWindows">Val windows</label>
+                        <input
+                          id="valWindows"
+                          className="input"
+                          inputMode="numeric"
+                          value={formState.valWindows}
+                          onChange={(event) =>
+                            setFormState((prev) => ({
+                              ...prev,
+                              valWindows: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="field">
+                        <label htmlFor="valWindowWeeks">Val window weeks</label>
+                        <input
+                          id="valWindowWeeks"
+                          className="input"
+                          inputMode="numeric"
+                          value={formState.valWindowWeeks}
+                          onChange={(event) =>
+                            setFormState((prev) => ({
+                              ...prev,
+                              valWindowWeeks: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="field">
+                        <label htmlFor="nBins">Bins</label>
+                        <input
+                          id="nBins"
+                          className="input"
+                          inputMode="numeric"
+                          value={formState.nBins}
+                          onChange={(event) =>
+                            setFormState((prev) => ({
+                              ...prev,
+                              nBins: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="field">
+                        <label htmlFor="eceqBins">ECE-Q bins</label>
+                        <input
+                          id="eceqBins"
+                          className="input"
+                          inputMode="numeric"
+                          value={formState.eceqBins}
+                          onChange={(event) =>
+                            setFormState((prev) => ({
+                              ...prev,
+                              eceqBins: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="field">
+                        <label htmlFor="selectionObjective">Selection objective</label>
+                        <select
+                          id="selectionObjective"
+                          className="input"
+                          value={formState.selectionObjective}
+                          onChange={(event) =>
+                            setFormState((prev) => ({
+                              ...prev,
+                              selectionObjective:
+                                event.target.value as CalibrateFormState["selectionObjective"],
+                            }))
+                          }
+                        >
+                          <option value="delta_vs_baseline">delta vs baseline</option>
+                        </select>
+                      </div>
+                      <div className="field">
+                        <label htmlFor="randomState">Random state</label>
+                        <input
+                          id="randomState"
+                          className="input"
+                          inputMode="numeric"
+                          value={formState.randomState}
+                          onChange={(event) =>
+                            setFormState((prev) => ({
+                              ...prev,
+                              randomState: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                    </div>
+                    <label className="checkbox checkbox-spaced">
+                      <input
+                        type="checkbox"
+                        checked={formState.fallbackToBaselineIfWorse}
+                        onChange={(event) =>
+                          setFormState((prev) => ({
+                            ...prev,
+                            fallbackToBaselineIfWorse: event.target.checked,
+                          }))
+                        }
+                      />
+                      Fallback to baseline if worse than pRN
                     </label>
+                    <label className="checkbox checkbox-spaced">
+                      <input
+                        type="checkbox"
+                        checked={formState.autoDropNearConstant}
+                        onChange={(event) =>
+                          setFormState((prev) => ({
+                            ...prev,
+                            autoDropNearConstant: event.target.checked,
+                          }))
+                        }
+                      />
+                      Auto-drop near-constant features after regime filters
+                    </label>
+                  </details>
+                  <details className="advanced">
+                  <summary>Weights & filters</summary>
+                  <div className="fields-grid">
+                    <div className="field">
+                      <label htmlFor="groupReweight">Group reweight</label>
+                      <select
+                        id="groupReweight"
+                        className="input"
+                        value={formState.groupReweight}
+                        onChange={(event) =>
+                          setFormState((prev) => ({
+                            ...prev,
+                            groupReweight: event.target.value as CalibrateFormState["groupReweight"],
+                          }))
+                        }
+                      >
+                        <option value="none">none</option>
+                        <option value="chain">chain snapshots</option>
+                      </select>
+                      <span className="field-hint">
+                        Equalize total TRAIN_FIT weight per chain snapshot (ticker + asof + expiry).
+                      </span>
+                    </div>
+                    <div className="field">
+                      <label htmlFor="maxAbsLogm">Max |log moneyness|</label>
+                      <input
+                        id="maxAbsLogm"
+                        className="input"
+                        inputMode="decimal"
+                        placeholder="0.4"
+                        value={formState.maxAbsLogm}
+                        onChange={(event) =>
+                          setFormState((prev) => ({
+                            ...prev,
+                            maxAbsLogm: event.target.value,
+                          }))
+                        }
+                      />
+                      <span className="field-hint">
+                        Filters rows using log_m_fwd (fallback log_m) threshold.
+                      </span>
+                    </div>
+                  </div>
+                  <label className="checkbox checkbox-spaced">
+                    <input
+                      type="checkbox"
+                      checked={formState.dropPrnExtremes}
+                      onChange={(event) =>
+                        setFormState((prev) => ({
+                          ...prev,
+                          dropPrnExtremes: event.target.checked,
+                        }))
+                      }
+                    />
+                    Drop pRN extremes near 0 or 1
+                  </label>
+                  <div className="fields-grid">
+                    <div className="field">
+                      <label htmlFor="prnEps">pRN epsilon</label>
+                      <input
+                        id="prnEps"
+                        className="input"
+                        inputMode="decimal"
+                        value={formState.prnEps}
+                        onChange={(event) =>
+                          setFormState((prev) => ({
+                            ...prev,
+                            prnEps: event.target.value,
+                          }))
+                        }
+                        disabled={!formState.dropPrnExtremes}
+                      />
+                      <span className="field-hint">
+                        Drops rows when pRN &lt;= eps or &gt;= 1 - eps.
+                      </span>
+                    </div>
                   </div>
                   <span className="field-hint">
-                    Choose which model(s) to train. "Both" runs calibrate first, then mixed model.
+                    Filters apply before split creation and are logged.
                   </span>
+                  </details>
+
+                  {renderBootstrapSection()}
                 </div>
-                <div className="field">
-                  <label htmlFor="tickerIntercepts">Ticker intercepts</label>
-                  <select
-                    id="tickerIntercepts"
-                    className="input"
-                    value={formState.tickerIntercepts}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        tickerIntercepts: event.target.value as CalibrateFormState["tickerIntercepts"],
-                      }))
-                    }
-                  >
-                    <option value="none">none</option>
-                    <option value="all">all</option>
-                    <option value="non_foundation">non_foundation</option>
-                  </select>
-                </div>
-                <div className="field">
-                  <label htmlFor="foundationWeight">Foundation weight</label>
-                  <input
-                    id="foundationWeight"
-                    className="input"
-                    inputMode="decimal"
-                    value={formState.foundationWeight}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        foundationWeight: event.target.value,
-                      }))
-                    }
-                  />
-                </div>
-                <div className="field">
-                  <label htmlFor="metricsTopTickers">Metrics top tickers</label>
-                  <input
-                    id="metricsTopTickers"
-                    className="input"
-                    inputMode="numeric"
-                    value={formState.metricsTopTickers}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        metricsTopTickers: event.target.value,
-                      }))
-                    }
-                  />
-                  <span className="field-hint">
-                    How many top tickers to include in diagnostics.
-                  </span>
-                </div>
-                <div className="field">
-                  <label htmlFor="tickerMinSupport">Ticker min support</label>
-                  <input
-                    id="tickerMinSupport"
-                    className="input"
-                    inputMode="numeric"
-                    value={formState.tickerMinSupport}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        tickerMinSupport: event.target.value,
-                      }))
-                    }
-                  />
-                  <span className="field-hint">
-                    Min TRAIN_FIT rows to keep ticker intercepts (others → OTHER).
-                  </span>
-                </div>
-                <div className="field">
-                  <label htmlFor="tickerMinSupportInteractions">Ticker min support (interactions)</label>
-                  <input
-                    id="tickerMinSupportInteractions"
-                    className="input"
-                    inputMode="numeric"
-                    value={formState.tickerMinSupportInteractions}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        tickerMinSupportInteractions: event.target.value,
-                      }))
-                    }
-                  />
-                  <span className="field-hint">
-                    Stricter support threshold for ticker × logit interactions.
-                  </span>
-                </div>
-              </div>
-              <div className="field field-full-width">
-                <label>Foundation tickers</label>
-                <div className="ticker-actions">
+
+                <div className="actions">
                   <button
-                    type="button"
-                    className="btn-ticker-action"
-                    onClick={() => handleFoundationTickersAction("top5")}
-                    disabled={availableTickers.length === 0}
+                    className="button primary"
+                    type="submit"
+                    disabled={isRunning || anyJobRunning || !formState.datasetPath}
                   >
-                    Top 5
+                    {isRunning ? "Calibrating..." : "Run calibration"}
                   </button>
                   <button
+                    className="button ghost"
                     type="button"
-                    className="btn-ticker-action"
-                    onClick={() => handleFoundationTickersAction("all")}
-                    disabled={availableTickers.length === 0}
+                    disabled={isRunning || anyJobRunning}
+                    onClick={() => setFormState(defaultForm)}
                   >
-                    Select All ({availableTickers.length})
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-ticker-action"
-                    onClick={() => handleFoundationTickersAction("clear")}
-                    disabled={formState.foundationTickers.length === 0}
-                  >
-                    Clear All
+                    Reset
                   </button>
                 </div>
-
-                {tickersFetching && <p className="field-hint">Loading tickers...</p>}
-                {tickersError && <p className="field-hint error-text">{tickersError}</p>}
-
-                {!tickersFetching && availableTickers.length > 0 && (
-                  <div className="ticker-grid">
-                    {availableTickers.map((ticker) => {
-                      const isSelected = formState.foundationTickers.includes(ticker);
-                      return (
-                        <button
-                          key={ticker}
-                          type="button"
-                          className={`ticker-chip ${isSelected ? "selected" : ""}`}
-                          aria-pressed={isSelected}
-                          onClick={() => toggleFoundationTicker(ticker)}
-                        >
-                          {ticker}
-                        </button>
-                      );
-                    })}
+                {runError ? <div className="error">{runError}</div> : null}
+              </>
+            ) : (
+              <>
+                <div className="config-summary auto-summary">
+                  <div>
+                    <span className="meta-label">Dataset</span>
+                    <span>{selectedDataset?.name ?? "None selected"}</span>
                   </div>
-                )}
-
-                <div className="ticker-selection-summary">
-                  Selected: {formState.foundationTickers.length > 0
-                    ? formState.foundationTickers.join(", ")
-                    : "None"}
-                </div>
-
-                <span className="field-hint">
-                  Foundation tickers get upweighted and may get special treatment.
-                </span>
-              </div>
-              <div className="field field-full-width">
-                <label>Train tickers</label>
-                <div className="ticker-actions">
-                  <button
-                    type="button"
-                    className="btn-ticker-action"
-                    onClick={() => handleTrainTickersAction("top5")}
-                    disabled={availableTickers.length === 0}
-                  >
-                    Top 5
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-ticker-action"
-                    onClick={() => handleTrainTickersAction("all")}
-                    disabled={availableTickers.length === 0}
-                  >
-                    Select All ({availableTickers.length})
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-ticker-action"
-                    onClick={() => handleTrainTickersAction("clear")}
-                    disabled={formState.trainTickers.length === 0}
-                  >
-                    Clear All
-                  </button>
-                </div>
-
-                {tickersFetching && <p className="field-hint">Loading tickers...</p>}
-                {tickersError && <p className="field-hint error-text">{tickersError}</p>}
-
-                {!tickersFetching && availableTickers.length > 0 && (
-                  <div className="ticker-grid">
-                    {availableTickers.map((ticker) => {
-                      const isSelected = formState.trainTickers.includes(ticker);
-                      return (
-                        <button
-                          key={ticker}
-                          type="button"
-                          className={`ticker-chip ${isSelected ? "selected" : ""}`}
-                          aria-pressed={isSelected}
-                          onClick={() => toggleTrainTicker(ticker)}
-                        >
-                          {ticker}
-                        </button>
-                      );
-                    })}
+                  <div>
+                    <span className="meta-label">Auto mode</span>
+                    <span>{autoMode === "mixed" ? "Mixed" : "Option-only"}</span>
                   </div>
-                )}
-
-                <div className="ticker-selection-summary">
-                  Selected: {formState.trainTickers.length > 0 ? formState.trainTickers.join(", ") : "None"}
-                </div>
-
-                <span className="field-hint">
-                  Restrict training to a subset of tickers.
-                </span>
-              </div>
-              <label className="checkbox checkbox-spaced">
-                <input
-                  type="checkbox"
-                  checked={formState.tickerXInteractions}
-                  onChange={(event) =>
-                    setFormState((prev) => ({
-                      ...prev,
-                      tickerXInteractions: event.target.checked,
-                    }))
-                  }
-                />
-                Enable per-ticker interactions (ticker × x_logit_prn)
-              </label>
-              </details>
-
-              <details className="advanced">
-              <summary>Calibration & validation</summary>
-                <div className="fields-grid">
-                  <div className="field">
-                    <label htmlFor="calibrate">Calibration</label>
-                    <select
-                      id="calibrate"
-                      className="input"
-                      value={formState.calibrate}
-                      onChange={(event) =>
-                        setFormState((prev) => ({
-                          ...prev,
-                          calibrate: event.target.value as CalibrateFormState["calibrate"],
-                        }))
-                      }
-                    >
-                      <option value="none">none</option>
-                      <option value="platt">platt</option>
-                    </select>
-                  </div>
-                  <div className="field">
-                    <label htmlFor="cGrid">C grid</label>
-                    <input
-                      id="cGrid"
-                      className="input"
-                      value={formState.cGrid}
-                      onChange={(event) =>
-                        setFormState((prev) => ({
-                          ...prev,
-                          cGrid: event.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="field">
-                    <label htmlFor="trainDecay">Train decay half-life</label>
-                    <input
-                      id="trainDecay"
-                      className="input"
-                      inputMode="decimal"
-                      value={formState.trainDecayHalfLifeWeeks}
-                      onChange={(event) =>
-                        setFormState((prev) => ({
-                          ...prev,
-                          trainDecayHalfLifeWeeks: event.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="field">
-                    <label htmlFor="calibFrac">Calib frac of train</label>
-                    <input
-                      id="calibFrac"
-                      className="input"
-                      inputMode="decimal"
-                      value={formState.calibFracOfTrain}
-                      onChange={(event) =>
-                        setFormState((prev) => ({
-                          ...prev,
-                          calibFracOfTrain: event.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="field">
-                    <label htmlFor="fitWeightRenorm">Fit weight renorm</label>
-                    <select
-                      id="fitWeightRenorm"
-                      className="input"
-                      value={formState.fitWeightRenorm}
-                      onChange={(event) =>
-                        setFormState((prev) => ({
-                          ...prev,
-                          fitWeightRenorm:
-                            event.target.value as CalibrateFormState["fitWeightRenorm"],
-                        }))
-                      }
-                    >
-                      <option value="mean1">mean1</option>
-                      <option value="none">none</option>
-                    </select>
-                  </div>
-                  <div className="field">
-                    <label htmlFor="testWeeks">Test weeks</label>
-                    <input
-                      id="testWeeks"
-                      className="input"
-                      inputMode="numeric"
-                      value={formState.testWeeks}
-                      onChange={(event) =>
-                        setFormState((prev) => ({
-                          ...prev,
-                          testWeeks: event.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="field">
-                    <label htmlFor="valWindows">Val windows</label>
-                    <input
-                      id="valWindows"
-                      className="input"
-                      inputMode="numeric"
-                      value={formState.valWindows}
-                      onChange={(event) =>
-                        setFormState((prev) => ({
-                          ...prev,
-                          valWindows: event.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="field">
-                    <label htmlFor="valWindowWeeks">Val window weeks</label>
-                    <input
-                      id="valWindowWeeks"
-                      className="input"
-                      inputMode="numeric"
-                      value={formState.valWindowWeeks}
-                      onChange={(event) =>
-                        setFormState((prev) => ({
-                          ...prev,
-                          valWindowWeeks: event.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="field">
-                    <label htmlFor="nBins">Bins</label>
-                    <input
-                      id="nBins"
-                      className="input"
-                      inputMode="numeric"
-                      value={formState.nBins}
-                      onChange={(event) =>
-                        setFormState((prev) => ({
-                          ...prev,
-                          nBins: event.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="field">
-                    <label htmlFor="eceqBins">ECE-Q bins</label>
-                    <input
-                      id="eceqBins"
-                      className="input"
-                      inputMode="numeric"
-                      value={formState.eceqBins}
-                      onChange={(event) =>
-                        setFormState((prev) => ({
-                          ...prev,
-                          eceqBins: event.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="field">
-                    <label htmlFor="selectionObjective">Selection objective</label>
-                    <select
-                      id="selectionObjective"
-                      className="input"
-                      value={formState.selectionObjective}
-                      onChange={(event) =>
-                        setFormState((prev) => ({
-                          ...prev,
-                          selectionObjective:
-                            event.target.value as CalibrateFormState["selectionObjective"],
-                        }))
-                      }
-                    >
-                      <option value="delta_vs_baseline">delta vs baseline</option>
-                    </select>
-                  </div>
-                  <div className="field">
-                    <label htmlFor="randomState">Random state</label>
-                    <input
-                      id="randomState"
-                      className="input"
-                      inputMode="numeric"
-                      value={formState.randomState}
-                      onChange={(event) =>
-                        setFormState((prev) => ({
-                          ...prev,
-                          randomState: event.target.value,
-                        }))
-                      }
-                    />
+                  <div>
+                    <span className="meta-label">PM dataset</span>
+                    <span>
+                      {autoMode === "mixed" ? selectedAutoPmDataset?.name ?? "None selected" : "Not required"}
+                    </span>
                   </div>
                 </div>
-                <label className="checkbox checkbox-spaced">
-                  <input
-                    type="checkbox"
-                    checked={formState.fallbackToBaselineIfWorse}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        fallbackToBaselineIfWorse: event.target.checked,
-                      }))
-                    }
-                  />
-                  Fallback to baseline if worse than pRN
-                </label>
-                <label className="checkbox checkbox-spaced">
-                  <input
-                    type="checkbox"
-                    checked={formState.autoDropNearConstant}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        autoDropNearConstant: event.target.checked,
-                      }))
-                    }
-                  />
-                  Auto-drop near-constant features after regime filters
-                </label>
-              </details>
-              <details className="advanced">
-              <summary>Weights & filters</summary>
-              <div className="fields-grid">
-                <div className="field">
-                  <label htmlFor="groupReweight">Group reweight</label>
-                  <select
-                    id="groupReweight"
-                    className="input"
-                    value={formState.groupReweight}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        groupReweight: event.target.value as CalibrateFormState["groupReweight"],
-                      }))
-                    }
-                  >
-                    <option value="none">none</option>
-                    <option value="chain">chain snapshots</option>
-                  </select>
-                  <span className="field-hint">
-                    Equalize total TRAIN_FIT weight per chain snapshot (ticker + asof + expiry).
-                  </span>
-                </div>
-                <div className="field">
-                  <label htmlFor="maxAbsLogm">Max |log moneyness|</label>
-                  <input
-                    id="maxAbsLogm"
-                    className="input"
-                    inputMode="decimal"
-                    placeholder="0.4"
-                    value={formState.maxAbsLogm}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        maxAbsLogm: event.target.value,
-                      }))
-                    }
-                  />
-                  <span className="field-hint">
-                    Filters rows using log_m_fwd (fallback log_m) threshold.
-                  </span>
-                </div>
-              </div>
-              <label className="checkbox checkbox-spaced">
-                <input
-                  type="checkbox"
-                  checked={formState.dropPrnExtremes}
-                  onChange={(event) =>
-                    setFormState((prev) => ({
-                      ...prev,
-                      dropPrnExtremes: event.target.checked,
-                    }))
-                  }
-                />
-                Drop pRN extremes near 0 or 1
-              </label>
-              <div className="fields-grid">
-                <div className="field">
-                  <label htmlFor="prnEps">pRN epsilon</label>
-                  <input
-                    id="prnEps"
-                    className="input"
-                    inputMode="decimal"
-                    value={formState.prnEps}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        prnEps: event.target.value,
-                      }))
-                    }
-                    disabled={!formState.dropPrnExtremes}
-                  />
-                  <span className="field-hint">
-                    Drops rows when pRN &lt;= eps or &gt;= 1 - eps.
-                  </span>
-                </div>
-              </div>
-              <span className="field-hint">
-                Filters apply before split creation and are logged.
-              </span>
-              </details>
+                {renderDatasetSection(true)}
+                {renderRegimeSection()}
+                <div className="section-card calibrate-section">
+                  <h3 className="section-heading">Auto-calibrate setup</h3>
+                  <div className="field">
+                    <span className="meta-label">Train mode</span>
+                    <div className="tdays-chips">
+                      <button
+                        type="button"
+                        className={`chip ${autoMode === "option_only" ? "active" : ""}`}
+                        onClick={() => setAutoMode("option_only")}
+                      >
+                        Option-only
+                      </button>
+                      <button
+                        type="button"
+                        className={`chip ${autoMode === "mixed" ? "active" : ""}`}
+                        onClick={() => setAutoMode("mixed")}
+                      >
+                        Mixed (Polymarket + Options)
+                      </button>
+                    </div>
+                    <span className="field-hint">
+                      Uses the options dataset selected above.
+                    </span>
+                  </div>
 
-              <details className="advanced">
-              <summary>Bootstrap confidence intervals</summary>
-              <label className="checkbox checkbox-spaced">
-                <input
-                  type="checkbox"
-                  checked={formState.bootstrapCi}
-                  onChange={(event) =>
-                    setFormState((prev) => ({
-                      ...prev,
-                      bootstrapCi: event.target.checked,
-                    }))
-                  }
-                />
-                Compute bootstrap CIs for delta metrics
-              </label>
-              <div className="fields-grid">
-                <div className="field">
-                  <label htmlFor="bootstrapB">Resamples (B)</label>
-                  <input
-                    id="bootstrapB"
-                    className="input"
-                    inputMode="numeric"
-                    value={formState.bootstrapB}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        bootstrapB: event.target.value,
-                      }))
-                    }
-                    disabled={!formState.bootstrapCi}
-                  />
-                  <span className="field-hint">
-                    Number of bootstrap resamples (default 2000).
-                  </span>
-                </div>
-                <div className="field">
-                  <label htmlFor="bootstrapSeed">Seed</label>
-                  <input
-                    id="bootstrapSeed"
-                    className="input"
-                    inputMode="numeric"
-                    value={formState.bootstrapSeed}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        bootstrapSeed: event.target.value,
-                      }))
-                    }
-                    disabled={!formState.bootstrapCi}
-                  />
-                </div>
-                <div className="field">
-                  <label htmlFor="bootstrapGroup">Group strategy</label>
-                  <select
-                    id="bootstrapGroup"
-                    className="input"
-                    value={formState.bootstrapGroup}
-                    onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        bootstrapGroup: event.target
-                          .value as CalibrateFormState["bootstrapGroup"],
-                      }))
-                    }
-                    disabled={!formState.bootstrapCi}
-                  >
-                    <option value="auto">auto (ticker+date+expiry)</option>
-                    <option value="ticker_day">ticker + date</option>
-                    <option value="day">date only</option>
-                    <option value="iid">iid (no blocking)</option>
-                  </select>
-                  <span className="field-hint">
-                    Block bootstrap groups for correlated data.
-                  </span>
-                </div>
-              </div>
-              </details>
-            </div>
-
-            <div className="actions">
-              <button
-                className="button primary"
-                type="submit"
-                disabled={isRunning || anyJobRunning || !formState.datasetPath}
-              >
-                {isRunning ? "Calibrating..." : "Run calibration"}
-              </button>
-              <button
-                className="button ghost"
-                type="button"
-                disabled={isRunning || anyJobRunning}
-                onClick={() => setFormState(defaultForm)}
-              >
-                Reset
-              </button>
-            </div>
-          {runError ? <div className="error">{runError}</div> : null}
-          </div>
-        </section>
-
-        <section className="panel">
-          <div className="panel-header">
-            <div>
-              <h2>Auto-calibrate</h2>
-              <span className="panel-hint">
-                Enumerate feature combos and promote the best trial.
-              </span>
-            </div>
-          </div>
-          <div className="panel-body">
-            <div className="auto-section">
-              <div className="field">
-                <span className="meta-label">Train mode</span>
-                <div className="tdays-chips">
-                  <button
-                    type="button"
-                    className={`chip ${autoMode === "option_only" ? "active" : ""}`}
-                    onClick={() => setAutoMode("option_only")}
-                  >
-                    Option-only
-                  </button>
-                  <button
-                    type="button"
-                    className={`chip ${autoMode === "mixed" ? "active" : ""}`}
-                    onClick={() => setAutoMode("mixed")}
-                  >
-                    Mixed (Polymarket + Options)
-                  </button>
-                </div>
-                <span className="field-hint">
-                  Uses the options dataset selected above.
-                </span>
-              </div>
-
-              {autoMode === "mixed" ? (
-                <div className="field">
-                  <label htmlFor="autoPmDatasetSelect">Polymarket dataset</label>
-                  <select
-                    id="autoPmDatasetSelect"
-                    className="input"
-                    value={autoPmDatasetPath}
-                    onChange={(event) => setAutoPmDatasetPath(event.target.value)}
-                  >
-                    {pmDatasets.length === 0 ? (
-                      <option value="">No Polymarket datasets available</option>
-                    ) : null}
-                    {pmDatasets.map((dataset) => (
-                      <option key={dataset.path} value={dataset.path}>
-                        {dataset.name}
-                      </option>
-                    ))}
-                  </select>
-                  <span className="field-hint">
-                    Required for mixed mode (decision_features dataset).
-                  </span>
-                  {pmDatasetError ? <div className="error">{pmDatasetError}</div> : null}
-                  {selectedAutoPmDataset ? (
-                    <div className="dataset-meta">
-                      <div>
-                        <span className="meta-label">Last modified</span>
-                        <span>{formatTimestamp(selectedAutoPmDataset.last_modified)}</span>
-                      </div>
-                      <div>
-                        <span className="meta-label">Size</span>
-                        <span>{formatBytes(selectedAutoPmDataset.size_bytes)}</span>
-                      </div>
-                      <div>
-                        <span className="meta-label">Path</span>
-                        <span>{selectedAutoPmDataset.path}</span>
-                      </div>
+                  {autoMode === "mixed" ? (
+                    <div className="field">
+                      <label htmlFor="autoPmDatasetSelect">Polymarket dataset</label>
+                      <select
+                        id="autoPmDatasetSelect"
+                        className="input"
+                        value={autoPmDatasetPath}
+                        onChange={(event) => setAutoPmDatasetPath(event.target.value)}
+                      >
+                        {pmDatasets.length === 0 ? (
+                          <option value="">No Polymarket datasets available</option>
+                        ) : null}
+                        {pmDatasets.map((dataset) => (
+                          <option key={dataset.path} value={dataset.path}>
+                            {dataset.name}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="field-hint">
+                        Required for mixed mode (decision_features dataset).
+                      </span>
+                      {pmDatasetError ? <div className="error">{pmDatasetError}</div> : null}
+                      {selectedAutoPmDataset ? (
+                        <div className="dataset-meta">
+                          <div>
+                            <span className="meta-label">Last modified</span>
+                            <span>{formatTimestamp(selectedAutoPmDataset.last_modified)}</span>
+                          </div>
+                          <div>
+                            <span className="meta-label">Size</span>
+                            <span>{formatBytes(selectedAutoPmDataset.size_bytes)}</span>
+                          </div>
+                          <div>
+                            <span className="meta-label">Path</span>
+                            <span>{selectedAutoPmDataset.path}</span>
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
-              ) : null}
-
-              <div className="actions">
-                <button
-                  className="button primary"
-                  type="button"
-                  disabled={autoIsRunning || anyJobRunning || !formState.datasetPath}
-                  onClick={handleStartAutoCalibration}
-                >
-                  {autoIsRunning ? "Auto-calibrating..." : "Run auto-calibration"}
-                </button>
-              </div>
-              {autoRunError ? <div className="error">{autoRunError}</div> : null}
-            </div>
-
-            {autoProgress ? (
-              <div className="auto-progress">
-                <div className="auto-progress-header">
-                  <div>
-                    <span className="meta-label">Auto calibration</span>
-                    <div>
-                      {autoProgress.stage === "done" ? "Completed" : "Running trials"}
+                <div className="section-card calibrate-section">
+                  <h3 className="section-heading">Foundation & bootstrap</h3>
+                  <div className="fields-grid">
+                    <div className="field">
+                      <label htmlFor="autoFoundationWeight">Foundation weight</label>
+                      <input
+                        id="autoFoundationWeight"
+                        className="input"
+                        inputMode="decimal"
+                        value={formState.foundationWeight}
+                        onChange={(event) =>
+                          setFormState((prev) => ({
+                            ...prev,
+                            foundationWeight: event.target.value,
+                          }))
+                        }
+                      />
+                      <span className="field-hint">
+                        Optional weight applied to foundation tickers.
+                      </span>
                     </div>
                   </div>
-                  {autoIsRunning ? <span className="spinner" /> : null}
-                </div>
-                <p className="auto-progress-message">
-                  Training trial {autoTrialsDone} / {autoTrialsTotal} ({autoTrialsFailed} failed)
-                </p>
-                <progress value={autoTrialsDone} max={autoTrialsTotal || 1} />
-                <div className="auto-progress-details">
-                  <div>
-                    <span className="meta-label">Stage</span>
-                    <span>{autoProgress.stage}</span>
-                  </div>
-                  <div>
-                    <span className="meta-label">Best score</span>
-                    <span>
-                      {autoProgress.best_score_so_far != null
-                        ? autoProgress.best_score_so_far.toFixed(4)
-                        : "—"}
+                  <div className="field field-spaced">
+                    <label>Foundation tickers</label>
+                    <div className="ticker-actions">
+                      <button
+                        type="button"
+                        className="btn-ticker-action"
+                        onClick={() => handleFoundationTickersAction("top5")}
+                        disabled={availableTickers.length === 0}
+                      >
+                        Top 5
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-ticker-action"
+                        onClick={() => handleFoundationTickersAction("all")}
+                        disabled={availableTickers.length === 0}
+                      >
+                        Select All ({availableTickers.length})
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-ticker-action"
+                        onClick={() => handleFoundationTickersAction("clear")}
+                        disabled={formState.foundationTickers.length === 0}
+                      >
+                        Clear All
+                      </button>
+                    </div>
+
+                    {tickersFetching && <p className="field-hint">Loading tickers...</p>}
+                    {tickersError && <p className="field-hint error-text">{tickersError}</p>}
+
+                    {!tickersFetching && availableTickers.length > 0 && (
+                      <div className="ticker-grid">
+                        {availableTickers.map((ticker) => {
+                          const isSelected = formState.foundationTickers.includes(ticker);
+                          return (
+                            <button
+                              key={ticker}
+                              type="button"
+                              className={`ticker-chip ${isSelected ? "selected" : ""}`}
+                              aria-pressed={isSelected}
+                              onClick={() => toggleFoundationTicker(ticker)}
+                            >
+                              {ticker}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    <div className="ticker-selection-summary">
+                      Selected: {formState.foundationTickers.length > 0
+                        ? formState.foundationTickers.join(", ")
+                        : "None"}
+                    </div>
+
+                    <span className="field-hint">
+                      Foundation tickers get upweighted and may get special treatment.
                     </span>
                   </div>
-                  <div>
-                    <span className="meta-label">Failed</span>
-                    <span>{autoTrialsFailed}</span>
-                  </div>
+                  {renderBootstrapSection()}
                 </div>
-                {autoProgress.last_error ? (
-                  <details className="command-details">
-                    <summary>Last error</summary>
-                    <code>{autoProgress.last_error}</code>
-                  </details>
+                <div className="section-card calibrate-section">
+                  <h3 className="section-heading">Run auto-calibration</h3>
+                  <div className="actions">
+                    <button
+                      className="button primary"
+                      type="button"
+                      disabled={autoIsRunning || anyJobRunning || !formState.datasetPath}
+                      onClick={handleStartAutoCalibration}
+                    >
+                      {autoIsRunning ? "Auto-calibrating..." : "Run auto-calibration"}
+                    </button>
+                  </div>
+                  {autoRunError ? <div className="error">{autoRunError}</div> : null}
+                </div>
+
+                {autoProgress ? (
+                  <div className="auto-progress">
+                    <div className="auto-progress-header">
+                      <div>
+                        <span className="meta-label">Auto calibration</span>
+                        <div>
+                          {autoProgress.stage === "done" ? "Completed" : "Running trials"}
+                        </div>
+                      </div>
+                      {autoIsRunning ? <span className="spinner" /> : null}
+                    </div>
+                    <p className="auto-progress-message">
+                      Training trial {autoTrialsDone} / {autoTrialsTotal} ({autoTrialsFailed} failed)
+                    </p>
+                    <progress value={autoTrialsDone} max={autoTrialsTotal || 1} />
+                    <div className="auto-progress-details">
+                      <div>
+                        <span className="meta-label">Stage</span>
+                        <span>{autoProgress.stage}</span>
+                      </div>
+                      <div>
+                        <span className="meta-label">Best score</span>
+                        <span>
+                          {autoProgress.best_score_so_far != null
+                            ? autoProgress.best_score_so_far.toFixed(4)
+                            : "—"}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="meta-label">Failed</span>
+                        <span>{autoTrialsFailed}</span>
+                      </div>
+                    </div>
+                    {autoProgress.last_error ? (
+                      <details className="command-details">
+                        <summary>Last error</summary>
+                        <code>{autoProgress.last_error}</code>
+                      </details>
+                    ) : null}
+                  </div>
                 ) : null}
-              </div>
-            ) : null}
+              </>
+            )}
           </div>
         </section>
 
@@ -3700,18 +3830,20 @@ export default function CalibrateModelsPage() {
         </div>
       </section>
 
-      <section className="panel">
-        <div className="panel-header">
-          <h2>CLI preview</h2>
-          <span className="panel-hint">Mirrors the command that will run.</span>
-        </div>
-        <div className="panel-body">
-          <div className="command-preview">
-            <span className="meta-label">Command</span>
-            <pre>{commandPreview}</pre>
+      {runMode === "manual" ? (
+        <section className="panel">
+          <div className="panel-header">
+            <h2>CLI preview</h2>
+            <span className="panel-hint">Mirrors the command that will run.</span>
           </div>
-        </div>
-      </section>
+          <div className="panel-body">
+            <div className="command-preview">
+              <span className="meta-label">Command</span>
+              <pre>{commandPreview}</pre>
+            </div>
+          </div>
+        </section>
+      ) : null}
     </section>
   );
 }

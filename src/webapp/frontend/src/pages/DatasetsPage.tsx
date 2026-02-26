@@ -1011,6 +1011,10 @@ export default function DatasetsPage() {
 
   return (
     <section className="page datasets-page">
+      <PipelineStatusCard
+        className="page-sticky-meta datasets-meta"
+        activeJobsCount={activeJobs.length}
+      />
       <header className="page-header">
         <div>
           <p className="page-kicker">Option Chain</p>
@@ -1019,10 +1023,6 @@ export default function DatasetsPage() {
             Generate the option-chain dataset that feeds calibration and keep every CLI input tracked in one place.
           </p>
         </div>
-        <PipelineStatusCard
-          className="datasets-meta"
-          activeJobsCount={activeJobs.length}
-        />
       </header>
 
       <div className="datasets-grid">

@@ -1151,6 +1151,10 @@ export default function BacktestsPage() {
 
   return (
     <section className="page backtests-page">
+      <PipelineStatusCard
+        className="page-sticky-meta backtests-meta"
+        activeJobsCount={activeJobs.length}
+      />
       <header className="page-header">
         <div>
           <p className="page-kicker">Backtests</p>
@@ -1160,10 +1164,6 @@ export default function BacktestsPage() {
             Charts are generated for each strike price available in that week.
           </p>
         </div>
-        <PipelineStatusCard
-          className="backtests-meta"
-          activeJobsCount={activeJobs.length}
-        />
       </header>
 
       {/* Controls */}

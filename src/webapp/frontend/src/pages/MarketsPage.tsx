@@ -600,6 +600,7 @@ export default function MarketsPage() {
 
   return (
     <div className="page markets-page">
+      <PipelineStatusCard className="page-sticky-meta" activeJobsCount={activeJobs.length} />
       <header className="page-header">
         <div>
           <p className="page-kicker">Weekly Markets</p>
@@ -609,7 +610,6 @@ export default function MarketsPage() {
             curves — strictly historical, no look-ahead.
           </p>
         </div>
-        <PipelineStatusCard activeJobsCount={activeJobs.length} />
       </header>
 
       <div className="markets-pipeline-grid">

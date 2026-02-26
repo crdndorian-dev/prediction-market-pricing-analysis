@@ -1,9 +1,5 @@
-import {
-  BrowserRouter,
-  NavLink,
-  Route,
-  Routes,
-} from "react-router-dom";
+import { useLayoutEffect, useRef } from "react";
+import { BrowserRouter, NavLink, Navigate, Route, Routes } from "react-router-dom";
 
 import "./App.css";
 import DashboardPage from "./pages/DashboardPage";
@@ -23,6 +19,35 @@ const linkClass = ({ isActive }: { isActive: boolean }) =>
   `nav-link${isActive ? " active" : ""}`;
 
 export default function App() {
+  const navRef = useRef<HTMLElement | null>(null);
+
+  useLayoutEffect(() => {
+    const nav = navRef.current;
+    if (!nav) return;
+
+    const updateNavHeight = () => {
+      document.documentElement.style.setProperty(
+        "--app-nav-height",
+        `${nav.offsetHeight}px`,
+      );
+    };
+
+    updateNavHeight();
+
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(updateNavHeight);
+      observer.observe(nav);
+    }
+
+    window.addEventListener("resize", updateNavHeight);
+
+    return () => {
+      window.removeEventListener("resize", updateNavHeight);
+      observer?.disconnect();
+    };
+  }, []);
+
   return (
     <BrowserRouter>
       <DatasetJobProvider>
@@ -31,7 +56,7 @@ export default function App() {
             <MarketMapJobProvider>
               <MarketsJobProvider>
                 <div className="app-shell">
-                  <nav className="app-nav">
+                  <nav className="app-nav" ref={navRef}>
                     <div className="app-nav-inner">
                       <div className="app-brand">
                         <div>
@@ -48,13 +73,13 @@ export default function App() {
                       <NavLink to="/" end className={linkClass}>
                         Dashboard
                       </NavLink>
-                      <NavLink to="/option-chain" className={linkClass}>
+                      <NavLink to="/option-chain-history-builder" className={linkClass}>
                         Option Chain History Builder
                       </NavLink>
-                      <NavLink to="/polymarket-pipeline" className={linkClass}>
+                      <NavLink to="/polymarket-history-builder" className={linkClass}>
                         Polymarket History Builder
                       </NavLink>
-                      <NavLink to="/calibrate-models" className={linkClass}>
+                      <NavLink to="/calibrate" className={linkClass}>
                         Calibrate
                       </NavLink>
                       <NavLink to="/markets" className={linkClass}>
@@ -71,10 +96,28 @@ export default function App() {
                   <main className="app-main">
                     <Routes>
                       <Route path="/" element={<DashboardPage />} />
-                      <Route path="/option-chain" element={<DatasetsPage />} />
-                      <Route path="/calibrate-models" element={<CalibrateModelsPage />} />
+                      <Route
+                        path="/option-chain-history-builder"
+                        element={<DatasetsPage />}
+                      />
+                      <Route
+                        path="/option-chain"
+                        element={<Navigate to="/option-chain-history-builder" replace />}
+                      />
+                      <Route path="/calibrate" element={<CalibrateModelsPage />} />
+                      <Route
+                        path="/calibrate-models"
+                        element={<Navigate to="/calibrate" replace />}
+                      />
                       <Route path="/markets" element={<MarketsPage />} />
-                      <Route path="/polymarket-pipeline" element={<PolymarketPipelinePage />} />
+                      <Route
+                        path="/polymarket-history-builder"
+                        element={<PolymarketPipelinePage />}
+                      />
+                      <Route
+                        path="/polymarket-pipeline"
+                        element={<Navigate to="/polymarket-history-builder" replace />}
+                      />
                       <Route path="/backtests" element={<BacktestsPage />} />
                       <Route path="/docs" element={<DocumentationPage />} />
                     </Routes>

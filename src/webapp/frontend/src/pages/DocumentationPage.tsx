@@ -1,5 +1,7 @@
 import { Link } from "react-router-dom";
 
+import PipelineStatusCard from "../components/PipelineStatusCard";
+import { useAnyJobRunning } from "../contexts/jobGuard";
 import "./DocumentationPage.css";
 
 type DocPageLink = {
@@ -9,9 +11,17 @@ type DocPageLink = {
 };
 
 const docPages: DocPageLink[] = [
-  { id: "option-chain", label: "Option Chain History Builder", route: "/option-chain" },
-  { id: "polymarket-history", label: "Polymarket History Builder", route: "/polymarket-pipeline" },
-  { id: "calibrate", label: "Calibrate", route: "/calibrate-models" },
+  {
+    id: "option-chain",
+    label: "Option Chain History Builder",
+    route: "/option-chain-history-builder",
+  },
+  {
+    id: "polymarket-history",
+    label: "Polymarket History Builder",
+    route: "/polymarket-history-builder",
+  },
+  { id: "calibrate", label: "Calibrate", route: "/calibrate" },
   { id: "markets", label: "Markets", route: "/markets" },
   { id: "backtests", label: "Backtests", route: "/backtests" },
 ];
@@ -1471,6 +1481,21 @@ const calibrateDoc = (
       </div>
     </div>
 
+    <h3>Run Modes & Layout</h3>
+    <ul>
+      <li>
+        The configuration panel starts with a Manual run vs Auto-calibrate run toggle; only one mode is active at a
+        time.
+      </li>
+      <li>
+        Manual mode exposes the full model configuration, feature selection, and CLI preview. Auto-calibrate mode
+        focuses on trial search settings plus regime/foundation/bootstrapping controls.
+      </li>
+      <li>
+        Latest run output is stacked directly beneath the configuration panel for quick feedback.
+      </li>
+    </ul>
+
     <h3>Base Calibration Model (Stage A)</h3>
     <p>
       The base model is a logistic regression trained on the option‑chain dataset.
@@ -1878,8 +1903,11 @@ const backtestsDoc = (
 );
 
 export default function DocumentationPage() {
+  const { activeJobs } = useAnyJobRunning();
+
   return (
     <section className="page docs">
+      <PipelineStatusCard className="page-sticky-meta" activeJobsCount={activeJobs.length} />
       <header className="page-header docs-header">
         <div>
           <p className="page-kicker">Documentation</p>
