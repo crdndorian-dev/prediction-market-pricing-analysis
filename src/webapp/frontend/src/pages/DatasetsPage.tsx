@@ -23,6 +23,7 @@ import {
 import PipelineStatusCard from "../components/PipelineStatusCard";
 import { useDatasetJob } from "../contexts/datasetJob";
 import { useAnyJobRunning } from "../contexts/jobGuard";
+import { OptionChainDocContent } from "./DocumentationPage";
 import "./DatasetsPage.css";
 
 type DatasetFormState = {
@@ -432,105 +433,18 @@ const countMondaysInRange = (start: string, end: string): number | null => {
   return count;
 };
 
-const buildCommandPreview = (state: DatasetFormState): string => {
-  const args: string[] = [
-    "python",
-    "src/scripts/01-option-chain-build-historic-dataset-v1.0.py",
-  ];
-
-  const addValue = (flag: string, value: string) => {
-    const trimmed = value.trim();
-    if (!trimmed) return;
-    args.push(flag, trimmed);
-  };
-  const addFlag = (flag: string, enabled: boolean) => {
-    if (enabled) args.push(flag);
-  };
-  const addOptionalBool = (flag: string, negFlag: string, value: boolean) => {
-    args.push(value ? flag : negFlag);
-  };
-
-  addValue("--out-dir", state.outDir);
-  addValue("--dataset-name", state.datasetName);
-  addValue("--schedule-mode", state.scheduleMode);
-  addValue("--expiry-weekdays", state.expiryWeekdays);
-  addValue("--asof-weekdays", state.asofWeekdays);
-  addValue("--dte-list", state.dteList);
-  addValue("--dte-min", state.dteMin);
-  addValue("--dte-max", state.dteMax);
-  addValue("--dte-step", state.dteStep);
-  addOptionalBool("--write-snapshot", "--no-write-snapshot", state.writeSnapshot);
-  addOptionalBool("--write-prn-view", "--no-write-prn-view", state.writePrnView);
-  addOptionalBool("--write-train-view", "--no-write-train-view", state.writeTrainView);
-  addOptionalBool("--write-legacy", "--no-write-legacy", state.writeLegacy);
-  addValue("--prn-version", state.prnVersion);
-  addValue("--prn-config-hash", state.prnConfigHash);
-  addValue("--tickers", state.tickers);
-  addValue("--start", state.start);
-  addValue("--end", state.end);
-  addValue("--theta-base-url", state.thetaBaseUrl);
-  addValue("--stock-source", state.stockSource);
-  addValue("--timeout-s", state.timeoutS);
-  addValue("--r", state.riskFreeRate);
-
-  addValue("--max-abs-logm", state.maxAbsLogm);
-  addValue("--max-abs-logm-cap", state.maxAbsLogmCap);
-  addValue("--band-widen-step", state.bandWidenStep);
-  addFlag("--no-adaptive-band", !state.adaptiveBand);
-  addValue("--max-band-strikes", state.maxBandStrikes);
-  addValue("--min-band-strikes", state.minBandStrikes);
-  addValue("--min-band-prn-strikes", state.minBandPrnStrikes);
-
-  addValue("--strike-range", state.strikeRange);
-  addFlag("--no-retry-full-chain", !state.retryFullChain);
-  addFlag("--no-sat-expiry-fallback", !state.saturdayExpiryFallback);
-  addValue("--threads", state.threads);
-
-  addOptionalBool("--prefer-bidask", "--no-prefer-bidask", state.preferBidask);
-  addValue("--min-trade-count", state.minTradeCount);
-  addValue("--min-volume", state.minVolume);
-
-  addValue("--min-chain-used-hard", state.minChainUsedHard);
-  addValue("--max-rel-spread-median-hard", state.maxRelSpreadMedianHard);
-  addFlag("--hard-drop-close-fallback", state.hardDropCloseFallback);
-
-  addValue("--min-prn-train", state.minPrnTrain);
-  addValue("--max-prn-train", state.maxPrnTrain);
-
-  addFlag("--no-split-adjust", !state.splitAdjust);
-
-  addValue("--dividend-source", state.dividendSource);
-  addValue("--dividend-lookback-days", state.dividendLookbackDays);
-  addValue("--dividend-yield-default", state.dividendYieldDefault);
-  addFlag("--no-forward-moneyness", !state.forwardMoneyness);
-
-  addFlag("--no-group-weights", !state.groupWeights);
-  addFlag("--no-ticker-weights", !state.tickerWeights);
-  addFlag("--no-soft-quality-weight", !state.softQualityWeight);
-
-  addValue("--rv-lookback-days", state.rvLookbackDays);
-
-  addOptionalBool("--cache", "--no-cache", state.cache);
-
-  addFlag("--write-drops", state.writeDrops);
-
-  addFlag("--sanity-report", state.sanityReport);
-  addFlag("--sanity-drop", state.sanityDrop);
-  addValue("--sanity-abs-logm-max", state.sanityAbsLogmMax);
-  addValue("--sanity-k-over-s-min", state.sanityKOverSMin);
-  addValue("--sanity-k-over-s-max", state.sanityKOverSMax);
-
-  addFlag("--verbose-skips", state.verboseSkips);
-
-  return args.join(" ");
-};
-
 export default function DatasetsPage() {
   const [formState, setFormState] = useState<DatasetFormState>(defaultForm);
   const [isRunning, setIsRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [runResult, setRunResult] = useState<DatasetRunResponse | null>(null);
-  const [activeLog, setActiveLog] = useState<"stdout" | "stderr">("stdout");
+  const [workspaceTab, setWorkspaceTab] = useState<
+    "run_job" | "run_directory" | "documentation"
+  >("run_job");
+  const [runJobPanel, setRunJobPanel] = useState<"configuration" | "active_run">(
+    "configuration",
+  );
+  const [activeLog, setActiveLog] = useState<"stdout" | "stderr" | null>(null);
   const [storageReady, setStorageReady] = useState(false);
   const { jobStatus, jobId, setJobId, setJobStatus: setGlobalJobStatus } =
     useDatasetJob();
@@ -549,6 +463,7 @@ export default function DatasetsPage() {
     PREVIEW_LIMIT_DEFAULT,
   );
   const [deleteConfirmRun, setDeleteConfirmRun] = useState<string | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [deleteLoadingRun, setDeleteLoadingRun] = useState<string | null>(null);
   const [renamingRunId, setRenamingRunId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState<string>("");
@@ -576,6 +491,10 @@ export default function DatasetsPage() {
     const parsed = normalizeTickers(parseTickers(formState.tickers) ?? []);
     return orderTickers(parsed);
   }, [formState.tickers]);
+  const todayDateString = useMemo(
+    () => new Date().toISOString().slice(0, 10),
+    [],
+  );
   const selectedTickerSet = useMemo(
     () => new Set(selectedTickers),
     [selectedTickers],
@@ -631,10 +550,6 @@ export default function DatasetsPage() {
     expiriesCount && asofCount && resolvedTickersCount
       ? expiriesCount * asofCount * resolvedTickersCount
       : null;
-  const commandPreview = useMemo(
-    () => buildCommandPreview(formState),
-    [formState],
-  );
 
   const updateTickers = useCallback((next: string[]) => {
     const normalized = normalizeTickers(next);
@@ -664,15 +579,6 @@ export default function DatasetsPage() {
   };
 
   useEffect(() => {
-    if (!jobStatus) return;
-    if (jobStatus.result && !jobStatus.result.ok && jobStatus.result.stderr) {
-      setActiveLog("stderr");
-    } else {
-      setActiveLog("stdout");
-    }
-  }, [jobStatus]);
-
-  useEffect(() => {
     refreshDatasetRuns();
   }, [refreshDatasetRuns]);
 
@@ -688,6 +594,13 @@ export default function DatasetsPage() {
       refreshDatasetRuns();
     }
   }, [jobStatus?.status, refreshDatasetRuns]);
+
+  useEffect(() => {
+    if (!jobStatus) return;
+    if (jobStatus.status === "running" || jobStatus.status === "queued") {
+      setRunJobPanel("active_run");
+    }
+  }, [jobStatus?.status]);
 
   const resolvedRange =
     formState.start && formState.end
@@ -737,6 +650,10 @@ export default function DatasetsPage() {
           : "Failed"
         : "Cancelled"
     : "Idle";
+  const isJobInFlight = Boolean(
+    jobStatus && (jobStatus.status === "running" || jobStatus.status === "queued"),
+  );
+  const showNewJobButton = Boolean(jobStatus && !isJobInFlight);
   const datasetNameKebab = toKebabCase(formState.datasetName);
   const trainingDatasetPath =
     currentResult?.out_dir && datasetNameKebab
@@ -827,7 +744,7 @@ export default function DatasetsPage() {
     setRunResult(null);
     setGlobalJobStatus(null);
     setJobId(null);
-    setActiveLog("stdout");
+    setActiveLog(null);
     setIsRunning(true);
 
     try {
@@ -903,6 +820,7 @@ export default function DatasetsPage() {
 
       const status = await startDatasetJob(payload);
       updateJobState(status);
+      setRunJobPanel("active_run");
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
       setRunError(message);
@@ -928,11 +846,12 @@ export default function DatasetsPage() {
     setPreviewTarget(target);
   }, []);
 
-  const handleDeleteRun = async (runDir: string) => {
-    setDeleteLoadingRun(runDir);
-    setDeleteConfirmRun(null);
+  const handleDeleteRun = async (runId: string, runDir: string) => {
+    setDeleteLoadingRun(runId);
     try {
       await deleteDatasetRun(runDir);
+      setDeleteConfirmRun(null);
+      setDeleteConfirmText("");
       if (previewTarget?.path.startsWith(runDir)) {
         setPreviewTarget(null);
       }
@@ -982,6 +901,32 @@ export default function DatasetsPage() {
     }
   };
 
+  const handleStartDateChange = useCallback((value: string) => {
+    setFormState((prev) => {
+      const nextStart = value;
+      const nextEnd =
+        prev.end && nextStart && prev.end < nextStart ? nextStart : prev.end;
+      return {
+        ...prev,
+        start: nextStart,
+        end: nextEnd,
+      };
+    });
+  }, []);
+
+  const handleEndDateChange = useCallback((value: string) => {
+    setFormState((prev) => {
+      const nextEnd = value;
+      const nextStart =
+        prev.start && nextEnd && prev.start > nextEnd ? nextEnd : prev.start;
+      return {
+        ...prev,
+        start: nextStart,
+        end: nextEnd,
+      };
+    });
+  }, []);
+
   const toggleUniverseTicker = useCallback(
     (ticker: string) => {
       const next = selectedTickerSet.has(ticker)
@@ -1009,29 +954,105 @@ export default function DatasetsPage() {
     setCustomTickerInput("");
   }, [customTickerInput, selectedTickers, updateTickers]);
 
+  const handleToggleLog = useCallback((target: "stdout" | "stderr") => {
+    setActiveLog((prev) => (prev === target ? null : target));
+  }, []);
+
+  const handleNewJob = useCallback(() => {
+    setRunJobPanel("configuration");
+    setActiveLog(null);
+    setWorkspaceTab("run_job");
+  }, []);
+  const deleteTargetRun = deleteConfirmRun
+    ? datasetRuns.find((run) => run.id === deleteConfirmRun) ?? null
+    : null;
+  const deleteTargetRunName = deleteTargetRun
+    ? deleteTargetRun.run_dir.split("/").pop() ?? deleteTargetRun.id
+    : null;
+
   return (
     <section className="page datasets-page">
       <PipelineStatusCard
         className="page-sticky-meta datasets-meta"
         activeJobsCount={activeJobs.length}
       />
-      <header className="page-header">
-        <div>
-          <p className="page-kicker">Option Chain</p>
-          <h1 className="page-title">Build the option chain dataset</h1>
-          <p className="page-subtitle">
-            Generate the option-chain dataset that feeds calibration and keep every CLI input tracked in one place.
-          </p>
+      <header className="page-header datasets-page-header">
+        <div className="datasets-title-row">
+          <h1 className="page-title datasets-page-title">
+            Option Chain Dataset Builder
+          </h1>
         </div>
       </header>
 
-      <div className="datasets-grid">
-        <section className="panel">
-          <div className="panel-header">
-            <h2>Run configuration</h2>
-            <span className="panel-hint">
-              Start/end dates are required; everything else can be tuned.
-            </span>
+      <div className="datasets-workspace">
+        <div
+          className="datasets-workspace-tabs"
+          role="tablist"
+          aria-label="Option chain dataset builder workspace"
+        >
+          <button
+            id="datasets-tab-run-job"
+            type="button"
+            role="tab"
+            aria-selected={workspaceTab === "run_job"}
+            aria-controls="datasets-panel-run-job"
+            className={`datasets-workspace-tab ${
+              workspaceTab === "run_job" ? "active" : ""
+            }`}
+            onClick={() => setWorkspaceTab("run_job")}
+          >
+            Run job
+          </button>
+          <button
+            id="datasets-tab-run-directory"
+            type="button"
+            role="tab"
+            aria-selected={workspaceTab === "run_directory"}
+            aria-controls="datasets-panel-run-directory"
+            className={`datasets-workspace-tab ${
+              workspaceTab === "run_directory" ? "active" : ""
+            }`}
+            onClick={() => setWorkspaceTab("run_directory")}
+          >
+            History directory
+          </button>
+          <button
+            id="datasets-tab-documentation"
+            type="button"
+            role="tab"
+            aria-selected={workspaceTab === "documentation"}
+            aria-controls="datasets-panel-documentation"
+            className={`datasets-workspace-tab ${
+              workspaceTab === "documentation" ? "active" : ""
+            }`}
+            onClick={() => setWorkspaceTab("documentation")}
+          >
+            Documentation
+          </button>
+        </div>
+
+        {workspaceTab === "run_job" ? (
+          <div
+            id="datasets-panel-run-job"
+            role="tabpanel"
+            aria-labelledby="datasets-tab-run-job"
+            className="datasets-tab-panel"
+          >
+            <div className="datasets-grid">
+              {runJobPanel === "configuration" ? (
+                <section className="panel">
+          <div className="panel-header datasets-job-config-header">
+            <div>
+              <h2 className="datasets-job-config-title">Job Configuration</h2>
+            </div>
+            <button
+              className="button ghost datasets-config-action-button"
+              type="button"
+              disabled={isRunning}
+              onClick={() => setFormState(defaultForm)}
+            >
+              Reset config
+            </button>
           </div>
           <div className="config-summary">
             <div>
@@ -1063,7 +1084,7 @@ export default function DatasetsPage() {
             </div>
           </div>
           <form className="panel-body" onSubmit={handleSubmit}>
-            <div className="section-card dataset-section">
+            <div className="section-card dataset-section datasets-core-range-section">
               <h3>Core range</h3>
               <div className="inline-fields">
                 <div className="field">
@@ -1073,14 +1094,11 @@ export default function DatasetsPage() {
                     className="input"
                     type="date"
                     min="2023-06-01"
-                    max={new Date().toISOString().slice(0, 10)}
+                    max={todayDateString}
                     required
                     value={formState.start}
                     onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        start: event.target.value,
-                      }))
+                      handleStartDateChange(event.target.value)
                     }
                   />
                 </div>
@@ -1091,19 +1109,16 @@ export default function DatasetsPage() {
                     className="input"
                     type="date"
                     min={formState.start || "2023-06-01"}
-                    max={new Date().toISOString().slice(0, 10)}
+                    max={todayDateString}
                     required
                     value={formState.end}
                     onChange={(event) =>
-                      setFormState((prev) => ({
-                        ...prev,
-                        end: event.target.value,
-                      }))
+                      handleEndDateChange(event.target.value)
                     }
                   />
                 </div>
               </div>
-              <div className="field">
+              <div className="field datasets-ticker-universe-field">
                 <label>Trading universe</label>
                 <div className="ticker-grid">
                   {TRADING_UNIVERSE_TICKERS.map((ticker) => (
@@ -1120,9 +1135,6 @@ export default function DatasetsPage() {
                     </button>
                   ))}
                 </div>
-                <span className="field-hint">
-                  Pick from the core trading universe, then add any extra tickers below.
-                </span>
               </div>
               <div className="field">
                 <label htmlFor="datasetCustomTicker">Add custom tickers</label>
@@ -1142,15 +1154,12 @@ export default function DatasetsPage() {
                   />
                   <button
                     type="button"
-                    className="button light"
+                    className="button ghost datasets-ticker-add-button"
                     onClick={handleAddCustomTicker}
                   >
                     Add
                   </button>
                 </div>
-                <span className="field-hint">
-                  Custom tickers are appended to the selection and can be removed below.
-                </span>
               </div>
               <div className="field">
                 <label>Selected tickers</label>
@@ -1173,19 +1182,12 @@ export default function DatasetsPage() {
                     );
                   })}
                 </div>
-                <span className="field-hint">
-                  Click a ticker to remove it from the selection.
-                </span>
               </div>
             </div>
 
             <div className="section-card dataset-section">
               <h3>Output targets</h3>
               <div className="inline-fields">
-                <div className="field">
-                  <label>Output directory</label>
-                  <div className="field-value">{formState.outDir}</div>
-                </div>
                 <div className="field">
                   <label htmlFor="datasetName">Dataset name</label>
                   <input
@@ -1220,72 +1222,78 @@ export default function DatasetsPage() {
                 </div>
               </div>
               <div className="inline-fields">
-                <div className="field">
+                <div className="field datasets-output-targets-field">
                   <label>Outputs to generate</label>
-                  <label className="checkbox">
-                    <input
-                      type="checkbox"
-                      checked={formState.writeTrainView}
+                  <div className="datasets-output-targets" role="group" aria-label="Outputs to generate">
+                    <button
+                      type="button"
+                      className="ticker-chip datasets-output-chip selected locked"
                       disabled
-                      readOnly
-                    />
-                    training-{datasetNameKebab || "{name}"}.csv
-                  </label>
-                  <label className="checkbox">
-                    <input
-                      type="checkbox"
-                      checked={formState.writeSnapshot}
-                      onChange={(event) =>
+                      title="Training output is always generated"
+                    >
+                      Training
+                    </button>
+                    <button
+                      type="button"
+                      className={`ticker-chip datasets-output-chip ${
+                        formState.writeSnapshot ? "selected" : ""
+                      }`}
+                      aria-pressed={formState.writeSnapshot}
+                      onClick={() =>
                         setFormState((prev) => ({
                           ...prev,
-                          writeSnapshot: event.target.checked,
+                          writeSnapshot: !prev.writeSnapshot,
                         }))
                       }
-                    />
-                    snapshot-{datasetNameKebab || "{name}"}.csv
-                  </label>
-                  <label className="checkbox">
-                    <input
-                      type="checkbox"
-                      checked={formState.writePrnView}
-                      onChange={(event) =>
+                    >
+                      Snapshot
+                    </button>
+                    <button
+                      type="button"
+                      className={`ticker-chip datasets-output-chip ${
+                        formState.writePrnView ? "selected" : ""
+                      }`}
+                      aria-pressed={formState.writePrnView}
+                      onClick={() =>
                         setFormState((prev) => ({
                           ...prev,
-                          writePrnView: event.target.checked,
+                          writePrnView: !prev.writePrnView,
                         }))
                       }
-                    />
-                    prn-view-{datasetNameKebab || "{name}"}.csv
-                  </label>
-                  <label className="checkbox">
-                    <input
-                      type="checkbox"
-                      checked={formState.writeLegacy}
-                      onChange={(event) =>
+                    >
+                      pRN View
+                    </button>
+                    <button
+                      type="button"
+                      className={`ticker-chip datasets-output-chip ${
+                        formState.writeLegacy ? "selected" : ""
+                      }`}
+                      aria-pressed={formState.writeLegacy}
+                      onClick={() =>
                         setFormState((prev) => ({
                           ...prev,
-                          writeLegacy: event.target.checked,
+                          writeLegacy: !prev.writeLegacy,
                         }))
                       }
-                    />
-                    legacy-{datasetNameKebab || "{name}"}.csv
-                  </label>
-                  <label
-                    className="checkbox"
-                    title="Written as drops-{name}.csv"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={formState.writeDrops}
-                      onChange={(event) =>
+                    >
+                      Legacy
+                    </button>
+                    <button
+                      type="button"
+                      className={`ticker-chip datasets-output-chip ${
+                        formState.writeDrops ? "selected" : ""
+                      }`}
+                      aria-pressed={formState.writeDrops}
+                      onClick={() =>
                         setFormState((prev) => ({
                           ...prev,
-                          writeDrops: event.target.checked,
+                          writeDrops: !prev.writeDrops,
                         }))
                       }
-                    />
-                    drops-{datasetNameKebab || "{name}"}.csv
-                  </label>
+                    >
+                      Drops
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1423,7 +1431,9 @@ export default function DatasetsPage() {
               ) : null}
             </div>
 
-            <details className="advanced">
+            <div className="section-card dataset-section datasets-settings-section">
+              <h3>Settings</h3>
+              <details className="advanced">
               <summary>Market data & runtime</summary>
               <div className="fields-grid">
                 <div className="field">
@@ -1644,7 +1654,7 @@ export default function DatasetsPage() {
                       }))
                     }
                   />
-                  Adaptive band (disable with <code>--no-adaptive-band</code>)
+                  Adaptive band
                 </label>
               </div>
             </details>
@@ -2036,36 +2046,36 @@ export default function DatasetsPage() {
                   Verbose skips
                 </label>
               </div>
-            </details>
+              </details>
+            </div>
 
             {runError ? <div className="error">{runError}</div> : null}
 
             <div className="actions">
               <button
-                className="button primary"
+                className="button primary datasets-config-action-button"
                 type="submit"
                 disabled={isRunning || anyJobRunning}
               >
-                {isRunning ? "Building dataset..." : "Run dataset build"}
-              </button>
-              <button
-                className="button ghost"
-                type="button"
-                disabled={isRunning}
-                onClick={() => setFormState(defaultForm)}
-              >
-                Reset
+                {isRunning ? "Running job..." : "Run job"}
               </button>
             </div>
           </form>
         </section>
-
-        <section className="panel">
+              ) : (
+                <section className="panel">
           <div className="panel-header">
-            <h2>Latest run output</h2>
-            <span className="panel-hint">
-              Captures stdout/stderr from the dataset script.
-            </span>
+            <div>
+              <h2>Active Run</h2>
+              <span className="panel-hint">
+                Captures stdout/stderr from the dataset script.
+              </span>
+            </div>
+            {showNewJobButton ? (
+              <button className="button light" type="button" onClick={handleNewJob}>
+                New job
+              </button>
+            ) : null}
           </div>
           <div className="panel-body">
             <div className="run-shell">
@@ -2228,7 +2238,8 @@ export default function DatasetsPage() {
                           activeLog === "stdout" ? "active" : ""
                         }`}
                         type="button"
-                        onClick={() => setActiveLog("stdout")}
+                        aria-pressed={activeLog === "stdout"}
+                        onClick={() => handleToggleLog("stdout")}
                       >
                         stdout
                       </button>
@@ -2237,20 +2248,28 @@ export default function DatasetsPage() {
                           activeLog === "stderr" ? "active" : ""
                         }`}
                         type="button"
-                        onClick={() => setActiveLog("stderr")}
+                        aria-pressed={activeLog === "stderr"}
+                        onClick={() => handleToggleLog("stderr")}
                       >
                         stderr
                       </button>
                     </div>
                     <div className="log-block">
-                      <span className="meta-label">
-                        {activeLog === "stdout" ? "stdout" : "stderr"}
-                      </span>
-                      <pre>
-                        {activeLog === "stdout"
-                          ? stdoutText || "No stdout captured."
-                          : stderrText || "No stderr captured."}
-                      </pre>
+                      {activeLog ? (
+                        <>
+                          <span className="meta-label">{activeLog}</span>
+                          <pre>
+                            {activeLog === "stdout"
+                              ? stdoutText || "No stdout captured."
+                              : stderrText || "No stderr captured."}
+                          </pre>
+                        </>
+                      ) : (
+                        <div className="log-empty-state">
+                          Select <strong>stdout</strong> or <strong>stderr</strong>{" "}
+                          to view logs.
+                        </div>
+                      )}
                     </div>
                     {currentResult?.command ? (
                       <details className="command-details">
@@ -2263,16 +2282,21 @@ export default function DatasetsPage() {
               </div>
             </div>
           </div>
-        </section>
-      </div>
-
-      <section className="panel dataset-registry-panel">
-        <div className="panel-header">
+                </section>
+              )}
+            </div>
+          </div>
+        ) : workspaceTab === "run_directory" ? (
+          <div
+            id="datasets-panel-run-directory"
+            role="tabpanel"
+            aria-labelledby="datasets-tab-run-directory"
+            className="datasets-tab-panel"
+          >
+            <section className="panel dataset-registry-panel">
+        <div className="panel-header datasets-job-config-header">
           <div>
-            <h2>Dataset registry</h2>
-            <span className="panel-hint">
-              Preview any CSV, rename the run directory, and clean out stale exports.
-            </span>
+            <h2 className="datasets-job-config-title">History Directory</h2>
           </div>
         </div>
         <div className="panel-body dataset-registry-body">
@@ -2415,40 +2439,16 @@ export default function DatasetsPage() {
                       <button
                         type="button"
                         className="button ghost danger small"
-                        onClick={() => setDeleteConfirmRun(run.id)}
+                        onClick={() => {
+                          setDeleteConfirmRun(run.id);
+                          setDeleteConfirmText("");
+                        }}
                         disabled={deleteLoadingRun === run.id}
                       >
                         {deleteLoadingRun === run.id
                           ? "Deleting…"
                           : "Delete dataset"}
                       </button>
-                      {deleteConfirmRun === run.id ? (
-                        <div className="dataset-delete-confirm inline">
-                          <p>
-                            Permanently delete <strong>{runName}</strong> and all its files?
-                          </p>
-                          <div className="dataset-delete-actions">
-                            <button
-                              type="button"
-                              className="button danger small"
-                              onClick={() => handleDeleteRun(run.run_dir)}
-                              disabled={deleteLoadingRun === run.id}
-                            >
-                              {deleteLoadingRun === run.id
-                                ? "Deleting…"
-                                : "Delete"}
-                            </button>
-                            <button
-                              type="button"
-                              className="button ghost small"
-                              onClick={() => setDeleteConfirmRun(null)}
-                              disabled={deleteLoadingRun === run.id}
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
-                      ) : null}
                     </div>
                     {/* ── Collapsible Drawer ────────────────────────────────────────
                         Hidden by default via the `hidden` attribute.
@@ -2644,20 +2644,189 @@ export default function DatasetsPage() {
             )}
           </div>
         </div>
-      </section>
-
-      <section className="panel">
-        <div className="panel-header">
-          <h2>CLI preview</h2>
-          <span className="panel-hint">Mirrors the command that will run.</span>
-        </div>
-        <div className="panel-body">
-          <div className="command-preview">
-            <span className="meta-label">Command</span>
-            <pre>{commandPreview}</pre>
+            </section>
+          </div>
+        ) : (
+          <div
+            id="datasets-panel-documentation"
+            role="tabpanel"
+            aria-labelledby="datasets-tab-documentation"
+            className="datasets-tab-panel"
+          >
+            <section className="panel datasets-documentation-tab-panel">
+              <div className="panel-header datasets-job-config-header">
+                <div>
+                  <h2 className="datasets-job-config-title">
+                    Documentation
+                  </h2>
+                </div>
+              </div>
+              <div className="panel-body datasets-documentation-body">
+                <section className="section-card datasets-doc-subsection">
+                  <h3 className="datasets-doc-subsection-title">
+                    Configuration Guide
+                  </h3>
+                  <div className="datasets-doc-description">
+                    <div className="datasets-doc-description-block">
+                      <h4>Core Range</h4>
+                      <p>
+                        Core Range defines which observations the builder will
+                        attempt to create. Start date and End date set the
+                        overall time window and the date pickers keep the range
+                        valid by preventing impossible selections and aligning
+                        the second date when needed. Trading universe contains
+                        the quick-select ticker set and each chip toggles that
+                        ticker on or off in the request. Add custom tickers lets
+                        you append symbols that are not in the default set and
+                        the input accepts comma or space separated values. The
+                        Selected tickers row shows the final ticker list that
+                        will be used and clicking a selected chip removes that
+                        symbol from the run.
+                      </p>
+                    </div>
+                    <div className="datasets-doc-description-block">
+                      <h4>Output Targets</h4>
+                      <p>
+                        Output Targets controls how files are named and which
+                        CSV views are written. Dataset name is required and
+                        becomes the normalized folder and filename suffix for the
+                        run output. pRN version stores a version label alongside
+                        the generated data so downstream analysis can identify
+                        which pRN view specification was used. Outputs to
+                        generate lets you toggle the optional CSV views while
+                        keeping Training always enabled because it is the main
+                        calibration dataset. Snapshot, pRN View, Legacy, and
+                        Drops can be enabled or disabled depending on whether
+                        you need compact snapshots, the pRN-oriented export, the
+                        legacy format, or a file of dropped rows.
+                      </p>
+                    </div>
+                    <div className="datasets-doc-description-block">
+                      <h4>Snapshot Schedule</h4>
+                      <p>
+                        Snapshot Schedule determines how the date range is
+                        interpreted and how snapshot dates are generated inside
+                        that range. The schedule mode selector switches between
+                        a weekly workflow and an expiry range workflow. In
+                        weekly mode the builder anchors work to week windows. In
+                        expiry range mode the start and end values are treated
+                        as expiry dates and Expiry weekdays tells the builder
+                        which expiry weekdays to include. Observation weekdays
+                        defines which as-of weekdays to sample before expiry.
+                        DTE list can override weekday scheduling with explicit
+                        days-to-expiry targets, and the DTE min, DTE max, and
+                        DTE step inputs define a generated DTE range when you
+                        want a regular interval instead of a manual list.
+                      </p>
+                    </div>
+                    <div className="datasets-doc-description-block">
+                      <h4>Settings</h4>
+                      <p>
+                        Settings groups the advanced accordion sections that
+                        refine data sourcing, filtering, curve construction, and
+                        diagnostics. Market Data and Runtime inputs control the
+                        data endpoint, stock source preference, timeout, risk
+                        free rate, and threading behavior. Band Selection and
+                        Training inputs tune log-m limits, band widening, band
+                        strike thresholds, pRN training bounds, and adaptive
+                        band behavior. Option Chain and Expiry inputs adjust
+                        strike range handling, retry behavior, Saturday expiry
+                        fallback, and split adjustment. Liquidity and Filters
+                        inputs set trade count, volume, spread, chain usage, and
+                        quote selection thresholds. Dividend, Weights, and
+                        Volatility inputs control dividend assumptions, realized
+                        volatility lookback, forward moneyness usage, and
+                        weighting toggles. Cache and Sanity inputs control cache
+                        usage, sanity report generation, row dropping rules, and
+                        verbose skip output. These sections are optional and if
+                        left unchanged the builder runs with the default values.
+                      </p>
+                    </div>
+                  </div>
+                </section>
+                <section className="section-card datasets-doc-subsection">
+                  <h3 className="datasets-doc-subsection-title">
+                    Output Row Description
+                  </h3>
+                  <OptionChainDocContent className="datasets-doc-embedded" />
+                </section>
+              </div>
+            </section>
+          </div>
+        )}
+      </div>
+      {deleteTargetRun ? (
+        <div
+          className="dataset-delete-modal-overlay"
+          onClick={() => {
+            if (deleteLoadingRun === deleteTargetRun.id) return;
+            setDeleteConfirmRun(null);
+            setDeleteConfirmText("");
+          }}
+        >
+          <div
+            className="dataset-delete-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="dataset-delete-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="dataset-delete-modal-header">
+              <h3 id="dataset-delete-modal-title">Delete dataset directory</h3>
+              <p>
+                This permanently deletes{" "}
+                <span className="dataset-delete-modal-code">
+                  {deleteTargetRunName}
+                </span>{" "}
+                and all exported files.
+              </p>
+            </div>
+            <div className="dataset-delete-modal-body">
+              <label htmlFor="datasetDeleteConfirmInput">
+                Type <strong>DELETE</strong> to confirm
+              </label>
+              <input
+                id="datasetDeleteConfirmInput"
+                className="input"
+                type="text"
+                value={deleteConfirmText}
+                onChange={(event) => setDeleteConfirmText(event.target.value)}
+                placeholder="DELETE"
+                autoFocus
+                disabled={deleteLoadingRun === deleteTargetRun.id}
+              />
+            </div>
+            <div className="dataset-delete-modal-actions">
+              <button
+                type="button"
+                className="button ghost"
+                onClick={() => {
+                  setDeleteConfirmRun(null);
+                  setDeleteConfirmText("");
+                }}
+                disabled={deleteLoadingRun === deleteTargetRun.id}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="button danger dataset-delete-modal-confirm"
+                onClick={() =>
+                  handleDeleteRun(deleteTargetRun.id, deleteTargetRun.run_dir)
+                }
+                disabled={
+                  deleteConfirmText !== "DELETE" ||
+                  deleteLoadingRun === deleteTargetRun.id
+                }
+              >
+                {deleteLoadingRun === deleteTargetRun.id
+                  ? "Deleting…"
+                  : "Delete permanently"}
+              </button>
+            </div>
           </div>
         </div>
-      </section>
+      ) : null}
     </section>
   );
 }

@@ -1,4 +1,5 @@
-import { Link } from "react-router-dom";
+import { useEffect, useRef } from "react";
+import { Link, useLocation } from "react-router-dom";
 
 import PipelineStatusCard from "../components/PipelineStatusCard";
 import { useAnyJobRunning } from "../contexts/jobGuard";
@@ -26,7 +27,7 @@ const docPages: DocPageLink[] = [
   { id: "backtests", label: "Backtests", route: "/backtests" },
 ];
 
-const optionChainDoc = (
+export const optionChainDoc = (
   <>
     <p>
       The Option Chain History Builder creates the historical option-chain dataset
@@ -75,16 +76,16 @@ const optionChainDoc = (
     <h3>Page Layout</h3>
     <ul>
       <li>
-        Run configuration: set dates, tickers, outputs, and advanced parameters.
+        Page header: <code>Option Chain Dataset Builder</code> with a Documentation button that links back to this section.
       </li>
       <li>
-        Latest run output: live job status, progress, logs, and stop controls.
+        Run job tab: a Configuration panel (dates, tickers, outputs, advanced settings) with Reset config at the top and Run job at the bottom.
       </li>
       <li>
-        Dataset registry: browse, preview, rename, and delete past runs.
+        Active Run panel replaces Configuration after a run starts and shows status, progress, stop controls, and stdout/stderr log toggles (hidden until selected).
       </li>
       <li>
-        CLI preview: the exact command that will run with your current settings.
+        Run directory tab: browse, preview, rename, and delete past runs.
       </li>
     </ul>
 
@@ -93,8 +94,9 @@ const optionChainDoc = (
       <li>Pick a start/end date and select tickers.</li>
       <li>Name the dataset and choose which CSV outputs to write.</li>
       <li>Adjust schedule and advanced settings if needed.</li>
-      <li>Click Run dataset build and monitor progress.</li>
-      <li>Review logs and open the generated CSVs in the registry.</li>
+      <li>Click Run job to switch from Configuration to Active Run and monitor progress.</li>
+      <li>Select stdout or stderr to inspect logs (click again to hide the log view).</li>
+      <li>When the run finishes, click New job to return to Configuration or switch to Run directory to inspect exports.</li>
       <li>Use the training CSV for calibration or export it elsewhere.</li>
     </ol>
 
@@ -180,7 +182,7 @@ const optionChainDoc = (
     <h3>Advanced Settings</h3>
     <p>
       Each accordion matches an advanced section of the CLI. If you do not expand
-      or change these, the defaults are used. The CLI preview reflects any changes.
+      or change these, the defaults are used.
     </p>
 
     <div className="docs-split">
@@ -1214,6 +1216,127 @@ const optionChainDoc = (
   </>
 );
 
+const simplifyFetchComputationText = (raw: string): string => {
+  let text = raw.replace(/\s+/g, " ").trim();
+
+  // Drop implementation provenance references (file paths, line refs, etc.).
+  text = text.replace(/\s*Source:\s*.*$/i, "");
+
+  // Replace endpoint-level wording with plain-language descriptions.
+  text = text.replace(
+    /yfinance\s*\(Yahoo Finance\)\s*or\s*Theta\s*stock\/history\/eod/gi,
+    "the configured stock price source",
+  );
+  text = text.replace(
+    /yfinance\s*or\s*Theta\s*stock\/history\/eod/gi,
+    "the configured stock price source",
+  );
+  text = text.replace(
+    /Theta\s*stock\/history\/eod/gi,
+    "the stock price source",
+  );
+  text = text.replace(
+    /Theta\s*option\/history\/eod/gi,
+    "the option-chain data source",
+  );
+
+  // Make some common implementation shorthand read more clearly.
+  text = text.replace(/\bCLI\/config value\b/gi, "Configured value");
+  text = text.replace(/\bConfig\/CLI value\b/gi, "Configured value");
+
+  // Normalize spacing around punctuation after removals.
+  text = text
+    .replace(/\s+([,.;:])/g, "$1")
+    .replace(/\(\s+/g, "(")
+    .replace(/\s+\)/g, ")")
+    .trim();
+
+  return text;
+};
+
+const escapeHtml = (value: string): string =>
+  value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+const escapeRegExp = (value: string): string =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const formatFetchComputationCellHtml = (
+  text: string,
+  fieldNames: string[],
+): string => {
+  let escaped = escapeHtml(text);
+
+  const pipeSequencePlaceholders: string[] = [];
+  escaped = escaped.replace(
+    /\b[A-Za-z_][A-Za-z0-9_]*(?:\|[A-Za-z_][A-Za-z0-9_]*)+\b/g,
+    (sequence) => {
+      const placeholder = `__DOC_CODE_SEQ_${pipeSequencePlaceholders.length}__`;
+      pipeSequencePlaceholders.push(`<code>${sequence}</code>`);
+      return placeholder;
+    },
+  );
+
+  if (fieldNames.length === 0) {
+    return escaped.replace(/__DOC_CODE_SEQ_(\d+)__/g, (_match, index) => {
+      return pipeSequencePlaceholders[Number(index)] ?? "";
+    });
+  }
+
+  const sorted = [...fieldNames].sort((a, b) => b.length - a.length);
+  const tokenPattern = sorted.map(escapeRegExp).join("|");
+  const pattern = new RegExp(
+    `(^|[^A-Za-z0-9_])(${tokenPattern})(?=$|[^A-Za-z0-9_])`,
+    "g",
+  );
+
+  const withFieldCodes = escaped.replace(
+    pattern,
+    (_match, prefix: string, token: string) => {
+      return `${prefix}<code>${token}</code>`;
+    },
+  );
+
+  return withFieldCodes.replace(/__DOC_CODE_SEQ_(\d+)__/g, (_match, index) => {
+    return pipeSequencePlaceholders[Number(index)] ?? "";
+  });
+};
+
+export function OptionChainDocContent({ className }: { className?: string }) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+
+    const rows = root.querySelectorAll<HTMLTableRowElement>(
+      ".docs-table tbody tr",
+    );
+    const fieldNames = Array.from(rows)
+      .map((row) =>
+        row.querySelector<HTMLElement>("td:first-child code")
+          ?.textContent?.trim(),
+      )
+      .filter((value): value is string => Boolean(value));
+
+    rows.forEach((row) => {
+      const cells = row.querySelectorAll<HTMLTableCellElement>("td");
+      if (cells.length < 3) return;
+      const fetchCell = cells[2];
+      const simplified = simplifyFetchComputationText(fetchCell.textContent ?? "");
+      fetchCell.innerHTML = formatFetchComputationCellHtml(simplified, fieldNames);
+    });
+  }, []);
+
+  return (
+    <div ref={rootRef} className={className}>
+      {optionChainDoc}
+    </div>
+  );
+}
+
 const polymarketHistoryDoc = (
   <>
     <p>
@@ -1904,6 +2027,18 @@ const backtestsDoc = (
 
 export default function DocumentationPage() {
   const { activeJobs } = useAnyJobRunning();
+  const location = useLocation();
+
+  useEffect(() => {
+    if (!location.hash) return;
+    const targetId = decodeURIComponent(location.hash.slice(1));
+    const scrollToTarget = () => {
+      document.getElementById(targetId)?.scrollIntoView({ block: "start" });
+    };
+    scrollToTarget();
+    const rafId = window.requestAnimationFrame(scrollToTarget);
+    return () => window.cancelAnimationFrame(rafId);
+  }, [location.hash]);
 
   return (
     <section className="page docs">
@@ -1938,7 +2073,7 @@ export default function DocumentationPage() {
                   Open Page
                 </Link>
               </div>
-              {page.id === "option-chain" ? optionChainDoc : null}
+              {page.id === "option-chain" ? <OptionChainDocContent /> : null}
               {page.id === "polymarket-history" ? polymarketHistoryDoc : null}
               {page.id === "calibrate" ? calibrateDoc : null}
               {page.id === "markets" ? marketsDoc : null}

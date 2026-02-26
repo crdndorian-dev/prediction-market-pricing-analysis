@@ -344,6 +344,31 @@
   color: var(--ink-900);
 }
 
+.docs-section#option-chain .docs-table {
+  table-layout: fixed;
+}
+
+.docs-section#option-chain .docs-table th:nth-child(1),
+.docs-section#option-chain .docs-table td:nth-child(1) {
+  width: 22%;
+}
+
+.docs-section#option-chain .docs-table th:nth-child(2),
+.docs-section#option-chain .docs-table td:nth-child(2) {
+  width: 33%;
+}
+
+.docs-section#option-chain .docs-table th:nth-child(3),
+.docs-section#option-chain .docs-table td:nth-child(3) {
+  width: 45%;
+}
+
+.docs-section#option-chain .docs-table td code,
+.docs-section#option-chain .docs-table th code {
+  white-space: normal;
+  word-break: break-word;
+}
+
 .docs-screenshot {
   color: var(--ink-500);
   font-size: var(--text-xs);
