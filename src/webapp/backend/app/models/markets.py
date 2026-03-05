@@ -70,6 +70,8 @@ class MarketsSummaryResponse(BaseModel):
     week_monday: Optional[str]
     week_sunday: Optional[str]
     last_refresh_utc: Optional[str]
+    last_snapshot_date: Optional[str] = None
+    snapshot_rows_appended: Optional[int] = None
     trading_universe_tickers: List[str] = Field(
         default_factory=list,
         description="Tickers from the active weekly_markets.csv trading universe.",

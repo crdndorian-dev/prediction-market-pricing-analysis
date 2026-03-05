@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 
 import {
   getBarsByStrike,
@@ -706,6 +707,7 @@ export default function BacktestsPage() {
 
   // Run selection
   const [barRuns, setBarRuns] = useState<BarRun[]>([]);
+  const [barRunsStatus, setBarRunsStatus] = useState<"loading" | "ready" | "error">("loading");
   const [selectedBarRun, setSelectedBarRun] = useState<string>("");
 
   // Result
@@ -721,6 +723,9 @@ export default function BacktestsPage() {
   const [availableStrikesError, setAvailableStrikesError] = useState<string | null>(null);
   const strikeCacheRef = useRef<Map<string, StrikeSeries[]>>(new Map());
   const lastAutoRunKeyRef = useRef<string>("");
+
+  const hasHistoryRuns = barRunsStatus === "ready" && barRuns.length > 0;
+  const noHistoryRuns = barRunsStatus === "ready" && barRuns.length === 0;
 
   const resetStrikeSelection = useCallback(() => {
     setSelectedStrike(null);
@@ -772,9 +777,23 @@ export default function BacktestsPage() {
       setEndDate((prev) => prev || manifestEnd);
     };
 
+    setBarRunsStatus("loading");
     listBarRuns()
       .then((payload) => {
         setBarRuns(payload.runs);
+        setBarRunsStatus("ready");
+
+        if (payload.runs.length === 0) {
+          resetStrikeSelection();
+          setTradingWeeks([]);
+          setTradingWeeksError(null);
+          setTradingWeeksLoading(false);
+          setStartDate("");
+          setEndDate("");
+          setSelectedBarRun("");
+          return;
+        }
+
         applyManifestDates(payload.runs[0]?.manifest);
 
         const manifestTickers = payload.runs[0]?.manifest?.tickers;
@@ -792,13 +811,15 @@ export default function BacktestsPage() {
       })
       .catch((err) => {
         console.error("Failed to load bar runs:", err);
+        setBarRuns([]);
+        setBarRunsStatus("error");
         setFallbackDates();
       });
-  }, []);
+  }, [resetStrikeSelection]);
 
   // Load trading weeks for selected ticker/run
   useEffect(() => {
-    if (!selectedTicker) {
+    if (!selectedTicker || !hasHistoryRuns) {
       setTradingWeeks([]);
       setTradingWeeksError(null);
       setTradingWeeksLoading(false);
@@ -856,7 +877,7 @@ export default function BacktestsPage() {
     return () => {
       cancelled = true;
     };
-  }, [resetStrikeSelection, selectedBarRun, selectedTicker]);
+  }, [resetStrikeSelection, selectedBarRun, selectedTicker, hasHistoryRuns]);
 
   const tradingWeeksByStart = useMemo(() => {
     return new Map(tradingWeeks.map((week) => [week.start_date, week]));
@@ -943,12 +964,14 @@ export default function BacktestsPage() {
   }, [startDate, endDate]);
 
   const canRun =
-    !!selectedTicker && !!startDate && !!endDate && rangeValidation.ok
+    hasHistoryRuns
+    && !!selectedTicker && !!startDate && !!endDate && rangeValidation.ok
     && !!selectedTradingWeek && !tradingWeeksError
     && progress !== "fetching" && progress !== "theta";
 
   const strikesSelectionReady =
-    !!selectedTicker && !!startDate && !!endDate && rangeValidation.ok
+    hasHistoryRuns
+    && !!selectedTicker && !!startDate && !!endDate && rangeValidation.ok
     && !!selectedTradingWeek && !tradingWeeksError;
 
   useEffect(() => {
@@ -1155,119 +1178,115 @@ export default function BacktestsPage() {
         className="page-sticky-meta backtests-meta"
         activeJobsCount={activeJobs.length}
       />
-      <header className="page-header">
-        <div>
-          <p className="page-kicker">Backtests</p>
-          <h1 className="page-title">Polymarket price explorer — per strike</h1>
-          <p className="page-subtitle">
-            Select a ticker from the trading universe and a trading week (Mon–Fri).
-            Charts are generated for each strike price available in that week.
-          </p>
+      <header className="page-header backtests-page-header">
+        <div className="backtests-title-row">
+          <h1 className="page-title backtests-page-title">Backtests</h1>
         </div>
       </header>
 
-      {/* Controls */}
-      <div className="backtests-controls">
-        <div className="backtests-controls-left">
-          {/* Ticker selector */}
-          <section className="panel ticker-panel">
-            <div className="panel-header">
-              <div>
-                <h2>Ticker</h2>
-                <span className="panel-hint">Pick one from the trading universe.</span>
-              </div>
-              {selectedTicker && (
-                <span className="meta-pill">Selected: {selectedTicker}</span>
-              )}
-            </div>
-            <div className="panel-body">
-              <div
-                className={`ticker-universe ${!TRADING_UNIVERSE_TICKERS.length ? "is-disabled" : ""}`}
-                role="group"
-              >
-                {TRADING_UNIVERSE_TICKERS.map((ticker) => {
-                  const isActive = ticker === selectedTicker;
-                  return (
-                    <button
-                      key={ticker}
-                      type="button"
-                      className={`ticker-pill ${isActive ? "is-active" : ""}`}
-                      onClick={() => setSelectedTicker(ticker)}
-                      aria-pressed={isActive}
-                    >
-                      {ticker}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </section>
-
-          {/* Available strikes */}
-          <section className="panel strikes-panel">
-            <div className="panel-header">
-              <div>
-                <h2>Strikes</h2>
-                <span className="panel-hint">
-                  {strikesSelectionReady
-                    ? "Available strikes for the selected week."
-                    : "Select a trading week to load strikes."}
-                </span>
-              </div>
-              {availableStrikes.length > 0 && (
-                <span className="meta-pill">
-                  {availableStrikes.length} strike
-                  {availableStrikes.length !== 1 ? "s" : ""}
-                </span>
-              )}
-            </div>
-            <div className="panel-body">
-              {availableStrikesLoading && (
-                <div className="empty">Loading strikes…</div>
-              )}
-              {!availableStrikesLoading && availableStrikesError && (
-                <div className="error-banner">{availableStrikesError}</div>
-              )}
-              {!availableStrikesLoading
-                && !availableStrikesError
-                && availableStrikes.length === 0 && (
-                <div className="empty">
-                  {strikesSelectionReady
-                    ? "No strikes found for this ticker/week."
-                    : "Select a ticker and trading week to see available strikes."}
+      <div className="backtests-workspace">
+        {/* Controls */}
+        <div className="backtests-controls">
+          <div className="backtests-controls-left">
+            {/* Ticker selector */}
+            <section className="panel ticker-panel">
+              <div className="panel-header">
+                <div>
+                  <h2>Ticker</h2>
+                  <span className="panel-hint">Pick one from the trading universe.</span>
                 </div>
-              )}
-              {availableStrikes.length > 0 && (
-                <div className="strike-list" role="group">
-                  {availableStrikes.map((series) => {
-                    const seriesKey = buildStrikeKey(series);
-                    const isActive = selectedStrike === seriesKey;
+                {selectedTicker && (
+                  <span className="meta-pill">Selected: {selectedTicker}</span>
+                )}
+              </div>
+              <div className="panel-body">
+                <div
+                  className={`ticker-universe ${!TRADING_UNIVERSE_TICKERS.length ? "is-disabled" : ""}`}
+                  role="group"
+                >
+                  {TRADING_UNIVERSE_TICKERS.map((ticker) => {
+                    const isActive = ticker === selectedTicker;
                     return (
                       <button
-                        key={seriesKey}
+                        key={ticker}
                         type="button"
-                        className={`strike-pill ${isActive ? "is-active" : ""}`}
-                        onClick={() => setSelectedStrike(seriesKey)}
+                        className={`ticker-pill ${isActive ? "is-active" : ""}`}
+                        onClick={() => setSelectedTicker(ticker)}
                         aria-pressed={isActive}
                       >
-                        ${series.strike_label}
-                        {series.market_id && (
-                          <span className="strike-pill-market">mkt {series.market_id}</span>
-                        )}
-                        <span className="strike-pill-pts">
-                          {series.total_points} pts
-                        </span>
+                        {ticker}
                       </button>
                     );
                   })}
                 </div>
-              )}
-            </div>
-          </section>
-        </div>
+              </div>
+            </section>
 
-        {/* Trading week + run selector */}
-        <section className="panel date-panel">
+            {/* Available strikes */}
+            <section className="panel strikes-panel">
+              <div className="panel-header">
+                <div>
+                  <h2>Strikes</h2>
+                  <span className="panel-hint">
+                    {strikesSelectionReady
+                      ? "Available strikes for the selected week."
+                      : "Select a trading week to load strikes."}
+                  </span>
+                </div>
+                {availableStrikes.length > 0 && (
+                  <span className="meta-pill">
+                    {availableStrikes.length} strike
+                    {availableStrikes.length !== 1 ? "s" : ""}
+                  </span>
+                )}
+              </div>
+              <div className="panel-body">
+                {availableStrikesLoading && (
+                  <div className="empty">Loading strikes…</div>
+                )}
+                {!availableStrikesLoading && availableStrikesError && (
+                  <div className="error-banner">{availableStrikesError}</div>
+                )}
+                {!availableStrikesLoading
+                  && !availableStrikesError
+                  && availableStrikes.length === 0 && (
+                  <div className="empty">
+                    {strikesSelectionReady
+                      ? "No strikes found for this ticker/week."
+                      : "Select a ticker and trading week to see available strikes."}
+                  </div>
+                )}
+                {availableStrikes.length > 0 && (
+                  <div className="strike-list" role="group">
+                    {availableStrikes.map((series) => {
+                      const seriesKey = buildStrikeKey(series);
+                      const isActive = selectedStrike === seriesKey;
+                      return (
+                        <button
+                          key={seriesKey}
+                          type="button"
+                          className={`strike-pill ${isActive ? "is-active" : ""}`}
+                          onClick={() => setSelectedStrike(seriesKey)}
+                          aria-pressed={isActive}
+                        >
+                          ${series.strike_label}
+                          {series.market_id && (
+                            <span className="strike-pill-market">mkt {series.market_id}</span>
+                          )}
+                          <span className="strike-pill-pts">
+                            {series.total_points} pts
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </section>
+          </div>
+
+          {/* Trading week + run selector */}
+          <section className="panel date-panel">
           <div className="panel-header">
             <div>
               <h2>Date range</h2>
@@ -1388,10 +1407,21 @@ export default function BacktestsPage() {
             {rangeValidation.error && (
               <div className="error-banner">{rangeValidation.error}</div>
             )}
-            <div className="actions backtests-actions">
-              <span className="empty">
-                Runs automatically when a strike and date range are selected.
-              </span>
+            <div className={`actions backtests-actions${noHistoryRuns ? " is-empty" : ""}`}>
+              {noHistoryRuns ? (
+                <>
+                  <span className="empty">
+                    No Polymarket history runs found. Build one to enable backtests.
+                  </span>
+                  <Link to="/polymarket-history-builder" className="button light">
+                    Go to Polymarket History Builder
+                  </Link>
+                </>
+              ) : (
+                <span className="empty">
+                  Runs automatically when a strike and date range are selected.
+                </span>
+              )}
             </div>
           </div>
         </section>
@@ -1518,6 +1548,7 @@ export default function BacktestsPage() {
           Select a ticker, trading week, and strike to generate per-strike charts.
         </div>
       )}
+      </div>
     </section>
   );
 }

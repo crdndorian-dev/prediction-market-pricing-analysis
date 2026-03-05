@@ -17,6 +17,8 @@ VALID_MODEL_KINDS = ["calibrate", "mixed", "both"]
 VALID_TRAINING_MODES = ["pretrain", "finetune", "joint", "two_stage"]
 VALID_FEATURE_SOURCES = ["options", "pm", "both"]
 VALID_MIXED_MODELS = ["residual", "blend"]
+VALID_GROUP_REWEIGHT_MODES = ["none", "chain_snapshot", "chain"]  # "chain" alias for backwards compatibility
+VALID_VAL_SPLIT_MODES = ["week_group", "row_tail"]
 
 # Deprecated arguments (v1.5/v1.6 that v2.0 doesn't accept)
 DEPRECATED_ARGS = {
@@ -61,6 +63,24 @@ def validate_mixed_model(value: Optional[str]) -> List[str]:
     if value is not None and value not in VALID_MIXED_MODELS:
         errors.append(
             f"Invalid mixed_model: '{value}'. Must be one of {VALID_MIXED_MODELS}"
+        )
+    return errors
+
+
+def validate_group_reweight(value: Optional[str]) -> List[str]:
+    errors = []
+    if value is not None and value not in VALID_GROUP_REWEIGHT_MODES:
+        errors.append(
+            f"Invalid group_reweight: '{value}'. Must be one of {VALID_GROUP_REWEIGHT_MODES}"
+        )
+    return errors
+
+
+def validate_val_split_mode(value: Optional[str]) -> List[str]:
+    errors = []
+    if value is not None and value not in VALID_VAL_SPLIT_MODES:
+        errors.append(
+            f"Invalid val_split_mode: '{value}'. Must be one of {VALID_VAL_SPLIT_MODES}"
         )
     return errors
 
@@ -118,6 +138,10 @@ def validate_payload(payload: Any) -> List[str]:
 
     if hasattr(payload, 'mixed_model'):
         errors.extend(validate_mixed_model(payload.mixed_model))
+    if hasattr(payload, 'group_reweight'):
+        errors.extend(validate_group_reweight(payload.group_reweight))
+    if hasattr(payload, 'val_split_mode'):
+        errors.extend(validate_val_split_mode(payload.val_split_mode))
 
     # Validate inter-argument constraints
     errors.extend(validate_inter_arg_constraints(payload))
@@ -156,6 +180,23 @@ def get_cli_schema() -> Dict[str, Any]:
             "choices": VALID_MIXED_MODELS,
             "default": "residual",
             "description": "Mixed model type (residual or blend)",
+        },
+        "group_reweight": {
+            "type": "enum",
+            "choices": VALID_GROUP_REWEIGHT_MODES,
+            "default": "none",
+            "description": "Group reweighting mode for base calibration.",
+        },
+        "val_split_mode": {
+            "type": "enum",
+            "choices": VALID_VAL_SPLIT_MODES,
+            "default": "week_group",
+            "description": "Validation split strategy inside training window.",
+        },
+        "skip_test_metrics": {
+            "type": "bool",
+            "default": False,
+            "description": "Skip test metric computation (useful for auto-search trials).",
         },
         "deprecated": DEPRECATED_ARGS,
         "constraints": CONSTRAINTS,

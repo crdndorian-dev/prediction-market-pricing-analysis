@@ -12,14 +12,18 @@ import sys
 import time
 import queue
 import threading
+import logging
 from collections import deque
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
-from typing import Deque, Dict, List, Optional, Set, Tuple
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 from uuid import uuid4
 from urllib.parse import urlparse
 
 from app.models.datasets import (
+    DatasetBackfillRange,
+    DatasetBackfillRequest,
+    DatasetBackfillResponse,
     DatasetFileSummary,
     DatasetJobProgress,
     DatasetJobStatus,
@@ -28,6 +32,17 @@ from app.models.datasets import (
     DatasetRunRequest,
     DatasetRunResponse,
     DatasetRunSummary,
+)
+from app.services.process_runtime import (
+    ManagedProcessHandle,
+    clear_runtime_file,
+    is_process_alive,
+    managed_handle_from_runtime_payload,
+    read_runtime_file,
+    runtime_payload_for_handle,
+    spawn_managed_process,
+    terminate_managed_process,
+    write_runtime_file,
 )
 
 BASE_DIR = Path(__file__).resolve().parents[5]
@@ -38,6 +53,30 @@ DEFAULT_OUT_NAME = "pRN__history__mon_thu__PM10__v1.6.0.csv"
 DEFAULT_DROPS_NAME = "pRN__history__mon_thu__drops__v1.6.0.csv"
 DEFAULT_THETA_JAR = "ThetaTerminalv3.jar"
 TRAINING_META_NAME = "training_selection.json"
+BUILD_META_NAME = "dataset_build_meta.json"
+DEFAULT_TRADE_FOCUS_TICKERS = [
+    "AAPL",
+    "GOOGL",
+    "MSFT",
+    "META",
+    "AMZN",
+    "PLTR",
+    "NVDA",
+    "NFLX",
+    "OPEN",
+    "TSLA",
+]
+
+SCRIPTS_DIR = BASE_DIR / "src" / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+try:
+    from option_chain_weighting_v3 import apply_weighting_v3, drop_weight_columns, WEIGHTING_VERSION
+except Exception:
+    apply_weighting_v3 = None
+    drop_weight_columns = None
+    WEIGHTING_VERSION = "v3"
 
 
 def _unique_dirs(paths: List[Path]) -> List[Path]:
@@ -58,6 +97,10 @@ DATASET_BASE_DIRS = _unique_dirs(
         BASE_DIR / "data" / "raw" / "option-chain",
     ],
 )
+LOGGER = logging.getLogger(__name__)
+DELETE_TERM_TIMEOUT_S = 5.0
+DELETE_KILL_TIMEOUT_S = 5.0
+DELETE_QUIET_WINDOW_S = 1.0
 
 
 def _resolve_project_path(path_value: str) -> Path:
@@ -70,6 +113,245 @@ def _resolve_project_path(path_value: str) -> Path:
     except ValueError as exc:
         raise ValueError("Path must be inside the project root.") from exc
     return path
+
+
+def _write_build_meta(
+    run_dir: Path,
+    payload: DatasetRunRequest,
+    cmd: List[str],
+    out_name: str,
+    drops_name: str,
+) -> None:
+    meta = {
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "command": cmd,
+        "payload": payload.dict(exclude_none=True),
+        "out_name": out_name,
+        "drops_name": drops_name,
+    }
+    try:
+        (run_dir / BUILD_META_NAME).write_text(json.dumps(meta, indent=2))
+    except Exception:
+        return
+
+
+def _read_build_meta(run_dir: Path) -> Optional[Dict[str, Any]]:
+    path = run_dir / BUILD_META_NAME
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _find_training_file_path(run_dir: Path) -> Optional[Path]:
+    for tf in sorted(run_dir.glob("training-*.csv")):
+        if tf.is_file():
+            return tf
+    legacy_target = run_dir / f"{run_dir.name}.csv"
+    if legacy_target.exists() and _is_csv_file(legacy_target):
+        return legacy_target
+    meta = _read_training_selection(run_dir)
+    if meta:
+        training_name = meta.get("training_file")
+        if training_name:
+            candidate = run_dir / training_name
+            if candidate.exists() and _is_csv_file(candidate):
+                return candidate
+    default_train_view = run_dir / "train_view.csv"
+    if default_train_view.exists() and _is_csv_file(default_train_view):
+        return default_train_view
+    for item in sorted(run_dir.iterdir()):
+        if not _is_csv_file(item):
+            continue
+        if "drop" in item.name.lower():
+            continue
+        return item
+    return None
+
+
+def _scan_csv_date_range(path: Path, candidates: List[str]) -> tuple[Optional[date], Optional[date], Optional[str]]:
+    try:
+        import pandas as pd  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("pandas is required to scan dataset ranges.") from exc
+
+    header = pd.read_csv(path, nrows=0)
+    columns = list(header.columns)
+    column = next((c for c in candidates if c in columns), None)
+    if not column:
+        return None, None, None
+
+    min_date: Optional[date] = None
+    max_date: Optional[date] = None
+    for chunk in pd.read_csv(path, usecols=[column], chunksize=200_000):
+        series = pd.to_datetime(chunk[column], errors="coerce").dt.date.dropna()
+        if series.empty:
+            continue
+        chunk_min = series.min()
+        chunk_max = series.max()
+        if min_date is None or (chunk_min and chunk_min < min_date):
+            min_date = chunk_min
+        if max_date is None or (chunk_max and chunk_max > max_date):
+            max_date = chunk_max
+    return min_date, max_date, column
+
+
+def _scan_table_date_range(path: Path, candidates: List[str]) -> tuple[Optional[date], Optional[date], Optional[str]]:
+    if path.suffix.lower() == ".parquet":
+        try:
+            import pandas as pd  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("pandas is required to scan dataset ranges.") from exc
+        df = pd.read_parquet(path, columns=None)
+        column = next((c for c in candidates if c in df.columns), None)
+        if not column:
+            return None, None, None
+        series = pd.to_datetime(df[column], errors="coerce").dt.date.dropna()
+        if series.empty:
+            return None, None, column
+        return series.min(), series.max(), column
+    return _scan_csv_date_range(path, candidates)
+
+
+def _scan_csv_unique_values(path: Path, column: str, limit: int = 1000) -> List[str]:
+    try:
+        import pandas as pd  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("pandas is required to scan dataset values.") from exc
+
+    unique: Set[str] = set()
+    for chunk in pd.read_csv(path, usecols=[column], chunksize=200_000):
+        values = chunk[column].dropna().astype(str).str.strip()
+        for value in values:
+            if not value:
+                continue
+            unique.add(value.upper())
+        if len(unique) >= limit:
+            break
+    return sorted(unique)
+
+
+def _parse_cmd_value(cmd: List[str], flag: str) -> Optional[str]:
+    if flag in cmd:
+        idx = cmd.index(flag)
+        if idx + 1 < len(cmd):
+            return str(cmd[idx + 1])
+    prefix = f"{flag}="
+    for item in cmd:
+        if item.startswith(prefix):
+            return item[len(prefix):]
+    return None
+
+
+def _resolve_weighting_params(
+    payload: Optional[DatasetRunRequest],
+    cmd: Optional[List[str]],
+) -> Dict[str, object]:
+    params: Dict[str, object] = {
+        "ticker_reweight_mode": "none",
+        "ticker_reweight_alpha_min": 0.5,
+        "ticker_reweight_alpha_max": 2.0,
+        "trade_focus_beta": 1.0,
+        "trade_focus_tickers": None,
+    }
+    if payload:
+        if getattr(payload, "ticker_reweight_mode", None):
+            params["ticker_reweight_mode"] = str(payload.ticker_reweight_mode)
+        if getattr(payload, "ticker_reweight_alpha_min", None) is not None:
+            params["ticker_reweight_alpha_min"] = float(payload.ticker_reweight_alpha_min)
+        if getattr(payload, "ticker_reweight_alpha_max", None) is not None:
+            params["ticker_reweight_alpha_max"] = float(payload.ticker_reweight_alpha_max)
+        if getattr(payload, "trade_focus_beta", None) is not None:
+            params["trade_focus_beta"] = float(payload.trade_focus_beta)
+        if getattr(payload, "trade_focus_tickers", None):
+            params["trade_focus_tickers"] = str(payload.trade_focus_tickers)
+
+    if cmd:
+        mode = _parse_cmd_value(cmd, "--ticker-reweight-mode")
+        if mode:
+            params["ticker_reweight_mode"] = mode
+        alpha_min = _parse_cmd_value(cmd, "--ticker-reweight-alpha-min")
+        if alpha_min:
+            params["ticker_reweight_alpha_min"] = float(alpha_min)
+        alpha_max = _parse_cmd_value(cmd, "--ticker-reweight-alpha-max")
+        if alpha_max:
+            params["ticker_reweight_alpha_max"] = float(alpha_max)
+        trade_beta = _parse_cmd_value(cmd, "--trade-focus-beta")
+        if trade_beta:
+            params["trade_focus_beta"] = float(trade_beta)
+        trade_tickers = _parse_cmd_value(cmd, "--trade-focus-tickers")
+        if trade_tickers:
+            params["trade_focus_tickers"] = trade_tickers
+
+    if params.get("trade_focus_tickers") in {None, ""}:
+        beta = float(params.get("trade_focus_beta", 1.0))
+        if beta != 1.0:
+            params["trade_focus_tickers"] = ",".join(DEFAULT_TRADE_FOCUS_TICKERS)
+
+    return params
+
+
+def _reweight_training_df(df, params: Dict[str, object]):
+    if apply_weighting_v3 is None or drop_weight_columns is None:
+        raise RuntimeError("Option-chain weighting module is unavailable.")
+    cleaned = drop_weight_columns(df)
+    return apply_weighting_v3(
+        cleaned,
+        ticker_reweight_mode=str(params["ticker_reweight_mode"]),
+        ticker_reweight_alpha_min=float(params["ticker_reweight_alpha_min"]),
+        ticker_reweight_alpha_max=float(params["ticker_reweight_alpha_max"]),
+        trade_focus_beta=float(params["trade_focus_beta"]),
+        trade_focus_tickers=params.get("trade_focus_tickers"),
+        strict=True,
+    )
+
+
+POLYMARKET_RUNS_DIR = BASE_DIR / "src" / "data" / "raw" / "polymarket" / "weekly_history" / "runs"
+
+
+def _resolve_polymarket_run_dir(run_id: str) -> Path:
+    run_dir = POLYMARKET_RUNS_DIR / run_id
+    if not run_dir.exists() or not run_dir.is_dir():
+        raise FileNotFoundError(f"Polymarket run not found: {run_id}")
+    return run_dir
+
+
+def _find_polymarket_dim_market(run_dir: Path) -> Path:
+    candidates = [
+        run_dir / "dim_market_weekly.csv",
+        run_dir / f"{run_dir.name}-dim-market-weekly.csv",
+        run_dir / "dim_market.csv",
+        run_dir / f"{run_dir.name}-dim-market.csv",
+        run_dir / "dim_market.parquet",
+        run_dir / f"{run_dir.name}-dim-market.parquet",
+    ]
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    raise FileNotFoundError(f"dim_market not found in run directory: {run_dir}")
+
+
+def _missing_ranges(
+    required_start: date,
+    required_end: date,
+    existing_start: date,
+    existing_end: date,
+) -> List[Tuple[date, date]]:
+    ranges: List[Tuple[date, date]] = []
+    if required_start < existing_start:
+        left_end = min(required_end, existing_start - timedelta(days=1))
+        if required_start <= left_end:
+            ranges.append((required_start, left_end))
+    if required_end > existing_end:
+        right_start = max(required_start, existing_end + timedelta(days=1))
+        if right_start <= required_end:
+            ranges.append((right_start, required_end))
+    return ranges
 
 
 def _dataset_base_dirs(existing_only: bool = True) -> List[Path]:
@@ -275,7 +557,8 @@ def _build_dataset_command(payload: DatasetRunRequest) -> Tuple[List[str], Path,
 
     _add_value(cmd, "--dataset-name", dataset_name if dataset_name else None)
     if dataset_name:
-        _add_value(cmd, "--run-dir-name", dataset_name)
+        run_dir_override = (payload.run_dir_name or "").strip()
+        _add_value(cmd, "--run-dir-name", run_dir_override or dataset_name)
     else:
         _add_value(cmd, "--run-dir-name", payload.run_dir_name)
     _add_value(cmd, "--schedule-mode", payload.schedule_mode)
@@ -336,6 +619,11 @@ def _build_dataset_command(payload: DatasetRunRequest) -> Tuple[List[str], Path,
     _add_flag(cmd, "--no-group-weights", payload.no_group_weights)
     _add_flag(cmd, "--no-ticker-weights", payload.no_ticker_weights)
     _add_flag(cmd, "--no-soft-quality-weight", payload.no_soft_quality_weight)
+    _add_value(cmd, "--ticker-reweight-mode", getattr(payload, "ticker_reweight_mode", None))
+    _add_value(cmd, "--ticker-reweight-alpha-min", getattr(payload, "ticker_reweight_alpha_min", None))
+    _add_value(cmd, "--ticker-reweight-alpha-max", getattr(payload, "ticker_reweight_alpha_max", None))
+    _add_value(cmd, "--trade-focus-beta", getattr(payload, "trade_focus_beta", None))
+    _add_value(cmd, "--trade-focus-tickers", getattr(payload, "trade_focus_tickers", None))
 
     _add_value(cmd, "--rv-lookback-days", payload.rv_lookback_days)
 
@@ -650,10 +938,125 @@ def get_dataset_file_path(path_value: str) -> Path:
     return path
 
 
+def _kill_runtime_for_dataset_run(
+    run_dir: Path,
+    *,
+    deletion_attempt: int,
+) -> Tuple[bool, str]:
+    runtime_payload = read_runtime_file(run_dir)
+    if not runtime_payload:
+        LOGGER.info(
+            "runtime_handle_found service=datasets path=%s found=false deletion_attempt=%s",
+            run_dir,
+            deletion_attempt,
+        )
+        return True, "no_runtime_handle"
+
+    handle = managed_handle_from_runtime_payload(run_dir, runtime_payload)
+    if handle is None:
+        LOGGER.warning(
+            "runtime_handle_found service=datasets path=%s found=true valid=false deletion_attempt=%s",
+            run_dir,
+            deletion_attempt,
+        )
+        clear_runtime_file(run_dir)
+        return True, "runtime_handle_invalid"
+
+    LOGGER.info(
+        "runtime_handle_found service=datasets path=%s found=true pid=%s pgid=%s deletion_attempt=%s",
+        run_dir,
+        handle.pid,
+        handle.pgid,
+        deletion_attempt,
+    )
+    result = terminate_managed_process(
+        handle,
+        term_timeout_s=DELETE_TERM_TIMEOUT_S,
+        kill_timeout_s=DELETE_KILL_TIMEOUT_S,
+    )
+    if result.term_sent:
+        LOGGER.info(
+            "group_term_sent service=datasets path=%s pid=%s pgid=%s deletion_attempt=%s",
+            run_dir,
+            result.pid,
+            result.pgid,
+            deletion_attempt,
+        )
+    if result.kill_sent:
+        LOGGER.info(
+            "group_kill_sent service=datasets path=%s pid=%s pgid=%s deletion_attempt=%s",
+            run_dir,
+            result.pid,
+            result.pgid,
+            deletion_attempt,
+        )
+    if result.ok:
+        clear_runtime_file(run_dir)
+        return True, result.reason
+
+    still_alive = is_process_alive(result.pid)
+    return False, f"{result.reason};alive={still_alive}"
+
+
+def _delete_dataset_dir_with_quiescence(
+    target_dir: Path,
+    *,
+    retries: int = 1,
+) -> None:
+    for attempt in range(1, retries + 2):
+        if target_dir.exists():
+            try:
+                shutil.rmtree(target_dir)
+            except FileNotFoundError:
+                pass
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to delete dataset run '{target_dir}': {exc}"
+                ) from exc
+
+        if target_dir.exists():
+            continue
+
+        time.sleep(DELETE_QUIET_WINDOW_S)
+        if not target_dir.exists():
+            LOGGER.info(
+                "delete_completed service=datasets path=%s deletion_attempt=%s",
+                target_dir,
+                attempt,
+            )
+            return
+
+        LOGGER.warning(
+            "delete_refill_detected service=datasets path=%s deletion_attempt=%s",
+            target_dir,
+            attempt,
+        )
+        kill_ok, kill_reason = _kill_runtime_for_dataset_run(
+            target_dir,
+            deletion_attempt=attempt,
+        )
+        if not kill_ok:
+            raise RuntimeError(
+                f"process_still_alive for dataset run '{target_dir}' after delete attempt "
+                f"{attempt}: {kill_reason}"
+            )
+
+    raise RuntimeError(f"directory_refilled for dataset run '{target_dir}'.")
+
+
 def delete_dataset_run(run_dir_path: str) -> DatasetRunSummary:
     target_dir = _resolve_dataset_directory(run_dir_path)
     summary = _run_summary_from_dir(target_dir)
-    shutil.rmtree(target_dir)
+    LOGGER.info("delete_requested service=datasets path=%s", target_dir)
+    cancelled_job_ids = JOB_MANAGER.cancel_jobs_for_run_dir(target_dir)
+    if cancelled_job_ids and not _wait_for_jobs_to_stop(cancelled_job_ids):
+        raise RuntimeError("kill_timeout: dataset run cancellation is still in progress.")
+    kill_ok, kill_reason = _kill_runtime_for_dataset_run(target_dir, deletion_attempt=0)
+    if not kill_ok:
+        raise RuntimeError(f"process_still_alive: {kill_reason}")
+    if not target_dir.exists():
+        return summary
+    _delete_dataset_dir_with_quiescence(target_dir, retries=1)
     # Clean up empty parent directory (legacy nested structure)
     parent = target_dir.parent
     base_dirs = {b.resolve() for b in DATASET_BASE_DIRS}
@@ -820,6 +1223,7 @@ def run_dataset(payload: DatasetRunRequest) -> DatasetRunResponse:
         run_dir = _extract_run_dir_from_output(result.stdout)
         if run_dir and run_dir.exists():
             _write_training_selection(run_dir, payload, out_name)
+            _write_build_meta(run_dir, payload, cmd, out_name, drops_name)
 
     return _build_run_response(
         ok=result.returncode == 0,
@@ -831,6 +1235,158 @@ def run_dataset(payload: DatasetRunRequest) -> DatasetRunResponse:
         duration_s=duration_s,
         command=cmd,
         write_drops=bool(payload.write_drops),
+    )
+
+
+def backfill_dataset_for_polymarket(payload: DatasetBackfillRequest) -> DatasetBackfillResponse:
+    start_time = time.monotonic()
+    run_dir = _resolve_dataset_directory(payload.run_dir)
+    training_path = _find_training_file_path(run_dir)
+    if training_path is None:
+        raise ValueError("Training dataset not found in the selected run directory.")
+
+    polymarket_run_dir = _resolve_polymarket_run_dir(payload.polymarket_run_id)
+    dim_market_path = _find_polymarket_dim_market(polymarket_run_dir)
+    required_start, required_end, _ = _scan_table_date_range(
+        dim_market_path,
+        ["expiry_date_utc", "expiry_date", "resolution_time_utc"],
+    )
+    if not required_start or not required_end:
+        raise ValueError("Could not resolve expiry range from Polymarket dim_market.")
+
+    existing_start, existing_end, _ = _scan_csv_date_range(
+        training_path,
+        [
+            "expiry_date",
+            "option_expiration_used",
+            "option_expiration_requested",
+            "expiry_close_date_used",
+            "week_friday",
+        ],
+    )
+    if not existing_start or not existing_end:
+        raise ValueError("Could not resolve expiry range from the training dataset.")
+
+    ranges = _missing_ranges(required_start, required_end, existing_start, existing_end)
+    if not ranges:
+        duration_s = round(time.monotonic() - start_time, 3)
+        return DatasetBackfillResponse(
+            ok=True,
+            backfilled=False,
+            run_dir=str(run_dir.relative_to(BASE_DIR)),
+            training_file=str(training_path.relative_to(BASE_DIR)),
+            used_defaults=False,
+            required_start=required_start.isoformat(),
+            required_end=required_end.isoformat(),
+            existing_start=existing_start.isoformat(),
+            existing_end=existing_end.isoformat(),
+            backfill_ranges=[],
+            rows_before=None,
+            rows_after=None,
+            rows_added=None,
+            message="Training dataset already covers the required expiry range.",
+            duration_s=duration_s,
+        )
+
+    meta = _read_build_meta(run_dir)
+    base_payload: Optional[DatasetRunRequest] = None
+    meta_cmd: Optional[List[str]] = None
+    used_defaults = False
+    if meta and isinstance(meta.get("payload"), dict):
+        try:
+            base_payload = DatasetRunRequest(**meta["payload"])
+        except Exception:
+            base_payload = None
+        cmd_value = meta.get("command")
+        if isinstance(cmd_value, list):
+            meta_cmd = [str(item) for item in cmd_value]
+
+    if base_payload is None:
+        if not payload.allow_defaults:
+            raise ValueError(
+                "Dataset build metadata is missing. Enable 'use defaults' to proceed."
+            )
+        used_defaults = True
+        tickers = _scan_csv_unique_values(training_path, "ticker", limit=200)
+        try:
+            out_dir_value = str(run_dir.parent.relative_to(BASE_DIR))
+        except ValueError:
+            out_dir_value = str(run_dir.parent)
+        base_payload = DatasetRunRequest(
+            out_dir=out_dir_value,
+            dataset_name=run_dir.name,
+            tickers=",".join(tickers) if tickers else None,
+            start=ranges[0][0].isoformat(),
+            end=ranges[0][1].isoformat(),
+        )
+
+    weighting_params = _resolve_weighting_params(base_payload, meta_cmd)
+
+    try:
+        import pandas as pd  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("pandas is required to backfill datasets.") from exc
+
+    combined = pd.read_csv(training_path)
+    rows_before = len(combined)
+
+    for idx, (range_start, range_end) in enumerate(ranges, start=1):
+        payload_data = base_payload.dict()
+        payload_data["start"] = range_start.isoformat()
+        payload_data["end"] = range_end.isoformat()
+        payload_data["schedule_mode"] = "expiry_range"
+        if not payload_data.get("expiry_weekdays"):
+            payload_data["expiry_weekdays"] = "fri"
+        payload_data["run_dir_name"] = (
+            f"{run_dir.name}-backfill-{int(time.time())}-{idx}"
+        )
+        range_payload = DatasetRunRequest(**payload_data)
+
+        cmd, out_dir, out_name, drops_name = _build_dataset_command(range_payload)
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            duration_s = round(time.monotonic() - start_time, 3)
+            raise RuntimeError(result.stderr or result.stdout or "Backfill dataset build failed.")
+
+        backfill_run_dir = _extract_run_dir_from_output(result.stdout)
+        if backfill_run_dir is None or not backfill_run_dir.exists():
+            raise RuntimeError("Backfill run directory not found in builder output.")
+        backfill_training = _find_training_file_path(backfill_run_dir)
+        if backfill_training is None:
+            raise RuntimeError("Backfill training dataset not found in run output.")
+
+        backfill_df = pd.read_csv(backfill_training)
+        if "row_id" not in backfill_df.columns:
+            raise RuntimeError("Backfill dataset missing row_id column.")
+        combined = pd.concat([combined, backfill_df], ignore_index=True)
+        combined = combined.drop_duplicates("row_id", keep="first")
+
+    combined = _reweight_training_df(combined, weighting_params)
+    combined.to_csv(training_path, index=False)
+    rows_after = len(combined)
+
+    duration_s = round(time.monotonic() - start_time, 3)
+    return DatasetBackfillResponse(
+        ok=True,
+        backfilled=True,
+        run_dir=str(run_dir.relative_to(BASE_DIR)),
+        training_file=str(training_path.relative_to(BASE_DIR)),
+        used_defaults=used_defaults,
+        required_start=required_start.isoformat(),
+        required_end=required_end.isoformat(),
+        existing_start=existing_start.isoformat(),
+        existing_end=existing_end.isoformat(),
+        backfill_ranges=[
+            DatasetBackfillRange(start=rs.isoformat(), end=re.isoformat()) for rs, re in ranges
+        ],
+        rows_before=rows_before,
+        rows_after=rows_after,
+        rows_added=max(0, rows_after - rows_before),
+        message=(
+            f"Backfill complete: {rows_after - rows_before} rows added; "
+            "weights recomputed on the merged training dataset."
+        ),
+        duration_s=duration_s,
     )
 
 
@@ -851,9 +1407,11 @@ class DatasetJob:
         self.finished_at: Optional[datetime] = None
         self._cancel_requested = False
         self._proc: Optional[subprocess.Popen] = None
+        self._proc_handle: Optional[ManagedProcessHandle] = None
         self._thread: Optional[threading.Thread] = None
         self._out_dir: Optional[Path] = None
         self.run_dir_path: Optional[Path] = None
+        self._runtime_dirs: Set[Path] = set()
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -861,13 +1419,53 @@ class DatasetJob:
 
     def cancel(self) -> None:
         self._cancel_requested = True
+        handle = self._proc_handle
         proc = self._proc
+        if handle and proc and proc.poll() is None:
+            terminate_managed_process(handle, term_timeout_s=3.0, kill_timeout_s=3.0)
+            return
         if proc and proc.poll() is None:
             proc.terminate()
             try:
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+    def targets_run_dir(self, target_dir: Path) -> bool:
+        try:
+            resolved_target = target_dir.resolve()
+        except Exception:
+            return False
+
+        candidates: List[Path] = []
+        if self.run_dir_path is not None:
+            try:
+                candidates.append(self.run_dir_path.resolve())
+            except Exception:
+                pass
+        predicted = self._predicted_run_dir()
+        if predicted is not None:
+            candidates.append(predicted)
+        if self._out_dir is not None:
+            try:
+                candidates.append(self._out_dir.resolve())
+            except Exception:
+                pass
+
+        for candidate in candidates:
+            if candidate == resolved_target:
+                return True
+            try:
+                candidate.relative_to(resolved_target)
+                return True
+            except Exception:
+                pass
+            try:
+                resolved_target.relative_to(candidate)
+                return True
+            except Exception:
+                pass
+        return False
 
     def to_status(self) -> DatasetJobStatus:
         return DatasetJobStatus(
@@ -896,70 +1494,92 @@ class DatasetJob:
         self.status = "running"
         env = {**os.environ, "PYTHONUNBUFFERED": "1"}
         start = time.monotonic()
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            env=env,
-        )
+        try:
+            handle = spawn_managed_process(
+                cmd,
+                job_id=self.job_id,
+                service="datasets",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                env=env,
+            )
+        except Exception as exc:
+            self.status = "failed"
+            self.error = str(exc)
+            self.finished_at = datetime.utcnow()
+            return
+        proc = handle.process
+        if proc is None:
+            self.status = "failed"
+            self.error = "Dataset process did not start."
+            self.finished_at = datetime.utcnow()
+            return
+        self._proc_handle = handle
         self._proc = proc
+        try:
+            lines_queue: "queue.Queue[Tuple[str, Optional[str]]]" = queue.Queue()
 
-        lines_queue: "queue.Queue[Tuple[str, Optional[str]]]" = queue.Queue()
+            def _reader(stream, kind: str) -> None:
+                for line in iter(stream.readline, ""):
+                    lines_queue.put((kind, line))
+                lines_queue.put((kind, None))
 
-        def _reader(stream, kind: str) -> None:
-            for line in iter(stream.readline, ""):
-                lines_queue.put((kind, line))
-            lines_queue.put((kind, None))
+            threads = [
+                threading.Thread(target=_reader, args=(proc.stdout, "stdout"), daemon=True),
+                threading.Thread(target=_reader, args=(proc.stderr, "stderr"), daemon=True),
+            ]
+            for thread in threads:
+                thread.start()
 
-        threads = [
-            threading.Thread(target=_reader, args=(proc.stdout, "stdout"), daemon=True),
-            threading.Thread(target=_reader, args=(proc.stderr, "stderr"), daemon=True),
-        ]
-        for thread in threads:
-            thread.start()
+            done_streams = 0
+            cancel_signal_sent = False
+            while done_streams < 2:
+                kind, line = lines_queue.get()
+                if line is None:
+                    done_streams += 1
+                    continue
+                self._record_line(kind, line)
+                if self._cancel_requested and proc.poll() is None and not cancel_signal_sent:
+                    terminate_managed_process(handle, term_timeout_s=3.0, kill_timeout_s=3.0)
+                    cancel_signal_sent = True
+            for thread in threads:
+                thread.join()
 
-        done_streams = 0
-        while done_streams < 2:
-            kind, line = lines_queue.get()
-            if line is None:
-                done_streams += 1
-                continue
-            self._record_line(kind, line)
-            if self._cancel_requested and proc.poll() is None:
-                proc.terminate()
-        for thread in threads:
-            thread.join()
+            return_code = proc.wait()
+            duration_s = round(time.monotonic() - start, 3)
+            self.result = _build_run_response(
+                ok=return_code == 0,
+                out_dir=out_dir,
+                out_name=out_name,
+                drops_name=drops_name,
+                stdout="".join(self.stdout_lines),
+                stderr="".join(self.stderr_lines),
+                duration_s=duration_s,
+                command=cmd,
+                write_drops=bool(self.payload.write_drops),
+            )
+            self.finished_at = datetime.utcnow()
 
-        return_code = proc.wait()
-        duration_s = round(time.monotonic() - start, 3)
-        self.result = _build_run_response(
-            ok=return_code == 0,
-            out_dir=out_dir,
-            out_name=out_name,
-            drops_name=drops_name,
-            stdout="".join(self.stdout_lines),
-            stderr="".join(self.stderr_lines),
-            duration_s=duration_s,
-            command=cmd,
-            write_drops=bool(self.payload.write_drops),
-        )
-        self.finished_at = datetime.utcnow()
-
-        if self._cancel_requested:
-            self.status = "cancelled"
-            self._cleanup_run_dir()
-        else:
-            self.status = "finished" if return_code == 0 else "failed"
-            if self.status == "failed":
-                self.error = (self.result.stderr or "").strip() or "Dataset run failed."
-            elif self.status == "finished":
-                run_dir = self.run_dir_path
-                if run_dir is None:
-                    run_dir = _extract_run_dir_from_output(self.result.stdout or "")
-                if run_dir and run_dir.exists():
-                    _write_training_selection(run_dir, self.payload, out_name)
+            if self._cancel_requested:
+                self.status = "cancelled"
+                self._cleanup_run_dir()
+            else:
+                self.status = "finished" if return_code == 0 else "failed"
+                if self.status == "failed":
+                    self.error = (self.result.stderr or "").strip() or "Dataset run failed."
+                elif self.status == "finished":
+                    run_dir = self.run_dir_path
+                    if run_dir is None:
+                        run_dir = _extract_run_dir_from_output(self.result.stdout or "")
+                    if run_dir and run_dir.exists():
+                        _write_training_selection(run_dir, self.payload, out_name)
+                        _write_build_meta(run_dir, self.payload, cmd, out_name, drops_name)
+        finally:
+            self._clear_runtime_files()
+            self._proc = None
+            self._proc_handle = None
 
     def _record_line(self, kind: str, line: str) -> None:
         target = self.stdout_lines if kind == "stdout" else self.stderr_lines
@@ -988,6 +1608,7 @@ class DatasetJob:
             return
         try:
             self.run_dir_path = Path(match.group(2)).resolve()
+            self._write_runtime_file_for_run_dir()
         except Exception:
             self.run_dir_path = None
 
@@ -1002,6 +1623,51 @@ class DatasetJob:
             return
         if resolved_run_dir.exists():
             shutil.rmtree(resolved_run_dir, ignore_errors=True)
+        self._clear_runtime_files()
+
+    def _write_runtime_file_for_run_dir(self) -> None:
+        run_dir = self.run_dir_path
+        handle = self._proc_handle
+        if run_dir is None or handle is None:
+            return
+        try:
+            write_runtime_file(run_dir, runtime_payload_for_handle(handle))
+            self._runtime_dirs.add(run_dir.resolve())
+        except Exception:
+            return
+
+    def _clear_runtime_files(self) -> None:
+        paths: Set[Path] = set(self._runtime_dirs)
+        if self.run_dir_path is not None:
+            try:
+                paths.add(self.run_dir_path.resolve())
+            except Exception:
+                pass
+        for run_dir in paths:
+            clear_runtime_file(run_dir)
+        self._runtime_dirs.clear()
+
+    def _predicted_run_dir(self) -> Optional[Path]:
+        try:
+            dataset_name = _to_kebab_case(self.payload.dataset_name or "")
+            if dataset_name:
+                run_name = (self.payload.run_dir_name or "").strip() or dataset_name
+                run_basename = Path(run_name).name.strip()
+                if not run_basename:
+                    return None
+                return (_resolve_project_path(DEFAULT_OUT_DIR) / run_basename).resolve()
+
+            out_name = self.payload.out_name or DEFAULT_OUT_NAME
+            if self.payload.out_dir:
+                out_dir = _resolve_project_path(str(self.payload.out_dir))
+            else:
+                out_dir = _resolve_project_path(str(Path(DEFAULT_OUT_DIR) / Path(out_name).stem))
+            run_name = (self.payload.run_dir_name or "").strip()
+            if run_name:
+                return (out_dir / Path(run_name).name).resolve()
+            return out_dir.resolve()
+        except Exception:
+            return None
 
 
 class DatasetJobManager:
@@ -1030,6 +1696,17 @@ class DatasetJobManager:
         job.cancel()
         return job.to_status()
 
+    def cancel_jobs_for_run_dir(self, run_dir: Path) -> List[str]:
+        with self._lock:
+            matching = [
+                job
+                for job in self._jobs.values()
+                if job.status in {"queued", "running"} and job.targets_run_dir(run_dir)
+            ]
+        for job in matching:
+            job.cancel()
+        return [job.job_id for job in matching]
+
     def _get_job(self, job_id: str) -> DatasetJob:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -1039,6 +1716,19 @@ class DatasetJobManager:
 
 
 JOB_MANAGER = DatasetJobManager()
+
+
+def _wait_for_jobs_to_stop(job_ids: List[str], timeout_s: float = 8.0) -> bool:
+    if not job_ids:
+        return True
+    pending = set(job_ids)
+    deadline = time.monotonic() + max(0.1, float(timeout_s))
+    while pending and time.monotonic() < deadline:
+        statuses = {status.job_id: status.status for status in JOB_MANAGER.list_jobs()}
+        pending = {job_id for job_id in pending if statuses.get(job_id) in {"queued", "running"}}
+        if pending:
+            time.sleep(0.1)
+    return not pending
 
 
 def start_dataset_job(payload: DatasetRunRequest) -> str:

@@ -7,12 +7,15 @@ import {
   renamePipelineRun,
   setActiveRun,
   deletePipelineRun,
-  togglePinRun,
+  getPipelineRunFileUrl,
+  previewPipelineRunCsv,
+  buildDecisionFeaturesForRun,
+  type CsvPreview,
   type PipelineProgress,
   type PipelineRunSummary,
   type StorageSummary,
 } from "../api/polymarketHistory";
-import { listDatasetRuns, type DatasetRunSummary } from "../api/datasets";
+import { backfillOptionChainDataset, listDatasetRuns, type DatasetRunSummary } from "../api/datasets";
 import {
   startMarketMapJob,
 } from "../api/marketMap";
@@ -42,6 +45,7 @@ const defaultForm = {
   overrides: "config/polymarket_market_overrides.csv",
   tickers: TRADING_UNIVERSE_TICKERS.join(", "),
   useWeeklyHistory: true,
+  historyRunDirName: "",
   historyStartDate: "",
   historyEndDate: "",
   historyFidelityMin: "60",
@@ -60,7 +64,11 @@ const loadStoredForm = (): FormState | null => {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return null;
     const merged = { ...defaultForm, ...parsed } as FormState;
-    return { ...merged, tickers: sanitizeTickers(merged.tickers) };
+    return {
+      ...merged,
+      useWeeklyHistory: true,
+      tickers: sanitizeTickers(merged.tickers),
+    };
   } catch {
     return null;
   }
@@ -83,6 +91,24 @@ const formatCount = (value?: number | null) => {
   if (value === null || value === undefined) return "--";
   return value.toLocaleString();
 };
+
+const formatByteCount = (bytes?: number | null) => {
+  if (bytes === null || bytes === undefined) return "--";
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  return `${mb.toFixed(1)} MB`;
+};
+
+const toKebabCase = (value: string) =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-|-$/g, "");
 
 const MONTH_NAMES = [
   "january",
@@ -211,6 +237,31 @@ const mergeProgress = (
   return { total, completed, failed, status };
 };
 
+type PreviewMode = "head" | "tail";
+
+type RunCsvPreviewTarget = {
+  runId: string;
+  filename: string;
+  label: string;
+};
+
+type RunCsvFileSummary = NonNullable<PipelineRunSummary["csv_files"]>[number];
+
+const PREVIEW_LIMIT_DEFAULT = 20;
+const PREVIEW_LIMIT_OPTIONS = [20, 50, 100] as const;
+const PREVIEW_MODE_OPTIONS: { value: PreviewMode; label: string }[] = [
+  { value: "head", label: "First" },
+  { value: "tail", label: "Last" },
+];
+
+const sortRunCsvFiles = (files: RunCsvFileSummary[]): RunCsvFileSummary[] =>
+  [...files].sort((a, b) => a.name.localeCompare(b.name));
+
+const isDecisionFeaturesCsv = (name: string): boolean => {
+  const lower = name.toLowerCase();
+  return lower === "decision_features.csv" || lower.endsWith("decision-features.csv");
+};
+
 export default function PolymarketPipelinePage() {
   const [form, setForm] = useState<FormState>(() => loadStoredForm() ?? defaultForm);
   const [formError, setFormError] = useState<string | null>(null);
@@ -218,17 +269,51 @@ export default function PolymarketPipelinePage() {
   const [datasetRuns, setDatasetRuns] = useState<DatasetRunSummary[]>([]);
   const [datasetRunsError, setDatasetRunsError] = useState<string | null>(null);
   const [isDatasetRunsLoading, setIsDatasetRunsLoading] = useState(false);
+  const [workspaceTab, setWorkspaceTab] = useState<
+    "run_job" | "history" | "documentation"
+  >("run_job");
+  const [runJobPanel, setRunJobPanel] = useState<"configuration" | "active_run">(
+    "configuration",
+  );
+  const [activeLogView, setActiveLogView] = useState<"stdout" | "stderr" | null>(null);
 
   // --- Runs browser state ---
   const [pipelineRuns, setPipelineRuns] = useState<PipelineRunSummary[]>([]);
   const [runsStorage, setRunsStorage] = useState<StorageSummary | null>(null);
   const [runsLoading, setRunsLoading] = useState(false);
   const [runsError, setRunsError] = useState<string | null>(null);
-  const [editingLabel, setEditingLabel] = useState<Record<string, string>>({});
+  const [renamingRunId, setRenamingRunId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [renameLoading, setRenameLoading] = useState(false);
+  const [openRunId, setOpenRunId] = useState<string | null>(null);
+  const [runCsvPreviewTarget, setRunCsvPreviewTarget] =
+    useState<RunCsvPreviewTarget | null>(null);
+  const [runCsvPreviewResponse, setRunCsvPreviewResponse] =
+    useState<CsvPreview | null>(null);
+  const [runCsvPreviewError, setRunCsvPreviewError] = useState<string | null>(null);
+  const [runCsvPreviewLoading, setRunCsvPreviewLoading] = useState(false);
+  const [runCsvPreviewMode, setRunCsvPreviewMode] = useState<PreviewMode>("head");
+  const [runCsvPreviewLimit, setRunCsvPreviewLimit] = useState<number>(
+    PREVIEW_LIMIT_DEFAULT,
+  );
+  const [featuresBuildRunId, setFeaturesBuildRunId] = useState<string | null>(null);
+  const [featuresBuildError, setFeaturesBuildError] = useState<{
+    runId: string;
+    message: string;
+  } | null>(null);
+  const [featuresModalRunId, setFeaturesModalRunId] = useState<string | null>(null);
+  const [featuresModalDatasetId, setFeaturesModalDatasetId] = useState<string | null>(
+    null,
+  );
+  const [featuresModalError, setFeaturesModalError] = useState<string | null>(null);
+  const [backfillLoading, setBackfillLoading] = useState(false);
+  const [backfillMessage, setBackfillMessage] = useState<string | null>(null);
+  const [backfillError, setBackfillError] = useState<string | null>(null);
+  const [backfillAllowDefaults, setBackfillAllowDefaults] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [deleteLoading, setDeleteLoading] = useState(false);
-  const [runsOpen, setRunsOpen] = useState(true);
   const [historyProgressState, setHistoryProgressState] = useState<PipelineProgress | null>(null);
   const [featuresProgressState, setFeaturesProgressState] = useState<PipelineProgress | null>(null);
   const lastHistoryJobId = useRef<string | null>(null);
@@ -246,6 +331,7 @@ export default function PolymarketPipelinePage() {
     mapJobStatus?.status === "running" ||
     historyJobStatus?.status === "queued" ||
     historyJobStatus?.status === "running";
+  const isFeaturesBuildRunning = featuresBuildRunId !== null;
 
   const historyJobId = historyJobStatus?.job_id ?? null;
 
@@ -281,9 +367,22 @@ export default function PolymarketPipelinePage() {
   }, [form]);
 
   const optionChainRuns = useMemo(
-    () => datasetRuns.filter((run) => run.run_dir.startsWith("src/data/raw/option-chain/")),
+    () =>
+      datasetRuns.filter(
+        (run) =>
+          run.run_dir.startsWith("src/data/raw/option-chain/") ||
+          run.run_dir.startsWith("data/raw/option-chain/"),
+      ),
     [datasetRuns],
   );
+  const optionChainTrainingRuns = useMemo(() => {
+    const filtered = optionChainRuns.filter((run) => run.training_file?.path);
+    return [...filtered].sort((a, b) => {
+      const aStamp = a.last_modified ?? "";
+      const bStamp = b.last_modified ?? "";
+      return bStamp.localeCompare(aStamp);
+    });
+  }, [optionChainRuns]);
   const selectedDatasetRun = useMemo(
     () => optionChainRuns.find((run) => run.run_dir === form.historyPrnDataset) ?? null,
     [optionChainRuns, form.historyPrnDataset],
@@ -293,29 +392,25 @@ export default function PolymarketPipelinePage() {
     return selectedDatasetRun.training_file?.path ?? null;
   }, [selectedDatasetRun]);
 
-  useEffect(() => {
-    let cancelled = false;
+  const loadDatasetRuns = useCallback(async () => {
     setIsDatasetRunsLoading(true);
     setDatasetRunsError(null);
-    listDatasetRuns()
-      .then((payload) => {
-        if (cancelled) return;
-        setDatasetRuns(payload.runs ?? []);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setDatasetRuns([]);
-        setDatasetRunsError(
-          err instanceof Error ? err.message : "Failed to load dataset directories",
-        );
-      })
-      .finally(() => {
-        if (!cancelled) setIsDatasetRunsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+    try {
+      const payload = await listDatasetRuns();
+      setDatasetRuns(payload.runs ?? []);
+    } catch (err) {
+      setDatasetRuns([]);
+      setDatasetRunsError(
+        err instanceof Error ? err.message : "Failed to load dataset directories",
+      );
+    } finally {
+      setIsDatasetRunsLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    loadDatasetRuns();
+  }, [loadDatasetRuns]);
 
   // --- Runs browser: load on mount + after pipeline finishes ---
   const loadRuns = useCallback(() => {
@@ -342,6 +437,59 @@ export default function PolymarketPipelinePage() {
     }
   }, [prevHistoryStatus, loadRuns]);
 
+  useEffect(() => {
+    if (!runCsvPreviewTarget) {
+      setRunCsvPreviewResponse(null);
+      setRunCsvPreviewError(null);
+      setRunCsvPreviewLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setRunCsvPreviewLoading(true);
+    setRunCsvPreviewError(null);
+    previewPipelineRunCsv(
+      runCsvPreviewTarget.runId,
+      runCsvPreviewTarget.filename,
+      runCsvPreviewMode,
+      runCsvPreviewLimit,
+    )
+      .then((preview) => {
+        if (cancelled) return;
+        setRunCsvPreviewResponse(preview);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setRunCsvPreviewResponse(null);
+        setRunCsvPreviewError(err instanceof Error ? err.message : "Unknown error");
+      })
+      .finally(() => {
+        if (!cancelled) setRunCsvPreviewLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [runCsvPreviewTarget, runCsvPreviewMode, runCsvPreviewLimit]);
+
+  useEffect(() => {
+    if (!runCsvPreviewTarget) return;
+    const previewRunStillExists = pipelineRuns.some(
+      (run) => run.run_id === runCsvPreviewTarget.runId,
+    );
+    if (!previewRunStillExists) {
+      setRunCsvPreviewTarget(null);
+    }
+  }, [pipelineRuns, runCsvPreviewTarget]);
+
+  useEffect(() => {
+    if (!openRunId) return;
+    const stillExists = pipelineRuns.some((run) => run.run_id === openRunId);
+    if (!stillExists) {
+      setOpenRunId(null);
+    }
+  }, [openRunId, pipelineRuns]);
+
   const handleSetActive = useCallback(async (runId: string) => {
     try {
       await setActiveRun(runId);
@@ -351,36 +499,198 @@ export default function PolymarketPipelinePage() {
     }
   }, [loadRuns]);
 
-  const handleRenameBlur = useCallback(async (runId: string) => {
-    const label = editingLabel[runId];
-    if (label === undefined) return;
-    try {
-      await renamePipelineRun(runId, label);
-      loadRuns();
-    } catch (err) {
-      console.error("Rename failed:", err);
-    }
-    setEditingLabel((prev) => {
-      const next = { ...prev };
-      delete next[runId];
-      return next;
-    });
-  }, [editingLabel, loadRuns]);
+  const handleStartRename = useCallback((runId: string, currentLabel: string) => {
+    setRenamingRunId(runId);
+    setRenameValue(currentLabel);
+    setRenameError(null);
+  }, []);
 
-  const handleTogglePin = useCallback(async (runId: string) => {
+  const handleCancelRename = useCallback(() => {
+    setRenamingRunId(null);
+    setRenameValue("");
+    setRenameError(null);
+  }, []);
+
+  const handleConfirmRename = useCallback(async (runId: string) => {
+    setRenameLoading(true);
+    setRenameError(null);
     try {
-      await togglePinRun(runId);
-      loadRuns();
+      const cleaned = renameValue.trim();
+      await renamePipelineRun(runId, cleaned);
+      await loadRuns();
+      handleCancelRename();
     } catch (err) {
-      console.error("Pin toggle failed:", err);
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setRenameError(message);
+    } finally {
+      setRenameLoading(false);
     }
-  }, [loadRuns]);
+  }, [handleCancelRename, loadRuns, renameValue]);
+
+  const handleOpenFeaturesModal = useCallback((runId: string) => {
+    setFeaturesModalRunId(runId);
+    setFeaturesModalError(null);
+    setBackfillMessage(null);
+    setBackfillError(null);
+    setBackfillAllowDefaults(false);
+    const preferred = optionChainTrainingRuns.find(
+      (run) => run.run_dir === form.historyPrnDataset,
+    );
+    const fallback = optionChainTrainingRuns[0] ?? null;
+    setFeaturesModalDatasetId(preferred?.id ?? fallback?.id ?? null);
+  }, [form.historyPrnDataset, optionChainTrainingRuns]);
+
+  const handleCloseFeaturesModal = useCallback(() => {
+    if (featuresBuildRunId || backfillLoading) return;
+    setFeaturesModalRunId(null);
+    setFeaturesModalDatasetId(null);
+    setFeaturesModalError(null);
+    setBackfillMessage(null);
+    setBackfillError(null);
+    setBackfillAllowDefaults(false);
+  }, [backfillLoading, featuresBuildRunId]);
+
+  const handleConfirmBuildDecisionFeatures = useCallback(async () => {
+    if (!featuresModalRunId || featuresBuildRunId || backfillLoading) return;
+    const selected = optionChainTrainingRuns.find(
+      (run) => run.id === featuresModalDatasetId,
+    );
+    if (!selected || !selected.training_file?.path) {
+      setFeaturesModalError("Select a training dataset with a training CSV.");
+      return;
+    }
+
+    setFeaturesBuildRunId(featuresModalRunId);
+    setFeaturesBuildError(null);
+    setFeaturesModalError(null);
+    try {
+      const response = await buildDecisionFeaturesForRun(featuresModalRunId, {
+        prnDataset: selected.training_file.path,
+      });
+      if (!response.ok) {
+        throw new Error(response.stderr || response.stdout || "Decision features build failed.");
+      }
+      await loadRuns();
+      setFeaturesModalRunId(null);
+      setFeaturesModalDatasetId(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Decision features build failed.";
+      setFeaturesBuildError({ runId: featuresModalRunId, message });
+      setFeaturesModalError(message);
+    } finally {
+      setFeaturesBuildRunId(null);
+    }
+  }, [
+    backfillLoading,
+    featuresBuildRunId,
+    featuresModalDatasetId,
+    featuresModalRunId,
+    loadRuns,
+    optionChainTrainingRuns,
+  ]);
+
+  const handleBackfillDataset = useCallback(async () => {
+    if (!featuresModalRunId || backfillLoading) return;
+    const selected = optionChainTrainingRuns.find(
+      (run) => run.id === featuresModalDatasetId,
+    );
+    if (!selected) {
+      setBackfillError("Select a training dataset to backfill.");
+      return;
+    }
+
+    setBackfillLoading(true);
+    setBackfillError(null);
+    setBackfillMessage(null);
+    try {
+      const response = await backfillOptionChainDataset({
+        runDir: selected.run_dir,
+        polymarketRunId: featuresModalRunId,
+        allowDefaults: backfillAllowDefaults,
+      });
+      if (!response.ok) {
+        throw new Error(response.message || "Dataset backfill failed.");
+      }
+      setBackfillMessage(response.message);
+      await loadDatasetRuns();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Dataset backfill failed.";
+      setBackfillError(message);
+    } finally {
+      setBackfillLoading(false);
+    }
+  }, [
+    backfillAllowDefaults,
+    backfillLoading,
+    featuresModalDatasetId,
+    featuresModalRunId,
+    loadDatasetRuns,
+    optionChainTrainingRuns,
+  ]);
+
+  useEffect(() => {
+    if (!renamingRunId) return;
+    const stillExists = pipelineRuns.some((run) => run.run_id === renamingRunId);
+    if (!stillExists) {
+      handleCancelRename();
+    }
+  }, [handleCancelRename, pipelineRuns, renamingRunId]);
+
+  useEffect(() => {
+    if (!featuresBuildError) return;
+    const stillExists = pipelineRuns.some((run) => run.run_id === featuresBuildError.runId);
+    if (!stillExists) {
+      setFeaturesBuildError(null);
+    }
+  }, [featuresBuildError, pipelineRuns]);
+
+  useEffect(() => {
+    if (!featuresModalRunId) return;
+    const stillExists = pipelineRuns.some((run) => run.run_id === featuresModalRunId);
+    if (!stillExists) {
+      handleCloseFeaturesModal();
+    }
+  }, [featuresModalRunId, handleCloseFeaturesModal, pipelineRuns]);
+
+  useEffect(() => {
+    if (!featuresModalRunId) return;
+    const hasSelection = featuresModalDatasetId
+      ? optionChainTrainingRuns.some((run) => run.id === featuresModalDatasetId)
+      : false;
+    if (hasSelection) return;
+    const preferred = optionChainTrainingRuns.find(
+      (run) => run.run_dir === form.historyPrnDataset,
+    );
+    const fallback = optionChainTrainingRuns[0] ?? null;
+    setFeaturesModalDatasetId(preferred?.id ?? fallback?.id ?? null);
+  }, [
+    featuresModalDatasetId,
+    featuresModalRunId,
+    form.historyPrnDataset,
+    optionChainTrainingRuns,
+  ]);
+
+  const handleToggleRunCsvPreview = useCallback((target: RunCsvPreviewTarget) => {
+    setRunCsvPreviewTarget((prev) => {
+      if (
+        prev &&
+        prev.runId === target.runId &&
+        prev.filename === target.filename
+      ) {
+        return null;
+      }
+      return target;
+    });
+  }, []);
 
   const handleDeleteConfirm = useCallback(async () => {
     if (!deleteTarget || deleteConfirmText !== "DELETE") return;
     setDeleteLoading(true);
     try {
       await deletePipelineRun(deleteTarget);
+      if (runCsvPreviewTarget?.runId === deleteTarget) {
+        setRunCsvPreviewTarget(null);
+      }
       setDeleteTarget(null);
       setDeleteConfirmText("");
       loadRuns();
@@ -389,7 +699,7 @@ export default function PolymarketPipelinePage() {
     } finally {
       setDeleteLoading(false);
     }
-  }, [deleteTarget, deleteConfirmText, loadRuns]);
+  }, [deleteTarget, deleteConfirmText, loadRuns, runCsvPreviewTarget]);
 
   const formatSize = (bytes: number) => {
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
@@ -397,6 +707,7 @@ export default function PolymarketPipelinePage() {
   };
 
   const usingWeeklyHistory = form.useWeeklyHistory;
+  const historyRunDirNameKebab = toKebabCase(form.historyRunDirName);
   const pipelineStatus = usingWeeklyHistory
     ? historyJobStatus?.status || "idle"
     : mapJobStatus?.status || "idle";
@@ -448,6 +759,11 @@ export default function PolymarketPipelinePage() {
       if (usingWeeklyHistory) {
         setFormError(null);
 
+        if (form.historyRunDirName.trim() && !historyRunDirNameKebab) {
+          setFormError("Run directory name must contain at least one alphanumeric character.");
+          return;
+        }
+
         const effectiveTickers =
           selectedTickers.length > 0 ? selectedTickers : TRADING_UNIVERSE_TICKERS;
         const autoUrls = buildAutoEventUrls(
@@ -476,6 +792,7 @@ export default function PolymarketPipelinePage() {
           endDate: form.historyEndDate || undefined,
           fidelityMin: Number(form.historyFidelityMin) || undefined,
           barsFreqs: form.historyBarsFreqs || undefined,
+          runDirName: form.historyRunDirName.trim() || undefined,
           includeSubgraph: form.historyIncludeSubgraph,
           buildFeatures: form.historyBuildFeatures,
           prnDataset: resolvedHistoryPrnDataset || undefined,
@@ -483,6 +800,9 @@ export default function PolymarketPipelinePage() {
         };
         const status = await startPolymarketHistoryJob(payload);
         setHistoryJobId(status.job_id);
+        setRunJobPanel("active_run");
+        setWorkspaceTab("run_job");
+        setActiveLogView(null);
       } else {
         const status = await startMarketMapJob({
           runDir: undefined,
@@ -493,6 +813,9 @@ export default function PolymarketPipelinePage() {
           strict: false,
         });
         setMapJobId(status.job_id);
+        setRunJobPanel("active_run");
+        setWorkspaceTab("run_job");
+        setActiveLogView(null);
       }
     } catch (err) {
       console.error("Pipeline failed:", err);
@@ -511,6 +834,16 @@ export default function PolymarketPipelinePage() {
       setStopLoading(false);
     }
   };
+
+  const handleToggleLog = useCallback((target: "stdout" | "stderr") => {
+    setActiveLogView((prev) => (prev === target ? null : target));
+  }, []);
+
+  const handleNewJob = useCallback(() => {
+    setRunJobPanel("configuration");
+    setWorkspaceTab("run_job");
+    setActiveLogView(null);
+  }, []);
 
   const mapStdout = mapJobStatus?.result?.stdout ?? "";
   const mapStderr = mapJobStatus?.result?.stderr ?? "";
@@ -562,13 +895,23 @@ export default function PolymarketPipelinePage() {
   const canStopHistory =
     historyJobStatus?.status === "queued" || historyJobStatus?.status === "running";
 
-  const activeLog = usingWeeklyHistory
+  const defaultActiveLog = usingWeeklyHistory
     ? historyStderr || historyError
       ? "stderr"
       : "stdout"
     : mapStderr || mapError
       ? "stderr"
       : "stdout";
+  const activeLog = activeLogView;
+  const hasAnyLogOutput = usingWeeklyHistory
+    ? Boolean(historyStdout || historyStderr || historyError)
+    : Boolean(mapStdout || mapStderr || mapError);
+  const terminalStatus =
+    pipelineStatus === "finished" ||
+    pipelineStatus === "failed" ||
+    pipelineStatus === "cancelled";
+  const hasRunRecord = usingWeeklyHistory ? Boolean(historyJobStatus) : Boolean(mapJobStatus);
+  const showNewJobButton = terminalStatus && hasRunRecord;
 
   const historyRunning =
     historyJobStatus?.status === "queued" || historyJobStatus?.status === "running";
@@ -609,6 +952,23 @@ export default function PolymarketPipelinePage() {
     : historyRunning
       ? "Running pipeline..."
       : pipelineStatusLabel;
+  const runJobDisabled =
+    isRunning || anyJobRunning || isFeaturesBuildRunning || backfillLoading;
+  const runJobLabel = isRunning
+    ? "Running job..."
+    : isFeaturesBuildRunning
+      ? "Building decision features..."
+      : backfillLoading
+        ? "Backfilling dataset..."
+        : "Run Job";
+  const featuresModalRun = featuresModalRunId
+    ? pipelineRuns.find((run) => run.run_id === featuresModalRunId) ?? null
+    : null;
+  const featuresModalRunLabel =
+    (featuresModalRun?.label ?? "").trim() ||
+    featuresModalRun?.run_id ||
+    featuresModalRunId ||
+    "";
   const historyMonitorItems = [
     { label: "Stage", value: historyStageLabel },
     { label: "Tickers", value: `${selectedTickers.length} selected` },
@@ -647,610 +1007,1388 @@ export default function PolymarketPipelinePage() {
 
   return (
     <section className="page polymarket-pipeline-page">
-      <PipelineStatusCard className="page-sticky-meta" activeJobsCount={activeJobs.length} />
-      <header className="page-header">
-        <div>
-          <p className="page-kicker">Polymarket</p>
-          <h1 className="page-title">Fetch markets and build dim_market</h1>
-          <p className="page-subtitle">
-            Run the pipeline against live markets or switch to weekly history backfill for closed events.
-          </p>
+      <PipelineStatusCard
+        className="page-sticky-meta polymarket-meta"
+        activeJobsCount={activeJobs.length}
+      />
+      <header className="page-header polymarket-page-header">
+        <div className="polymarket-title-row">
+          <h1 className="page-title polymarket-page-title">
+            Polymarket History Buider
+          </h1>
         </div>
       </header>
 
-      <div className="pipeline-grid">
-        <div className="pipeline-main">
-          <section className="panel">
-            <div className="panel-header">
-              <h2>Run Configuration</h2>
-              <span className="panel-hint">Configure and run the backfill</span>
-            </div>
-            <form className="panel-body" onSubmit={handleRunPipeline}>
-              <label className="checkbox">
-                <input
-                  type="checkbox"
-                  checked={form.useWeeklyHistory}
-                  onChange={(event) =>
-                    setForm((prev) => ({ ...prev, useWeeklyHistory: event.target.checked }))
-                  }
-                />
-                Use weekly history backfill (closed markets + CLOB history)
-              </label>
-
-              <div className="fields-grid">
-                <div className="field full">
-                  <label>Trading universe</label>
-                  <div className="ticker-grid">
-                    {TRADING_UNIVERSE_TICKERS.map((ticker) => (
-                      <button
-                        key={ticker}
-                        type="button"
-                        className={`ticker-chip ${
-                          selectedTickerSet.has(ticker) ? "selected" : ""
-                        }`}
-                        aria-pressed={selectedTickerSet.has(ticker)}
-                        onClick={() => toggleUniverseTicker(ticker)}
-                      >
-                        {ticker}
-                      </button>
-                    ))}
-                  </div>
-                  <span className="field-hint">
-                    Pick from the core trading universe. Only these tickers are allowed.
-                  </span>
-                <div className="field-hint">
-                  Selected: {selectedTickers.join(", ")}
-                </div>
-              </div>
-            </div>
-
-            {usingWeeklyHistory ? (
-              <div className="fields-grid">
-                  <div className="field">
-                    <label>History start date (UTC)</label>
-                    <input
-                      className="input"
-                      type="date"
-                      value={form.historyStartDate}
-                      onChange={(event) =>
-                        setForm((prev) => ({ ...prev, historyStartDate: event.target.value }))
-                      }
-                    />
-                    <span className="field-hint">Required for auto-generation.</span>
-                  </div>
-                  <div className="field">
-                    <label>History end date (UTC)</label>
-                    <input
-                      className="input"
-                      type="date"
-                      value={form.historyEndDate}
-                      onChange={(event) =>
-                        setForm((prev) => ({ ...prev, historyEndDate: event.target.value }))
-                      }
-                    />
-                    <span className="field-hint">Required for auto-generation.</span>
-                  </div>
-                  <div className="field">
-                    <label>CLOB fidelity (minutes)</label>
-                    <input
-                      className="input"
-                      type="number"
-                      min="1"
-                      value={form.historyFidelityMin}
-                      onChange={(event) =>
-                        setForm((prev) => ({ ...prev, historyFidelityMin: event.target.value }))
-                      }
-                    />
-                  </div>
-                  <div className="field">
-                    <label>Bar frequencies</label>
-                    <input
-                      className="input"
-                      value={form.historyBarsFreqs}
-                      onChange={(event) =>
-                        setForm((prev) => ({ ...prev, historyBarsFreqs: event.target.value }))
-                      }
-                    />
-                    <span className="field-hint">Comma-separated (e.g. 1h,1d).</span>
-                  </div>
-                  <div className="field full">
-                    <div className="help-note">
-                      <strong>Event URLs:</strong>{" "}
-                      Auto-generated using pattern{" "}
-                      <span className="mono-inline">
-                        https://polymarket.com/event/&#123;ticker&#125;-above-on-&#123;month&#125;-&#123;friday_day&#125;-&#123;year&#125;
-                      </span>
-                      <br />
-                      {autoEventState?.error
-                        ? autoEventState.error
-                        : `Generating ${formatCount(autoEventState.urls.length)} URLs across ${formatCount(
-                            autoEventState.fridays.length,
-                          )} Fridays for ${
-                            selectedTickers.length || TRADING_UNIVERSE_TICKERS.length
-                          } tickers.`}
-                    </div>
-                  </div>
-                  <div className="field">
-                    <label className="checkbox">
-                      <input
-                        type="checkbox"
-                        checked={form.historyIncludeSubgraph}
-                        onChange={(event) =>
-                          setForm((prev) => ({ ...prev, historyIncludeSubgraph: event.target.checked }))
-                        }
-                      />
-                      Attempt subgraph trade ingest if configured
-                    </label>
-                  </div>
-                  <div className="field">
-                    <label className="checkbox">
-                      <input
-                        type="checkbox"
-                        checked={form.historyBuildFeatures}
-                        onChange={(event) =>
-                          setForm((prev) => ({ ...prev, historyBuildFeatures: event.target.checked }))
-                        }
-                      />
-                      Build decision features for model calibration
-                    </label>
-                  </div>
-                  {form.historyBuildFeatures ? (
-                    <div className="field full">
-                      <label>pRN dataset directory</label>
-                      <select
-                        className="input"
-                        value={form.historyPrnDataset}
-                        onChange={(event) =>
-                          setForm((prev) => ({ ...prev, historyPrnDataset: event.target.value }))
-                        }
-                        disabled={isDatasetRunsLoading}
-                      >
-                        <option value="">
-                          {isDatasetRunsLoading
-                            ? "Loading dataset directories..."
-                            : "Select a dataset directory"}
-                        </option>
-                        {optionChainRuns.map((run) => (
-                          <option key={run.run_dir} value={run.run_dir}>
-                            {run.run_dir}
-                          </option>
-                        ))}
-                      </select>
-                      <span className="field-hint">
-                        {datasetRunsError
-                          ? datasetRunsError
-                          : optionChainRuns.length
-                            ? "Choose a directory under src/data/raw/option-chain."
-                            : "No option-chain dataset directories found."}
-                      </span>
-                      <span className="field-hint">
-                        Resolved pRN CSV (training-*.csv):{" "}
-                        <span className="mono-inline">{resolvedHistoryPrnDataset ?? "--"}</span>
-                      </span>
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-
-              {usingWeeklyHistory && !hasEventSources ? (
-                <div className="help-note">
-                  <strong>Heads up:</strong> weekly finance markets are not discoverable by
-                  pagination. Provide a date range to auto-generate event URLs.
-                </div>
-              ) : null}
-
-              {formError ? (
-                <div className="error-banner">
-                  <strong>Input Error:</strong>
-                  <pre>{formError}</pre>
-                </div>
-              ) : null}
-
-              <div className="panel-actions">
-                <button
-                  className="button primary large"
-                  type="submit"
-                  disabled={isRunning || anyJobRunning}
-                >
-                  {isRunning
-                    ? "Running pipeline..."
-                    : usingWeeklyHistory
-                      ? "Run Weekly Backfill"
-                      : "Run Full Pipeline"}
-                </button>
-                {canStopHistory ? (
-                  <button
-                    className="button ghost danger"
-                    type="button"
-                    onClick={handleStopRun}
-                    disabled={stopLoading}
-                  >
-                    {stopLoading ? "Stopping…" : "Stop run"}
-                  </button>
-                ) : null}
-              </div>
-
-              {(usingWeeklyHistory ? historyError || historyStderr : mapError || mapStderr) ? (
-                <div className="error-banner">
-                  <strong>Pipeline Error:</strong>
-                  <pre>{usingWeeklyHistory ? historyError || historyStderr : mapError || mapStderr}</pre>
-                </div>
-              ) : null}
-            </form>
-          </section>
+      <div className="polymarket-workspace">
+        <div
+          className="polymarket-workspace-tabs"
+          role="tablist"
+          aria-label="Polymarket history builder workspace"
+        >
+          <button
+            id="polymarket-tab-run-job"
+            type="button"
+            role="tab"
+            aria-selected={workspaceTab === "run_job"}
+            aria-controls="polymarket-panel-run-job"
+            className={`polymarket-workspace-tab ${
+              workspaceTab === "run_job" ? "active" : ""
+            }`}
+            onClick={() => setWorkspaceTab("run_job")}
+          >
+            Run job
+          </button>
+          <button
+            id="polymarket-tab-history"
+            type="button"
+            role="tab"
+            aria-selected={workspaceTab === "history"}
+            aria-controls="polymarket-panel-history"
+            className={`polymarket-workspace-tab ${
+              workspaceTab === "history" ? "active" : ""
+            }`}
+            onClick={() => setWorkspaceTab("history")}
+          >
+            Run directory
+          </button>
+          <button
+            id="polymarket-tab-documentation"
+            type="button"
+            role="tab"
+            aria-selected={workspaceTab === "documentation"}
+            aria-controls="polymarket-panel-documentation"
+            className={`polymarket-workspace-tab ${
+              workspaceTab === "documentation" ? "active" : ""
+            }`}
+            onClick={() => setWorkspaceTab("documentation")}
+          >
+            Documentation
+          </button>
         </div>
 
-        <div className="pipeline-sidebar">
-          <section className="panel">
-            <div className="panel-header">
-              <h2>Latest Run Output</h2>
-              <span className="panel-hint">Real-time job status</span>
-            </div>
-            <div className="panel-body">
-              {usingWeeklyHistory ? (
-                historyJobStatus ? (
-                  <div className="run-output pipeline-run-output">
-                    <div className="pipeline-run-monitor">
-                      <div className="pipeline-run-monitor-header">
-                        <div>
-                          <span className="meta-label">Run monitor</span>
-                          <div className="pipeline-run-monitor-title">
-                            Weekly history run
-                          </div>
+        {workspaceTab === "run_job" ? (
+          <div
+            id="polymarket-panel-run-job"
+            role="tabpanel"
+            aria-labelledby="polymarket-tab-run-job"
+            className="polymarket-tab-panel"
+          >
+            {runJobPanel === "configuration" ? (
+              <section className="panel polymarket-config-panel">
+                <div className="panel-header polymarket-panel-header polymarket-job-config-header">
+                  <div>
+                    <h2 className="polymarket-job-config-title">Job Configuration</h2>
+                    <span className="panel-hint">
+                      Configure weekly history backfill or a market-map refresh.
+                    </span>
+                  </div>
+                  {hasRunRecord ? (
+                    <button
+                      className="button light polymarket-fixed-action-button"
+                      type="button"
+                      onClick={() => {
+                        setRunJobPanel("active_run");
+                        setActiveLogView(null);
+                      }}
+                    >
+                      View latest run
+                    </button>
+                  ) : null}
+                </div>
+                <form className="panel-body polymarket-config-form" onSubmit={handleRunPipeline}>
+                  <div className="section-card polymarket-config-card">
+                    <div className="fields-grid">
+                      <div className="field full">
+                        <label>Trading universe</label>
+                        <div className="ticker-grid">
+                          {TRADING_UNIVERSE_TICKERS.map((ticker) => (
+                            <button
+                              key={ticker}
+                              type="button"
+                              className={`ticker-chip ${
+                                selectedTickerSet.has(ticker) ? "selected" : ""
+                              }`}
+                              aria-pressed={selectedTickerSet.has(ticker)}
+                              onClick={() => toggleUniverseTicker(ticker)}
+                            >
+                              {ticker}
+                            </button>
+                          ))}
                         </div>
-                        <span className={`status-pill ${pipelineStatusClass}`}>
-                          {pipelineStatusLabel}
+                        <span className="field-hint">
+                          Pick from the core trading universe. Only these tickers
+                          are allowed.
+                        </span>
+                        <span className="field-hint polymarket-selected-tickers">
+                          Selected: {selectedTickers.join(", ")}
                         </span>
                       </div>
-                      <div className="pipeline-run-monitor-grid">
-                        {historyMonitorItems.map((item) => (
-                          <div key={item.label}>
-                            <span className="meta-label">{item.label}</span>
-                            <span>{item.value}</span>
-                          </div>
-                        ))}
-                      </div>
-                      <div className="pipeline-run-monitor-progress">
-                        <div className="pipeline-run-monitor-progress-header">
-                          <span>Progress</span>
-                          <span>{historyProgressLabel}</span>
-                        </div>
-                        <div className="pipeline-progress-stack">
-                          <PipelineProgressBar
-                            title="Stage 1: Fetching / processing markets"
-                            progress={historyProgress}
-                            running={historyRunning}
-                            runningLabel="Running pipeline..."
-                            idleLabel={pipelineStatusLabel}
-                            unitLabel="jobs"
-                            forceError={historyJobStatus?.status === "failed"}
+                    </div>
+                  </div>
+
+                  {usingWeeklyHistory ? (
+                    <div className="section-card polymarket-config-card">
+                      <div className="fields-grid">
+                        <div className="field">
+                          <label>History start date (UTC)</label>
+                          <input
+                            className="input"
+                            type="date"
+                            value={form.historyStartDate}
+                            onChange={(event) =>
+                              setForm((prev) => ({
+                                ...prev,
+                                historyStartDate: event.target.value,
+                              }))
+                            }
                           />
-                          {showFeatureProgress ? (
-                            <PipelineProgressBar
-                              title="Stage 2: Creating features"
-                              progress={featuresProgress}
-                              running={featuresRunning}
-                              runningLabel="Creating features..."
-                              idleLabel={
-                                historyJobStatus?.result?.features_built
-                                  ? "Complete"
-                                  : historyRunning
-                                    ? "Queued"
-                                    : "Not started"
-                              }
-                              unitLabel="steps"
-                              forceError={
-                                historyJobStatus?.status === "failed" &&
-                                historyPhase === "features"
-                              }
-                            />
-                          ) : null}
+                          <span className="field-hint">Required for auto-generation.</span>
                         </div>
-                        <p className="pipeline-run-monitor-note">
-                          Progress updates only when each market finishes, so counts never move backward.
+                        <div className="field">
+                          <label>History end date (UTC)</label>
+                          <input
+                            className="input"
+                            type="date"
+                            value={form.historyEndDate}
+                            onChange={(event) =>
+                              setForm((prev) => ({
+                                ...prev,
+                                historyEndDate: event.target.value,
+                              }))
+                            }
+                          />
+                          <span className="field-hint">Required for auto-generation.</span>
+                        </div>
+                        <div className="field">
+                          <label>CLOB fidelity (minutes)</label>
+                          <input
+                            className="input"
+                            type="number"
+                            min="1"
+                            value={form.historyFidelityMin}
+                            onChange={(event) =>
+                              setForm((prev) => ({
+                                ...prev,
+                                historyFidelityMin: event.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                        <div className="field">
+                          <label>Bar frequencies</label>
+                          <input
+                            className="input"
+                            value={form.historyBarsFreqs}
+                            onChange={(event) =>
+                              setForm((prev) => ({
+                                ...prev,
+                                historyBarsFreqs: event.target.value,
+                              }))
+                            }
+                          />
+                          <span className="field-hint">
+                            Comma-separated (e.g. 1h,1d).
+                          </span>
+                        </div>
+                        <div className="field">
+                          <label>Run directory name</label>
+                          <input
+                            className="input"
+                            value={form.historyRunDirName}
+                            placeholder="Optional (e.g. fed-weeklies-jan-2026)"
+                            onChange={(event) =>
+                              setForm((prev) => ({
+                                ...prev,
+                                historyRunDirName: event.target.value,
+                              }))
+                            }
+                          />
+                          <span className="field-hint">
+                            Optional. Saved as kebab-case on disk. CSVs will use{" "}
+                            <code>
+                              {(historyRunDirNameKebab || "run-directory")}
+                              {"-{csv-type}.csv"}
+                            </code>
+                            .
+                          </span>
+                        </div>
+                        <div className="field full">
+                          <label>History options</label>
+                          <div className="polymarket-toggle-card-grid" role="group" aria-label="History options">
+                            <button
+                              type="button"
+                              className={`polymarket-toggle-card ${
+                                form.historyIncludeSubgraph ? "selected" : ""
+                              }`}
+                              aria-pressed={form.historyIncludeSubgraph}
+                              onClick={() =>
+                                setForm((prev) => ({
+                                  ...prev,
+                                  historyIncludeSubgraph: !prev.historyIncludeSubgraph,
+                                }))
+                              }
+                            >
+                              <span className="polymarket-toggle-card-title">
+                                Attempt subgraph trade ingest
+                              </span>
+                              <span className="polymarket-toggle-card-copy">
+                                Use configured subgraph ingest alongside history fetches.
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              className={`polymarket-toggle-card ${
+                                form.historyBuildFeatures ? "selected" : ""
+                              }`}
+                              aria-pressed={form.historyBuildFeatures}
+                              onClick={() =>
+                                setForm((prev) => ({
+                                  ...prev,
+                                  historyBuildFeatures: !prev.historyBuildFeatures,
+                                }))
+                              }
+                            >
+                              <span className="polymarket-toggle-card-title">
+                                Build decision features
+                              </span>
+                              <span className="polymarket-toggle-card-copy">
+                                Generate feature outputs for model calibration.
+                              </span>
+                            </button>
+                          </div>
+                        </div>
+                        {form.historyBuildFeatures ? (
+                          <div className="field full">
+                            <label>Option Chain History Directory</label>
+                            {isDatasetRunsLoading ? (
+                              <div className="polymarket-dataset-selector-state">
+                                Loading dataset directories...
+                              </div>
+                            ) : optionChainRuns.length ? (
+                              <div
+                                className="polymarket-dataset-grid"
+                                role="group"
+                                aria-label="Option Chain history dataset selection"
+                              >
+                                {optionChainRuns.map((run) => {
+                                  const isSelected = form.historyPrnDataset === run.run_dir;
+                                  const runName = run.run_dir.split("/").pop() ?? run.run_dir;
+                                  const hasTrainingCsv = Boolean(run.training_file?.path);
+
+                                  return (
+                                    <button
+                                      key={run.run_dir}
+                                      type="button"
+                                      aria-pressed={isSelected}
+                                      className={`polymarket-dataset-card${
+                                        isSelected ? " selected" : ""
+                                      }${hasTrainingCsv ? "" : " is-missing-training"}`}
+                                      onClick={() =>
+                                        setForm((prev) => ({
+                                          ...prev,
+                                          historyPrnDataset:
+                                            prev.historyPrnDataset === run.run_dir
+                                              ? ""
+                                              : run.run_dir,
+                                        }))
+                                      }
+                                      title={run.run_dir}
+                                    >
+                                      <span className="polymarket-dataset-card-name">
+                                        {runName}
+                                      </span>
+                                      <span className="polymarket-dataset-card-path">
+                                        {run.run_dir}
+                                      </span>
+                                      <span className="polymarket-dataset-card-meta">
+                                        {hasTrainingCsv
+                                          ? "Has training CSV"
+                                          : "Training CSV missing"}
+                                      </span>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            ) : null}
+                            {datasetRunsError ? (
+                              <span className="field-hint">{datasetRunsError}</span>
+                            ) : !optionChainRuns.length ? (
+                              <span className="field-hint">
+                                No option-chain dataset directories found.
+                              </span>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="section-card polymarket-config-card polymarket-map-mode-note">
+                      <div className="polymarket-doc-list">
+                        <p>
+                          Market-map mode refreshes live market mappings and writes
+                          <code>dim_market</code> outputs for the selected trading universe.
+                        </p>
+                        <p>
+                          It uses <code>{form.overrides}</code> and does not require a
+                          date range.
                         </p>
                       </div>
                     </div>
-                    {historyStdout || historyStderr || historyError ? (
-                      <div className="log-block">
-                        <span className="meta-label">
-                          {activeLog === "stdout" ? "Output" : "Errors"}
-                        </span>
-                        <pre className="log-content">
-                          {activeLog === "stdout"
-                            ? historyStdout || "No output captured."
-                            : historyStderr || historyError || "No errors."}
-                        </pre>
-                      </div>
-                    ) : null}
-                  </div>
-                ) : (
-                  <div className="empty">Run the backfill to see output</div>
-                )
-              ) : mapJobStatus ? (
-                <div className="run-output pipeline-run-output">
-                  <div className="pipeline-run-monitor">
-                    <div className="pipeline-run-monitor-header">
-                      <div>
-                        <span className="meta-label">Run monitor</span>
-                        <div className="pipeline-run-monitor-title">
-                          Market map run
-                        </div>
-                      </div>
-                      <span className={`status-pill ${pipelineStatusClass}`}>
-                        {pipelineStatusLabel}
-                      </span>
-                    </div>
-                    <div className="pipeline-run-monitor-grid">
-                      {mapMonitorItems.map((item) => (
-                        <div key={item.label}>
-                          <span className="meta-label">{item.label}</span>
-                          <span>{item.value}</span>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="pipeline-run-monitor-progress">
-                      <div className="pipeline-run-monitor-progress-header">
-                        <span>Progress</span>
-                        <span>{mapProgressLabel}</span>
-                      </div>
-                      <div className="pipeline-progress-stack">
-                        <PipelineProgressBar
-                          title="Pipeline run"
-                          progress={null}
-                          running={mapRunning}
-                          runningLabel="Running pipeline..."
-                          idleLabel={pipelineStatusLabel}
-                          unitLabel="jobs"
-                          forceError={mapJobStatus?.status === "failed"}
-                        />
-                      </div>
-                      <p className="pipeline-run-monitor-note">
-                        Live progress telemetry is not available for market map runs yet.
-                      </p>
-                    </div>
-                  </div>
+                  )}
 
-                  {mapStdout || mapStderr || mapError ? (
-                    <div className="log-block">
-                      <span className="meta-label">
-                        {activeLog === "stdout" ? "Output" : "Errors"}
-                      </span>
-                      <pre className="log-content">
-                        {activeLog === "stdout"
-                          ? mapStdout || "No output captured."
-                          : mapStderr || mapError || "No errors."}
-                      </pre>
+                  {usingWeeklyHistory && !hasEventSources ? (
+                    <div className="help-note">
+                      <strong>Heads up:</strong> weekly finance markets are not
+                      discoverable by pagination. Provide a date range to
+                      auto-generate event URLs.
                     </div>
                   ) : null}
-                </div>
-              ) : (
-                <div className="empty">Run the pipeline to see output</div>
-              )}
-            </div>
-          </section>
-        </div>
-      </div>
 
-      {/* ------------------------------------------------------------------ */}
-      {/* Past Runs Browser (Phase 2)                                        */}
-      {/* ------------------------------------------------------------------ */}
-      <section className="runs-browser-section">
-        <div className="panel">
-          <div className="panel-header runs-browser-header">
-            <div>
-              <h2
-                style={{ cursor: "pointer", userSelect: "none" }}
-                onClick={() => setRunsOpen((prev) => !prev)}
-              >
-                {runsOpen ? "Past Runs" : "Past Runs (collapsed)"}
-              </h2>
-              <span className="panel-hint">
-                {runsLoading
-                  ? "Loading..."
-                  : `${pipelineRuns.length} run${pipelineRuns.length !== 1 ? "s" : ""}`}
-              </span>
-            </div>
-            {runsStorage && runsOpen && (
-              <div className="runs-storage-badge">
-                <span>{runsStorage.total_runs} runs</span>
-                <span>{runsStorage.total_size_mb.toFixed(1)} MB</span>
-              </div>
+                  {formError ? (
+                    <div className="error-banner">
+                      <strong>Input Error:</strong>
+                      <pre>{formError}</pre>
+                    </div>
+                  ) : null}
+
+                  <div className="panel-actions polymarket-config-actions">
+                    <button
+                      className="button primary large polymarket-fixed-action-button polymarket-run-job-button"
+                      type="submit"
+                      disabled={runJobDisabled}
+                    >
+                      {runJobLabel}
+                    </button>
+                  </div>
+                </form>
+              </section>
+            ) : (
+              <section className="panel polymarket-active-run-panel">
+                <div className="panel-header polymarket-panel-header">
+                  <div>
+                    <h2 className="polymarket-job-config-title">Active Run</h2>
+                    <span className="panel-hint">
+                      Monitor progress and inspect stdout/stderr for the current job.
+                    </span>
+                  </div>
+                  <div className="polymarket-active-run-header-actions">
+                    {canStopHistory ? (
+                      <button
+                        className="button ghost danger"
+                        type="button"
+                        onClick={handleStopRun}
+                        disabled={stopLoading}
+                      >
+                        {stopLoading ? "Stopping…" : "Stop run"}
+                      </button>
+                    ) : null}
+                    {showNewJobButton ? (
+                      <button
+                        className="button light"
+                        type="button"
+                        onClick={handleNewJob}
+                      >
+                        New job
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="panel-body">
+                  {usingWeeklyHistory ? (
+                    historyJobStatus ? (
+                      <div className="polymarket-active-run-shell">
+                        <aside className="polymarket-active-run-sidebar">
+                          <div className="pipeline-run-monitor">
+                            <div className="pipeline-run-monitor-header">
+                              <div>
+                                <span className="meta-label">Run monitor</span>
+                                <div className="pipeline-run-monitor-title">
+                                  Weekly history run
+                                </div>
+                              </div>
+                              <span className={`status-pill ${pipelineStatusClass}`}>
+                                {pipelineStatusLabel}
+                              </span>
+                            </div>
+                            <div className="pipeline-run-monitor-grid">
+                              {historyMonitorItems.map((item) => (
+                                <div key={item.label}>
+                                  <span className="meta-label">{item.label}</span>
+                                  <span>{item.value}</span>
+                                </div>
+                              ))}
+                            </div>
+                            <div className="pipeline-run-monitor-progress">
+                              <div className="pipeline-run-monitor-progress-header">
+                                <span>Progress</span>
+                                <span>{historyProgressLabel}</span>
+                              </div>
+                              <div className="pipeline-progress-stack">
+                                <PipelineProgressBar
+                                  title="Stage 1: Fetching / processing markets"
+                                  progress={historyProgress}
+                                  running={historyRunning}
+                                  runningLabel="Running pipeline..."
+                                  idleLabel={pipelineStatusLabel}
+                                  unitLabel="jobs"
+                                  forceError={historyJobStatus?.status === "failed"}
+                                />
+                                {showFeatureProgress ? (
+                                  <PipelineProgressBar
+                                    title="Stage 2: Creating features"
+                                    progress={featuresProgress}
+                                    running={featuresRunning}
+                                    runningLabel="Creating features..."
+                                    idleLabel={
+                                      historyJobStatus?.result?.features_built
+                                        ? "Complete"
+                                        : historyRunning
+                                          ? "Queued"
+                                          : "Not started"
+                                    }
+                                    unitLabel="steps"
+                                    forceError={
+                                      historyJobStatus?.status === "failed" &&
+                                      historyPhase === "features"
+                                    }
+                                  />
+                                ) : null}
+                              </div>
+                              <p className="pipeline-run-monitor-note">
+                                Progress updates only when each market finishes, so
+                                counts never move backward.
+                              </p>
+                            </div>
+                          </div>
+                        </aside>
+
+                        <div className="polymarket-active-run-main">
+                          <div className="run-output pipeline-run-output">
+                            <div className="polymarket-log-tabs">
+                              <button
+                                className={`log-tab ${activeLog === "stdout" ? "active" : ""}`}
+                                type="button"
+                                aria-pressed={activeLog === "stdout"}
+                                onClick={() => handleToggleLog("stdout")}
+                              >
+                                stdout
+                              </button>
+                              <button
+                                className={`log-tab ${activeLog === "stderr" ? "active" : ""}`}
+                                type="button"
+                                aria-pressed={activeLog === "stderr"}
+                                onClick={() => handleToggleLog("stderr")}
+                              >
+                                stderr
+                              </button>
+                            </div>
+                            <div className="log-block">
+                              {!hasAnyLogOutput ? (
+                                <div className="log-empty-state">
+                                  No stdout or stderr captured yet.
+                                </div>
+                              ) : activeLog ? (
+                                <>
+                                  <span className="meta-label">{activeLog}</span>
+                                  <pre className="log-content">
+                                    {activeLog === "stdout"
+                                      ? historyStdout || "No output captured."
+                                      : historyStderr || historyError || "No errors."}
+                                  </pre>
+                                </>
+                              ) : (
+                                <div className="log-empty-state">
+                                  Select <strong>stdout</strong> or <strong>stderr</strong>{" "}
+                                  to view logs. Default stream is{" "}
+                                  <strong>{defaultActiveLog}</strong>.
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="empty">
+                        Start a weekly history run to see progress and logs.
+                      </div>
+                    )
+                  ) : mapJobStatus ? (
+                    <div className="polymarket-active-run-shell">
+                      <aside className="polymarket-active-run-sidebar">
+                        <div className="pipeline-run-monitor">
+                          <div className="pipeline-run-monitor-header">
+                            <div>
+                              <span className="meta-label">Run monitor</span>
+                              <div className="pipeline-run-monitor-title">
+                                Market map run
+                              </div>
+                            </div>
+                            <span className={`status-pill ${pipelineStatusClass}`}>
+                              {pipelineStatusLabel}
+                            </span>
+                          </div>
+                          <div className="pipeline-run-monitor-grid">
+                            {mapMonitorItems.map((item) => (
+                              <div key={item.label}>
+                                <span className="meta-label">{item.label}</span>
+                                <span>{item.value}</span>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="pipeline-run-monitor-progress">
+                            <div className="pipeline-run-monitor-progress-header">
+                              <span>Progress</span>
+                              <span>{mapProgressLabel}</span>
+                            </div>
+                            <div className="pipeline-progress-stack">
+                              <PipelineProgressBar
+                                title="Pipeline run"
+                                progress={null}
+                                running={mapRunning}
+                                runningLabel="Running pipeline..."
+                                idleLabel={pipelineStatusLabel}
+                                unitLabel="jobs"
+                                forceError={mapJobStatus?.status === "failed"}
+                              />
+                            </div>
+                            <p className="pipeline-run-monitor-note">
+                              Live progress telemetry is not available for market
+                              map runs yet.
+                            </p>
+                          </div>
+                        </div>
+                      </aside>
+
+                      <div className="polymarket-active-run-main">
+                        <div className="run-output pipeline-run-output">
+                          <div className="polymarket-log-tabs">
+                            <button
+                              className={`log-tab ${activeLog === "stdout" ? "active" : ""}`}
+                              type="button"
+                              aria-pressed={activeLog === "stdout"}
+                              onClick={() => handleToggleLog("stdout")}
+                            >
+                              stdout
+                            </button>
+                            <button
+                              className={`log-tab ${activeLog === "stderr" ? "active" : ""}`}
+                              type="button"
+                              aria-pressed={activeLog === "stderr"}
+                              onClick={() => handleToggleLog("stderr")}
+                            >
+                              stderr
+                            </button>
+                          </div>
+                          <div className="log-block">
+                            {!hasAnyLogOutput ? (
+                              <div className="log-empty-state">
+                                No stdout or stderr captured yet.
+                              </div>
+                            ) : activeLog ? (
+                              <>
+                                <span className="meta-label">{activeLog}</span>
+                                <pre className="log-content">
+                                  {activeLog === "stdout"
+                                    ? mapStdout || "No output captured."
+                                    : mapStderr || mapError || "No errors."}
+                                </pre>
+                              </>
+                            ) : (
+                              <div className="log-empty-state">
+                                Select <strong>stdout</strong> or <strong>stderr</strong>{" "}
+                                to view logs. Default stream is{" "}
+                                <strong>{defaultActiveLog}</strong>.
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="empty">Run the pipeline to see output.</div>
+                  )}
+                </div>
+              </section>
             )}
           </div>
-
-          {runsOpen && (
-            <div className="panel-body">
-              {runsError && (
-                <div className="error-banner">
-                  <strong>Failed to load runs:</strong>
-                  <pre>{runsError}</pre>
+        ) : workspaceTab === "history" ? (
+          <div
+            id="polymarket-panel-history"
+            role="tabpanel"
+            aria-labelledby="polymarket-tab-history"
+            className="polymarket-tab-panel"
+          >
+            <section className="panel polymarket-history-panel">
+              <div className="panel-header polymarket-panel-header polymarket-job-config-header">
+                <div>
+                  <h2 className="polymarket-job-config-title">Run directory</h2>
+                  <span className="panel-hint">
+                    Browse, preview, rename, activate, and delete prior weekly backfill
+                    run directories and CSV outputs.
+                  </span>
                 </div>
-              )}
+                {runsStorage ? (
+                  <div className="runs-storage-badge" aria-label="Run storage summary">
+                    <span>{runsStorage.total_runs} runs</span>
+                    <span>{runsStorage.total_size_mb.toFixed(1)} MB</span>
+                  </div>
+                ) : null}
+              </div>
 
-              {pipelineRuns.length === 0 && !runsLoading && !runsError ? (
-                <div className="runs-empty">
-                  No pipeline runs found. Run the weekly backfill to create your first run.
-                </div>
-              ) : pipelineRuns.length > 0 ? (
-                <div className="runs-table-wrapper">
-                  <table className="runs-table">
-                    <thead>
-                      <tr>
-                        <th>Status</th>
-                        <th>Label / Run ID</th>
-                        <th>Date Range</th>
-                        <th>Markets</th>
-                        <th>Artifacts</th>
-                        <th>Size</th>
-                        <th>Created</th>
-                        <th>Duration</th>
-                        <th>Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pipelineRuns.map((run) => {
-                        const statusClass =
-                          run.status === "success" ? "success"
-                          : run.status === "failed" ? "failed"
-                          : run.status === "cancelled" ? "cancelled"
-                          : "unknown";
-                        return (
-                          <tr key={run.run_id} className={run.is_active ? "is-active" : ""}>
-                            <td>
-                              <span className={`run-status-dot ${statusClass}`} title={run.status} />
-                            </td>
-                            <td>
-                              <div className="run-label-cell">
-                                {run.is_active && <span className="run-active-badge">Active</span>}
-                                {run.pinned && <span className="run-pinned-badge" title="Pinned">*</span>}
-                                <input
-                                  className="run-label-input"
-                                  type="text"
-                                  placeholder={run.run_id}
-                                  value={
-                                    editingLabel[run.run_id] !== undefined
-                                      ? editingLabel[run.run_id]
-                                      : run.label ?? ""
-                                  }
-                                  onChange={(e) =>
-                                    setEditingLabel((prev) => ({ ...prev, [run.run_id]: e.target.value }))
-                                  }
-                                  onBlur={() => handleRenameBlur(run.run_id)}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                                  }}
-                                />
+              <div className="panel-body polymarket-history-body">
+                {runsLoading ? (
+                  <div className="empty">Loading build history…</div>
+                ) : runsError ? (
+                  <div className="error-banner">
+                    <strong>Failed to load runs:</strong>
+                    <pre>{runsError}</pre>
+                  </div>
+                ) : pipelineRuns.length === 0 ? (
+                  <div className="runs-empty">
+                    No pipeline runs found. Run the weekly backfill to create your
+                    first run.
+                  </div>
+                ) : (
+                  <div className="polymarket-runs-list">
+                    {pipelineRuns.map((run) => {
+                      const statusClass =
+                        run.status === "success"
+                          ? "success"
+                          : run.status === "failed"
+                            ? "failed"
+                            : run.status === "cancelled"
+                              ? "cancelled"
+                              : "unknown";
+                      const statusLabel =
+                        run.status.charAt(0).toUpperCase() + run.status.slice(1);
+                      const dateRangeLabel =
+                        run.start_date && run.end_date
+                          ? `${run.start_date} to ${run.end_date}`
+                          : "--";
+                      const displayLabel = (run.label ?? "").trim();
+                      const csvFiles = sortRunCsvFiles(run.csv_files ?? []);
+                      const hasDecisionFeaturesCsv = csvFiles.some((file) =>
+                        isDecisionFeaturesCsv(file.name),
+                      );
+                      const canBuildDecisionFeatures = !hasDecisionFeaturesCsv;
+                      const fileCount = csvFiles.length;
+                      const csvFilesLabel = fileCount
+                        ? `${fileCount} CSV${fileCount === 1 ? "" : "s"}`
+                        : "No CSV files";
+                      const isRenaming = renamingRunId === run.run_id;
+                      const isOpen = openRunId === run.run_id;
+                      const isPreviewingRun =
+                        isOpen && runCsvPreviewTarget?.runId === run.run_id;
+                      const isBuildingFeatures = featuresBuildRunId === run.run_id;
+                      const featuresBuildErrorMessage =
+                        featuresBuildError?.runId === run.run_id
+                          ? featuresBuildError.message
+                          : null;
+                      const runMainContent = (
+                        <>
+                          <div className="polymarket-run-title-row">
+                            <span
+                              className={`run-status-dot ${statusClass}`}
+                              title={run.status}
+                            />
+                            <div className="polymarket-run-title-group">
+                              {displayLabel ? (
+                                <div className="polymarket-run-title">{displayLabel}</div>
+                              ) : null}
+                              <div className="polymarket-run-badges">
+                                {run.status !== "success" ? (
+                                  <span className={`status-pill ${statusClass}`}>
+                                    {statusLabel}
+                                  </span>
+                                ) : null}
+                                {run.is_active ? (
+                                  <span className="run-active-badge">Active</span>
+                                ) : null}
+                                {run.features_built ? (
+                                  <span className="polymarket-run-tag">Features</span>
+                                ) : null}
                               </div>
                               <div className="run-id-mono">{run.run_id}</div>
-                            </td>
-                            <td>
-                              {run.start_date && run.end_date
-                                ? `${run.start_date} - ${run.end_date}`
-                                : "--"}
-                            </td>
-                            <td>{run.markets != null ? run.markets.toLocaleString() : "--"}</td>
-                            <td>
-                              {run.artifact_count}
-                              {run.features_built && (
-                                <span style={{ fontSize: "0.6875rem", color: "var(--ink-500)", marginLeft: 4 }}>
-                                  +feat
-                                </span>
-                              )}
-                            </td>
-                            <td className="run-size-text">{formatSize(run.size_bytes)}</td>
-                            <td style={{ fontSize: "0.8125rem" }}>
-                              {run.created_at_utc
-                                ? formatDateTime(run.created_at_utc)
-                                : "--"}
-                            </td>
-                            <td style={{ fontSize: "0.8125rem" }}>
-                              {run.duration_s != null ? `${run.duration_s}s` : "--"}
-                            </td>
-                            <td>
-                              <div className="run-actions">
-                                {!run.is_active && (
-                                  <button
-                                    className="run-action-btn"
-                                    onClick={() => handleSetActive(run.run_id)}
-                                    title="Set as active run"
-                                  >
-                                    Activate
-                                  </button>
-                                )}
-                                <button
-                                  className="run-action-btn"
-                                  onClick={() => handleTogglePin(run.run_id)}
-                                  title={run.pinned ? "Unpin" : "Pin"}
-                                >
-                                  {run.pinned ? "Unpin" : "Pin"}
-                                </button>
-                                {!run.is_active && (
-                                  <button
-                                    className="run-action-btn danger"
-                                    onClick={() => {
-                                      setDeleteTarget(run.run_id);
-                                      setDeleteConfirmText("");
+                            </div>
+                          </div>
+                          <div className="polymarket-run-metrics">
+                            <div>
+                              <span className="meta-label">Date range</span>
+                              <span>{dateRangeLabel}</span>
+                            </div>
+                            <div>
+                              <span className="meta-label">Markets</span>
+                              <span>{formatCount(run.markets)}</span>
+                            </div>
+                            <div>
+                              <span className="meta-label">CSVs</span>
+                              <span>{csvFilesLabel}</span>
+                            </div>
+                            <div>
+                              <span className="meta-label">Size</span>
+                              <span>{formatSize(run.size_bytes)}</span>
+                            </div>
+                            <div>
+                              <span className="meta-label">Created</span>
+                              <span>{formatDateTime(run.created_at_utc)}</span>
+                            </div>
+                            <div>
+                              <span className="meta-label">Duration</span>
+                              <span>
+                                {run.duration_s != null ? `${run.duration_s}s` : "--"}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="polymarket-run-path">{run.run_dir}</div>
+                        </>
+                      );
+
+                      return (
+                        <article
+                          key={run.run_id}
+                          className={`polymarket-run-item ${
+                            run.is_active ? "is-active" : ""
+                          }${isOpen ? " is-open" : ""}`}
+                        >
+                          <div className="polymarket-run-top">
+                            {isRenaming ? (
+                              <div className="polymarket-run-main polymarket-run-main--renaming">
+                                <div className="polymarket-rename-input-wrapper">
+                                  <input
+                                    className="input polymarket-rename-input"
+                                    type="text"
+                                    placeholder={run.run_id}
+                                    value={renameValue}
+                                    onChange={(event) =>
+                                      setRenameValue(event.target.value)
+                                    }
+                                    onKeyDown={(event) => {
+                                      if (event.key === "Enter") {
+                                        handleConfirmRename(run.run_id);
+                                      } else if (event.key === "Escape") {
+                                        handleCancelRename();
+                                      }
                                     }}
-                                    title="Delete run"
-                                  >
-                                    Delete
-                                  </button>
-                                )}
+                                    autoFocus
+                                  />
+                                  {renameError ? (
+                                    <div className="error">{renameError}</div>
+                                  ) : null}
+                                  <div className="polymarket-rename-actions">
+                                    <button
+                                      className="button ghost small"
+                                      type="button"
+                                      onClick={() => handleConfirmRename(run.run_id)}
+                                      disabled={renameLoading}
+                                    >
+                                      {renameLoading ? "Saving…" : "Save"}
+                                    </button>
+                                    <button
+                                      className="button ghost small"
+                                      type="button"
+                                      onClick={handleCancelRename}
+                                      disabled={renameLoading}
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                </div>
+                                {runMainContent}
                               </div>
-                              {run.error_summary && (
-                                <div
-                                  style={{
-                                    fontSize: "0.6875rem",
-                                    color: "var(--color-error, #c62828)",
-                                    marginTop: 4,
-                                    maxWidth: 200,
-                                    overflow: "hidden",
-                                    textOverflow: "ellipsis",
-                                    whiteSpace: "nowrap",
+                            ) : (
+                              <button
+                                type="button"
+                                className="polymarket-run-toggle"
+                                aria-expanded={fileCount > 0 ? isOpen : undefined}
+                                aria-controls={
+                                  fileCount > 0 ? `polymarket-run-files-${run.run_id}` : undefined
+                                }
+                                onClick={() => {
+                                  if (fileCount <= 0) return;
+                                  setOpenRunId((prev) =>
+                                    prev === run.run_id ? null : run.run_id,
+                                  );
+                                }}
+                              >
+                                <div className="polymarket-run-main">
+                                  {runMainContent}
+                                </div>
+                              </button>
+                            )}
+
+                            <div className="polymarket-run-actions">
+                              {canBuildDecisionFeatures ? (
+                                <button
+                                  className="button light small"
+                                  type="button"
+                                  onClick={() => handleOpenFeaturesModal(run.run_id)}
+                                  disabled={
+                                    isBuildingFeatures ||
+                                    isRunning ||
+                                    anyJobRunning ||
+                                    isFeaturesBuildRunning ||
+                                    backfillLoading
+                                  }
+                                  title={
+                                    "Select an option-chain training dataset and build decision features."
+                                  }
+                                >
+                                  {isBuildingFeatures
+                                    ? "Building features..."
+                                    : "Build decision features"}
+                                </button>
+                              ) : null}
+                              {!run.is_active ? (
+                                <button
+                                  className="button light small"
+                                  type="button"
+                                  onClick={() => handleSetActive(run.run_id)}
+                                  title="Set as active run"
+                                >
+                                  Activate
+                                </button>
+                              ) : null}
+                              <button
+                                className="button light small"
+                                type="button"
+                                onClick={() => handleStartRename(run.run_id, displayLabel)}
+                                disabled={isRenaming || renameLoading}
+                                title="Rename run"
+                              >
+                                Rename run
+                              </button>
+                              {!run.is_active ? (
+                                <button
+                                  className="button ghost danger small"
+                                  type="button"
+                                  onClick={() => {
+                                    setDeleteTarget(run.run_id);
+                                    setDeleteConfirmText("");
                                   }}
+                                  title="Delete run"
+                                >
+                                  Delete
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+
+                          {run.error_summary || featuresBuildErrorMessage ? (
+                            <div className="polymarket-run-footer">
+                              {run.error_summary ? (
+                                <div
+                                  className="polymarket-run-error-summary"
                                   title={run.error_summary}
                                 >
                                   {run.error_summary}
                                 </div>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                              ) : null}
+                              {featuresBuildErrorMessage ? (
+                                <div
+                                  className="polymarket-run-error-summary"
+                                  title={featuresBuildErrorMessage}
+                                >
+                                  Decision features build failed: {featuresBuildErrorMessage}
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+                          {fileCount > 0 ? (
+                            <div
+                              id={`polymarket-run-files-${run.run_id}`}
+                              className={`polymarket-run-files-drawer${isOpen ? " is-open" : ""}`}
+                              hidden={!isOpen}
+                            >
+                              <div className="polymarket-run-files">
+                                {csvFiles.map((file) => {
+                                  const isPreviewingFile =
+                                    runCsvPreviewTarget?.runId === run.run_id &&
+                                    runCsvPreviewTarget.filename === file.name;
+                                  return (
+                                    <div key={`${run.run_id}-${file.name}`} className="polymarket-run-file">
+                                      <div className="polymarket-run-file-info">
+                                        <div className="polymarket-run-file-name">
+                                          {file.name}
+                                        </div>
+                                        <div className="polymarket-run-file-meta">
+                                          <span>{formatByteCount(file.size_bytes)}</span>
+                                          <span>
+                                            {file.row_count != null
+                                              ? `${file.row_count.toLocaleString()} rows`
+                                              : "Row count unknown"}
+                                          </span>
+                                        </div>
+                                      </div>
+                                      <div className="polymarket-run-file-actions">
+                                        <button
+                                          className="button light small"
+                                          type="button"
+                                          onClick={() =>
+                                            handleToggleRunCsvPreview({
+                                              runId: run.run_id,
+                                              filename: file.name,
+                                              label: file.name,
+                                            })
+                                          }
+                                          title={isPreviewingFile ? "Hide preview" : `Preview ${file.name}`}
+                                        >
+                                          {isPreviewingFile ? "Hide preview" : "Preview"}
+                                        </button>
+                                        <a
+                                          className="button light small"
+                                          href={getPipelineRunFileUrl(run.run_id, file.name)}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          title={`Open ${file.name}`}
+                                        >
+                                          Open
+                                        </a>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                              {isPreviewingRun ? (
+                                <div className="polymarket-csv-preview-panel">
+                                  <div className="polymarket-csv-preview-header">
+                                    <div>
+                                      <span className="meta-label">CSV preview</span>
+                                      <p className="polymarket-csv-preview-title">
+                                        {runCsvPreviewTarget?.label ?? "Select a CSV"}
+                                      </p>
+                                    </div>
+                                    <div className="polymarket-csv-preview-controls">
+                                      <label className="polymarket-csv-preview-control">
+                                        <span className="meta-label">Range</span>
+                                        <select
+                                          className="input"
+                                          value={runCsvPreviewMode}
+                                          onChange={(event) =>
+                                            setRunCsvPreviewMode(
+                                              event.target.value as PreviewMode,
+                                            )
+                                          }
+                                        >
+                                          {PREVIEW_MODE_OPTIONS.map((option) => (
+                                            <option key={option.value} value={option.value}>
+                                              {option.label}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </label>
+                                      <label className="polymarket-csv-preview-control">
+                                        <span className="meta-label">Rows</span>
+                                        <select
+                                          className="input"
+                                          value={runCsvPreviewLimit}
+                                          onChange={(event) => {
+                                            const next = Number.parseInt(
+                                              event.target.value,
+                                              10,
+                                            );
+                                            setRunCsvPreviewLimit(
+                                              Number.isFinite(next)
+                                                ? next
+                                                : PREVIEW_LIMIT_DEFAULT,
+                                            );
+                                          }}
+                                        >
+                                          {PREVIEW_LIMIT_OPTIONS.map((limit) => (
+                                            <option key={limit} value={limit}>
+                                              {limit} rows
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </label>
+                                    </div>
+                                  </div>
+                                  {runCsvPreviewLoading ? (
+                                    <div className="polymarket-csv-preview-empty">
+                                      Loading preview…
+                                    </div>
+                                  ) : runCsvPreviewError ? (
+                                    <div className="error">{runCsvPreviewError}</div>
+                                  ) : runCsvPreviewResponse ? (
+                                    <>
+                                      {runCsvPreviewResponse.headers.length > 0 ? (
+                                        <div className="table-container polymarket-csv-preview-table">
+                                          <table className="preview-table">
+                                            <thead>
+                                              <tr>
+                                                {runCsvPreviewResponse.headers.map((column) => (
+                                                  <th key={column}>{column}</th>
+                                                ))}
+                                              </tr>
+                                            </thead>
+                                            <tbody>
+                                              {runCsvPreviewResponse.rows.length > 0 ? (
+                                                runCsvPreviewResponse.rows.map((row, index) => (
+                                                  <tr key={index}>
+                                                    {runCsvPreviewResponse.headers.map((column) => (
+                                                      <td key={column}>{row[column] ?? ""}</td>
+                                                    ))}
+                                                  </tr>
+                                                ))
+                                              ) : (
+                                                <tr>
+                                                  <td
+                                                    colSpan={
+                                                      runCsvPreviewResponse.headers.length || 1
+                                                    }
+                                                  >
+                                                    No rows to display.
+                                                  </td>
+                                                </tr>
+                                              )}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      ) : (
+                                        <div className="polymarket-csv-preview-empty">
+                                          CSV preview did not include column headers.
+                                        </div>
+                                      )}
+                                      <div className="polymarket-csv-preview-meta">
+                                        <span className="meta-label">
+                                          Showing{" "}
+                                          {runCsvPreviewResponse.mode === "tail"
+                                            ? "last"
+                                            : "first"}{" "}
+                                          ({runCsvPreviewResponse.limit} rows)
+                                        </span>
+                                        <span>
+                                          {runCsvPreviewResponse.row_count != null
+                                            ? `${runCsvPreviewResponse.row_count.toLocaleString()} total rows`
+                                            : "Row count unknown"}
+                                        </span>
+                                      </div>
+                                    </>
+                                  ) : null}
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </article>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </section>
+          </div>
+        ) : (
+          <div
+            id="polymarket-panel-documentation"
+            role="tabpanel"
+            aria-labelledby="polymarket-tab-documentation"
+            className="polymarket-tab-panel"
+          >
+            <section className="panel polymarket-documentation-panel">
+              <div className="panel-header polymarket-panel-header polymarket-job-config-header">
+                <div>
+                  <h2 className="polymarket-job-config-title">Documentation</h2>
+                  <span className="panel-hint">
+                    Page-local guidance for running backfills and managing build history.
+                  </span>
                 </div>
-              ) : null}
-            </div>
-          )}
-        </div>
-      </section>
+              </div>
+              <div className="panel-body polymarket-documentation-body">
+                <section className="section-card polymarket-doc-section">
+                  <h3 className="polymarket-doc-title">Workspace Tabs</h3>
+                  <div className="polymarket-doc-list">
+                    <p>
+                      <strong>Run job</strong> contains the configuration form and the
+                      state-driven <em>Active Run</em> panel used for progress and logs.
+                    </p>
+                    <p>
+                      <strong>Run directory</strong> lists prior weekly backfill runs and
+                      preserves per-run CSV browsing/preview, rename, activate, and
+                      delete actions.
+                    </p>
+                    <p>
+                      <strong>Documentation</strong> is page-local reference content and does
+                      not modify runtime state.
+                    </p>
+                  </div>
+                </section>
 
-      {/* Delete confirmation modal */}
-      {deleteTarget && (
-        <div className="delete-modal-overlay" onClick={() => setDeleteTarget(null)}>
-          <div className="delete-modal" onClick={(e) => e.stopPropagation()}>
-            <h3>Delete pipeline run</h3>
-            <p>
-              This will permanently delete{" "}
-              <span className="mono-inline">{deleteTarget}</span>{" "}
-              and all its artifacts. This cannot be undone.
-            </p>
-            <label style={{ fontSize: "0.875rem", display: "block", marginBottom: "0.5rem" }}>
-              Type <strong>DELETE</strong> to confirm:
-            </label>
-            <input
-              className="input"
-              type="text"
-              value={deleteConfirmText}
-              onChange={(e) => setDeleteConfirmText(e.target.value)}
-              placeholder="DELETE"
-              autoFocus
-              style={{ width: "100%" }}
-            />
-            <div className="delete-modal-actions">
+                <section className="section-card polymarket-doc-section">
+                  <h3 className="polymarket-doc-title">Weekly History Workflow</h3>
+                  <div className="polymarket-doc-list">
+                    <p>
+                      Weekly history mode requires <strong>start</strong> and
+                      <strong> end</strong> dates to auto-generate Friday event URLs for the
+                      selected trading-universe tickers.
+                    </p>
+                    <p>
+                      The optional <strong>Run directory name</strong> field is sanitized to
+                      kebab-case and used as the on-disk run folder name when provided.
+                    </p>
+                    <p>
+                      Optional feature building requires selecting an Option Chain dataset
+                      directory with a resolved <code>training-*.csv</code> pRN file.
+                    </p>
+                    <p>
+                      Event URLs are auto-generated for each Friday in the selected date
+                      range using:
+                      {" "}
+                      <code>
+                        https://polymarket.com/event/{"{ticker}"}-above-on-{"{month}"}-{"{friday_day}"}-{"{year}"}
+                      </code>
+                    </p>
+                    <p>
+                      After launching a run, the UI transitions to <em>Active Run</em> so
+                      progress and logs remain visible without changing API behavior.
+                    </p>
+                    <p>
+                      Run-directory CSV files are normalized to the
+                      {" "}
+                      <code>{"{run-directory}-{csv-type}.csv"}</code>
+                      convention for consistent browsing and export naming.
+                    </p>
+                  </div>
+                </section>
+
+                <section className="section-card polymarket-doc-section">
+                  <h3 className="polymarket-doc-title">Build History Actions</h3>
+                  <div className="polymarket-doc-list">
+                    <p>
+                      Use <strong>Rename run</strong> to update the optional run label
+                      (saved immediately).
+                    </p>
+                    <p>
+                      If a run is missing <code>decision_features.csv</code>, use{" "}
+                      <strong>Build decision features</strong> to generate the file
+                      inside the run directory and pick a training dataset from the
+                      Option Chain History list. Use the backfill control in the
+                      modal if the training dataset needs additional overlap; it
+                      extends the dataset and recomputes weights automatically.
+                    </p>
+                    <p>
+                      Each run can be expanded to view every CSV in the directory and preview
+                      rows inline with First/Last controls.
+                    </p>
+                    <p>
+                      <strong>Activate</strong> updates the active run pointer, and
+                      <strong> Delete</strong> opens a confirmation modal.
+                    </p>
+                    <p>
+                      Deletion still requires typing <code>DELETE</code> before the destructive
+                      button is enabled.
+                    </p>
+                  </div>
+                </section>
+              </div>
+            </section>
+          </div>
+        )}
+      </div>
+
+      {featuresModalRunId ? (
+        <div
+          className="polymarket-features-modal-overlay"
+          onClick={handleCloseFeaturesModal}
+        >
+          <div
+            className="polymarket-features-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="polymarket-features-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="polymarket-features-modal-header">
+              <h3 id="polymarket-features-modal-title">Build decision features</h3>
+              <p>
+                Choose a training dataset from Option Chain History to populate
+                decision features for{" "}
+                <span className="polymarket-features-modal-code">
+                  {featuresModalRunLabel}
+                </span>
+                .
+              </p>
+            </div>
+            <div className="polymarket-features-modal-body">
+              {isDatasetRunsLoading ? (
+                <div className="polymarket-features-modal-empty">
+                  Loading option-chain datasets…
+                </div>
+              ) : datasetRunsError ? (
+                <div className="error">{datasetRunsError}</div>
+              ) : optionChainTrainingRuns.length > 0 ? (
+                <div className="polymarket-features-dataset-list">
+                  {optionChainTrainingRuns.map((run) => {
+                    const trainingFile = run.training_file;
+                    const runName = run.run_dir.split("/").pop() ?? run.id;
+                    const isSelected = featuresModalDatasetId === run.id;
+                    return (
+                      <button
+                        key={run.id}
+                        type="button"
+                        className={`polymarket-features-dataset-card${isSelected ? " selected" : ""}`}
+                        onClick={() => {
+                          setFeaturesModalDatasetId(run.id);
+                          setFeaturesModalError(null);
+                          setBackfillError(null);
+                          setBackfillMessage(null);
+                        }}
+                      >
+                        <div className="polymarket-features-dataset-title">{runName}</div>
+                        <div className="polymarket-features-dataset-meta">
+                          <span>{trainingFile?.name ?? "training-*.csv"}</span>
+                          <span>
+                            {formatDateTime(trainingFile?.last_modified ?? run.last_modified)}
+                          </span>
+                        </div>
+                        <div className="polymarket-features-dataset-path">
+                          {trainingFile?.path ?? run.run_dir}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="polymarket-features-modal-empty">
+                  No option-chain training datasets found.
+                </div>
+              )}
+              {featuresModalError ? (
+                <div className="error">{featuresModalError}</div>
+              ) : null}
+              <div className="polymarket-features-backfill">
+                <div className="polymarket-features-backfill-header">
+                  <div>
+                    <div className="polymarket-features-backfill-title">
+                      Missing overlap?
+                    </div>
+                    <p className="polymarket-features-backfill-copy">
+                      Backfill the selected option-chain dataset with missing expiry
+                      ranges for this run and recompute weights to keep training
+                      logic consistent.
+                    </p>
+                  </div>
+                  <button
+                    className="button light small"
+                    type="button"
+                    onClick={handleBackfillDataset}
+                    disabled={
+                      backfillLoading ||
+                      isFeaturesBuildRunning ||
+                      !featuresModalDatasetId ||
+                      anyJobRunning ||
+                      isRunning
+                    }
+                  >
+                    {backfillLoading ? "Backfilling…" : "Backfill dataset"}
+                  </button>
+                </div>
+                <label className="polymarket-features-backfill-toggle">
+                  <input
+                    type="checkbox"
+                    checked={backfillAllowDefaults}
+                    onChange={(event) => setBackfillAllowDefaults(event.target.checked)}
+                    disabled={backfillLoading}
+                  />
+                  Use defaults if build metadata is missing.
+                </label>
+                {backfillMessage ? (
+                  <div className="polymarket-features-backfill-message">
+                    {backfillMessage}
+                  </div>
+                ) : null}
+                {backfillError ? (
+                  <div className="error">{backfillError}</div>
+                ) : null}
+              </div>
+            </div>
+            <div className="polymarket-features-modal-actions">
               <button
                 className="button ghost"
-                onClick={() => {
-                  setDeleteTarget(null);
-                  setDeleteConfirmText("");
-                }}
+                type="button"
+                onClick={handleCloseFeaturesModal}
+                disabled={isFeaturesBuildRunning || backfillLoading}
               >
                 Cancel
               </button>
               <button
                 className="button primary"
-                disabled={deleteConfirmText !== "DELETE" || deleteLoading}
-                onClick={handleDeleteConfirm}
-                style={{ background: "var(--color-error, #c62828)" }}
+                type="button"
+                onClick={handleConfirmBuildDecisionFeatures}
+                disabled={
+                  isFeaturesBuildRunning ||
+                  backfillLoading ||
+                  optionChainTrainingRuns.length === 0
+                }
               >
-                {deleteLoading ? "Deleting..." : "Delete permanently"}
+                {isFeaturesBuildRunning ? "Building…" : "Build decision features"}
               </button>
             </div>
           </div>
         </div>
-      )}
+      ) : null}
+
+      {deleteTarget ? (
+        <div
+          className="polymarket-delete-modal-overlay"
+          onClick={() => {
+            if (deleteLoading) return;
+            setDeleteTarget(null);
+            setDeleteConfirmText("");
+          }}
+        >
+          <div
+            className="polymarket-delete-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="polymarket-delete-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="polymarket-delete-modal-header">
+              <h3 id="polymarket-delete-modal-title">Delete pipeline run</h3>
+              <p>
+                This will permanently delete{" "}
+                <span className="polymarket-delete-modal-code">{deleteTarget}</span>{" "}
+                and all associated artifacts.
+              </p>
+            </div>
+            <div className="polymarket-delete-modal-body">
+              <label htmlFor="polymarketDeleteConfirmInput">
+                Type <strong>DELETE</strong> to confirm
+              </label>
+              <input
+                id="polymarketDeleteConfirmInput"
+                className="input"
+                type="text"
+                value={deleteConfirmText}
+                onChange={(event) => setDeleteConfirmText(event.target.value)}
+                placeholder="DELETE"
+                autoFocus
+                disabled={deleteLoading}
+              />
+            </div>
+            <div className="polymarket-delete-modal-actions">
+              <button
+                className="button ghost"
+                type="button"
+                onClick={() => {
+                  setDeleteTarget(null);
+                  setDeleteConfirmText("");
+                }}
+                disabled={deleteLoading}
+              >
+                Cancel
+              </button>
+              <button
+                className="button danger polymarket-delete-modal-confirm"
+                type="button"
+                disabled={deleteConfirmText !== "DELETE" || deleteLoading}
+                onClick={handleDeleteConfirm}
+              >
+                {deleteLoading ? "Deleting…" : "Delete permanently"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

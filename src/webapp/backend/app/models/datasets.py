@@ -143,6 +143,12 @@ class DatasetRunRequest(BaseModel):
 
     rv_lookback_days: Optional[int] = Field(default=None)
 
+    ticker_reweight_mode: Optional[str] = Field(default=None)
+    ticker_reweight_alpha_min: Optional[float] = Field(default=None)
+    ticker_reweight_alpha_max: Optional[float] = Field(default=None)
+    trade_focus_beta: Optional[float] = Field(default=None)
+    trade_focus_tickers: Optional[str] = Field(default=None)
+
     cache: Optional[bool] = Field(default=None)
 
     write_drops: Optional[bool] = Field(default=None)
@@ -166,6 +172,38 @@ class DatasetRunResponse(BaseModel):
     stderr: str
     duration_s: float
     command: List[str]
+
+
+class DatasetBackfillRange(BaseModel):
+    start: str = Field(..., description="Backfill start date (YYYY-MM-DD).")
+    end: str = Field(..., description="Backfill end date (YYYY-MM-DD).")
+
+
+class DatasetBackfillRequest(BaseModel):
+    run_dir: str = Field(..., description="Option chain dataset run directory.")
+    polymarket_run_id: str = Field(..., description="Polymarket weekly history run id.")
+    allow_defaults: bool = Field(
+        default=False,
+        description="Allow backfill using default builder settings when config metadata is missing.",
+    )
+
+
+class DatasetBackfillResponse(BaseModel):
+    ok: bool
+    backfilled: bool
+    run_dir: str
+    training_file: Optional[str] = None
+    used_defaults: bool = False
+    required_start: Optional[str] = None
+    required_end: Optional[str] = None
+    existing_start: Optional[str] = None
+    existing_end: Optional[str] = None
+    backfill_ranges: List[DatasetBackfillRange] = Field(default_factory=list)
+    rows_before: Optional[int] = None
+    rows_after: Optional[int] = None
+    rows_added: Optional[int] = None
+    message: str
+    duration_s: float
 
 
 class DatasetFileSummary(BaseModel):

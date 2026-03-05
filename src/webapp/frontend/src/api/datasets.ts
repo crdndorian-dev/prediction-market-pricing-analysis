@@ -49,6 +49,11 @@ export type DatasetRunRequest = {
   noTickerWeights?: boolean;
   noSoftQualityWeight?: boolean;
   rvLookbackDays?: number;
+  tickerReweightMode?: string;
+  tickerReweightAlphaMin?: number;
+  tickerReweightAlphaMax?: number;
+  tradeFocusBeta?: number;
+  tradeFocusTickers?: string;
   cache?: boolean;
   writeDrops?: boolean;
   sanityReport?: boolean;
@@ -108,6 +113,35 @@ export type DatasetRunSummary = {
   training_file?: DatasetFileSummary | null;
   files?: DatasetFileSummary[] | null;
   last_modified?: string | null;
+};
+
+export type DatasetBackfillRange = {
+  start: string;
+  end: string;
+};
+
+export type DatasetBackfillResponse = {
+  ok: boolean;
+  backfilled: boolean;
+  run_dir: string;
+  training_file?: string | null;
+  used_defaults?: boolean;
+  required_start?: string | null;
+  required_end?: string | null;
+  existing_start?: string | null;
+  existing_end?: string | null;
+  backfill_ranges?: DatasetBackfillRange[];
+  rows_before?: number | null;
+  rows_after?: number | null;
+  rows_added?: number | null;
+  message: string;
+  duration_s: number;
+};
+
+export type DatasetBackfillRequest = {
+  runDir: string;
+  polymarketRunId: string;
+  allowDefaults?: boolean;
 };
 
 export type DatasetListResponse = {
@@ -182,6 +216,11 @@ const datasetRequestBody = (payload: DatasetRunRequest) => ({
   no_ticker_weights: payload.noTickerWeights,
   no_soft_quality_weight: payload.noSoftQualityWeight,
   rv_lookback_days: payload.rvLookbackDays,
+  ticker_reweight_mode: payload.tickerReweightMode,
+  ticker_reweight_alpha_min: payload.tickerReweightAlphaMin,
+  ticker_reweight_alpha_max: payload.tickerReweightAlphaMax,
+  trade_focus_beta: payload.tradeFocusBeta,
+  trade_focus_tickers: payload.tradeFocusTickers,
   cache: payload.cache,
   write_drops: payload.writeDrops,
   sanity_report: payload.sanityReport,
@@ -257,6 +296,27 @@ export async function listDatasetRuns(): Promise<DatasetListResponse> {
     );
   }
 
+  return response.json();
+}
+
+export async function backfillOptionChainDataset(
+  payload: DatasetBackfillRequest,
+): Promise<DatasetBackfillResponse> {
+  const response = await fetch(`${API_BASE}/datasets/runs/backfill`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      run_dir: payload.runDir,
+      polymarket_run_id: payload.polymarketRunId,
+      allow_defaults: payload.allowDefaults ?? false,
+    }),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      `Dataset backfill failed (${response.status}): ${detail || "unknown error"}`,
+    );
+  }
   return response.json();
 }
 

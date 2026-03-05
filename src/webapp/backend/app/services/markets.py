@@ -26,6 +26,11 @@ from app.models.markets import (
     MarketsSummaryItem,
     MarketsSummaryResponse,
 )
+from app.services.process_runtime import (
+    ManagedProcessHandle,
+    clear_runtime_file,
+    spawn_managed_process,
+)
 
 BASE_DIR = Path(__file__).resolve().parents[5]
 SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "07-polymarket-markets-refresh-v1.0.py"
@@ -119,6 +124,24 @@ def _cache_put(cache: Dict[str, Tuple[float, object]], key: str, value: object):
     cache[key] = (time.time(), value)
 
 
+def _infer_last_snapshot_date(run_dir: Path, tz_name: str = "America/New_York") -> Optional[str]:
+    snapshot_path = run_dir / "snapshot_daily.csv"
+    if not snapshot_path.exists():
+        return None
+    last_ts: Optional[pd.Timestamp] = None
+    try:
+        for chunk in pd.read_csv(snapshot_path, usecols=["snapshot_time_utc"], chunksize=100_000):
+            ts = pd.to_datetime(chunk["snapshot_time_utc"], utc=True, errors="coerce").max()
+            if pd.notna(ts) and (last_ts is None or ts > last_ts):
+                last_ts = ts
+    except Exception:
+        return None
+    if last_ts is None or pd.isna(last_ts):
+        return None
+    local_date = last_ts.tz_convert(ZoneInfo(tz_name)).date()
+    return local_date.isoformat()
+
+
 # -----------------------------
 # Job manager
 # -----------------------------
@@ -149,6 +172,7 @@ class MarketsJob:
         self.finished_at: Optional[datetime] = None
         self._thread: Optional[threading.Thread] = None
         self._process: Optional[subprocess.Popen[str]] = None
+        self._process_handle: Optional[ManagedProcessHandle] = None
         self._stdout_lines: List[str] = []
         self._stderr_lines: List[str] = []
         self._run_id: Optional[str] = None
@@ -207,14 +231,25 @@ class MarketsJob:
         start_ts = time.time()
         run_dir: Optional[Path] = None
 
-        proc = subprocess.Popen(
+        runtime_dir = RUNS_DIR / self.payload.run_id if self.payload.run_id else None
+        handle = spawn_managed_process(
             cmd,
+            job_id=self.job_id,
+            service="markets_refresh",
+            run_dir=runtime_dir if runtime_dir is not None and runtime_dir.exists() else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
         )
+        proc = handle.process
+        if proc is None:
+            self.status = "failed"
+            self.error = "Markets refresh process did not start."
+            self.finished_at = datetime.utcnow()
+            return
         self._process = proc
+        self._process_handle = handle
 
         def read_stdout():
             nonlocal run_dir
@@ -258,6 +293,10 @@ class MarketsJob:
             self.error = "Markets refresh failed."
         self._snapshot_result(ok, cmd, start_ts, run_dir)
         self.finished_at = datetime.utcnow()
+        if runtime_dir is not None:
+            clear_runtime_file(runtime_dir)
+        self._process = None
+        self._process_handle = None
 
 
 class MarketsJobManager:
@@ -289,9 +328,13 @@ MARKETS_JOB_MANAGER = MarketsJobManager()
 def start_markets_job(payload: MarketsRefreshRequest) -> str:
     if not SCRIPT_PATH.exists():
         raise FileNotFoundError(f"Markets refresh script not found: {SCRIPT_PATH}")
+    # Resolve a concrete run dir up front so refresh jobs do not depend on
+    # script-side latest.json pointers (which may be stale).
+    resolved_run_dir = _resolve_run_dir(payload.run_id)
+    normalized_payload = payload.model_copy(update={"run_id": resolved_run_dir.name})
     # Bust all series/summary caches so the new run's data is read fresh.
     _clear_series_caches()
-    return MARKETS_JOB_MANAGER.start_job(payload)
+    return MARKETS_JOB_MANAGER.start_job(normalized_payload)
 
 
 def get_markets_job(job_id: str) -> MarketsJobStatus:
@@ -329,19 +372,27 @@ def get_markets_summary(
     prn_path = run_dir / "markets_prn_hourly.csv"
     if not prn_path.exists():
         last_refresh = None
+        last_snapshot_date = None
+        snapshot_rows_appended = None
         refresh_path = run_dir / "markets_refresh.json"
         if refresh_path.exists():
             try:
                 payload = json.loads(refresh_path.read_text())
                 last_refresh = payload.get("created_at_utc") or payload.get("updated_at_utc")
+                last_snapshot_date = payload.get("last_snapshot_date")
+                snapshot_rows_appended = payload.get("snapshot_rows_appended")
             except Exception:
                 last_refresh = None
+        if last_snapshot_date is None:
+            last_snapshot_date = _infer_last_snapshot_date(run_dir)
         return MarketsSummaryResponse(
             run_id=run_dir.name,
             week_friday=friday,
             week_monday=monday,
             week_sunday=sunday,
             last_refresh_utc=last_refresh,
+            last_snapshot_date=last_snapshot_date,
+            snapshot_rows_appended=snapshot_rows_appended,
             trading_universe_tickers=trading_universe_tickers,
             markets=[],
         )
@@ -355,12 +406,28 @@ def get_markets_summary(
     if "week_friday" in df.columns:
         df = df[df["week_friday"] == friday]
     if df.empty:
+        last_refresh = None
+        last_snapshot_date = None
+        snapshot_rows_appended = None
+        refresh_path = run_dir / "markets_refresh.json"
+        if refresh_path.exists():
+            try:
+                payload = json.loads(refresh_path.read_text())
+                last_refresh = payload.get("created_at_utc") or payload.get("updated_at_utc")
+                last_snapshot_date = payload.get("last_snapshot_date")
+                snapshot_rows_appended = payload.get("snapshot_rows_appended")
+            except Exception:
+                last_refresh = None
+        if last_snapshot_date is None:
+            last_snapshot_date = _infer_last_snapshot_date(run_dir)
         summary = MarketsSummaryResponse(
             run_id=run_dir.name,
             week_friday=friday,
             week_monday=monday,
             week_sunday=sunday,
-            last_refresh_utc=None,
+            last_refresh_utc=last_refresh,
+            last_snapshot_date=last_snapshot_date,
+            snapshot_rows_appended=snapshot_rows_appended,
             trading_universe_tickers=trading_universe_tickers,
             markets=[],
         )
@@ -387,13 +454,19 @@ def get_markets_summary(
         )
 
     last_refresh = None
+    last_snapshot_date = None
+    snapshot_rows_appended = None
     refresh_path = run_dir / "markets_refresh.json"
     if refresh_path.exists():
         try:
             payload = json.loads(refresh_path.read_text())
             last_refresh = payload.get("created_at_utc") or payload.get("updated_at_utc")
+            last_snapshot_date = payload.get("last_snapshot_date")
+            snapshot_rows_appended = payload.get("snapshot_rows_appended")
         except Exception:
             last_refresh = None
+    if last_snapshot_date is None:
+        last_snapshot_date = _infer_last_snapshot_date(run_dir)
 
     summary = MarketsSummaryResponse(
         run_id=run_dir.name,
@@ -401,6 +474,8 @@ def get_markets_summary(
         week_monday=monday,
         week_sunday=sunday,
         last_refresh_utc=last_refresh,
+        last_snapshot_date=last_snapshot_date,
+        snapshot_rows_appended=snapshot_rows_appended,
         trading_universe_tickers=trading_universe_tickers,
         markets=sorted(items, key=lambda item: (item.ticker, item.threshold)),
     )

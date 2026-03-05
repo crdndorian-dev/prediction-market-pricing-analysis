@@ -64,4 +64,7 @@ The project places particular emphasis on dataset design, temporal consistency, 
 
 # Future work
 
-Future work includes expanding backtests with trade simulation, PnL metrics, and report exports.
+Future work includes : 
+- expanding backtests page (right now, no real backtest can be performed).
+- 2-staged hyperparameter search to improve calibration metrics (micro-adjustments of regularization coefficient : after evaluating initial log-spaced C grid and determining best candidate, test points around this value to assess existence of better value of C in surroundings)
+

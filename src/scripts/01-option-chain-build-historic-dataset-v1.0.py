@@ -15,6 +15,11 @@ import numpy as np
 import pandas as pd
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from option_chain_weighting_v3 import (
+    WEIGHTING_VERSION,
+    apply_weighting_v3,
+    drop_weight_columns,
+)
 
 try:
     import yfinance as yf  # type: ignore
@@ -93,10 +98,12 @@ class Config:
     dividend_yield_default: float = 0.0
     use_forward_moneyness: bool = True
 
-    # Weighting controls
-    add_group_weights: bool = True
-    add_ticker_weights: bool = True
-    use_soft_quality_weight: bool = True
+    # Weighting v3 controls
+    ticker_reweight_mode: str = "none"  # none | sqrt_inv
+    ticker_reweight_alpha_min: float = 0.5
+    ticker_reweight_alpha_max: float = 2.0
+    trade_focus_beta: float = 1.0
+    trade_focus_tickers: Tuple[str, ...] = tuple(PM10_TICKERS)
 
     # Cache
     use_cache: bool = True
@@ -1005,29 +1012,6 @@ def strike_spacing_stats(k: np.ndarray) -> Tuple[float, float]:
 
 
 # ----------------------------
-# Soft quality weighting
-# ----------------------------
-
-def compute_quality_weight(
-    *,
-    quote_source: str,
-    rel_spread_median: Optional[float],
-    prn_adj_intervals: bool,
-    prn_adj_targets: bool,
-) -> float:
-    w = 1.0
-    if quote_source == "close_fallback":
-        w *= 0.25
-    if rel_spread_median is not None and np.isfinite(rel_spread_median):
-        w *= 1.0 / (1.0 + float(rel_spread_median))
-    if prn_adj_intervals:
-        w *= 0.85
-    if prn_adj_targets:
-        w *= 0.90
-    return float(np.clip(w, 0.05, 1.0))
-
-
-# ----------------------------
 # Spot-scale scoring (raw vs split_adj)
 # ----------------------------
 
@@ -1347,6 +1331,12 @@ def process_one(
 
     # Rows + apply pRN band
     tmp_rows: List[dict] = []
+    snapshot_date = asof_used.isoformat()
+    snapshot_dow = asof_used.strftime("%a").upper()[:3]
+    expiry_date = expiration_used.isoformat()
+    week_id = week_friday.isoformat()
+    cluster_week = f"{ticker}|{expiry_date}"
+    cluster_snapshot = f"{ticker}|{expiry_date}|{snapshot_date}|{snapshot_dow}"
     for i, (K, p) in enumerate(zip(k_band_inside, pRN)):
         if not np.isfinite(p):
             continue
@@ -1381,7 +1371,11 @@ def process_one(
                 "week_friday": week_friday.isoformat(),
                 "asof_target": asof_target.isoformat(),
                 "asof_date": asof_used.isoformat(),
+                "snapshot_date": snapshot_date,
+                "snapshot_dow": snapshot_dow,
                 "expiry_close_date_used": expiry_close_used.isoformat(),
+                "expiry_date": expiry_date,
+                "week_id": week_id,
 
                 # option chain expiries (requested Fri, maybe Sat fallback)
                 "option_expiration_requested": expiration_requested.isoformat(),
@@ -1462,6 +1456,10 @@ def process_one(
                 "dropped_insane": diag_curve.get("dropped_insane"),
                 "prn_monotone_adj_intervals": bool(diag_prn.get("monotone_adjusted_intervals")),
                 "prn_monotone_adj_targets": bool(diag_prn.get("monotone_adjusted_targets")),
+                # dependence-aware cluster keys used for weighting v3
+                "cluster_week": cluster_week,
+                "cluster_snapshot": cluster_snapshot,
+                "cluster_strike": f"{ticker}|{expiry_date}|{K_val:.7f}",
             }
         )
 
@@ -1475,24 +1473,13 @@ def process_one(
             "detail": f"kept={len(tmp_rows)} need={cfg.min_strikes_in_prn_band} inside={n_band_inside} used_abslogm={used_abslogm:.4f} spot_scale={spot_scale_used} moneyness_ref={moneyness_ref}",
         }
 
-    # Group id (per ticker + snapshot day + week)
-    group_id = f"{ticker}|{asof_used.isoformat()}|{week_friday.isoformat()}"
     med_dk, min_dk = strike_spacing_stats(np.array([r["K"] for r in tmp_rows], dtype=float))
 
     for rr in tmp_rows:
-        rr["group_id"] = group_id
+        rr["weight_group_key"] = rr["cluster_snapshot"]
+        rr["group_id"] = rr["cluster_snapshot"]
         rr["median_dK"] = float(np.round(med_dk, 6)) if np.isfinite(med_dk) else np.nan
         rr["min_dK"] = float(np.round(min_dk, 6)) if np.isfinite(min_dk) else np.nan
-
-        if cfg.use_soft_quality_weight:
-            rr["quality_weight"] = compute_quality_weight(
-                quote_source=str(rr.get("theta_quote_source") or ""),
-                rel_spread_median=rr.get("rel_spread_median"),
-                prn_adj_intervals=bool(rr.get("prn_monotone_adj_intervals")),
-                prn_adj_targets=bool(rr.get("prn_monotone_adj_targets")),
-            )
-        else:
-            rr["quality_weight"] = 1.0
 
     return tmp_rows, None
 
@@ -1912,7 +1899,14 @@ def main() -> None:
     ap.add_argument("--dividend-yield-default", type=float, default=Config().dividend_yield_default)
     ap.add_argument("--no-forward-moneyness", action="store_true")
 
-    # Weights
+    # Weighting v3
+    ap.add_argument("--ticker-reweight-mode", type=str, choices=["none", "sqrt_inv"], default=Config().ticker_reweight_mode)
+    ap.add_argument("--ticker-reweight-alpha-min", type=float, default=Config().ticker_reweight_alpha_min)
+    ap.add_argument("--ticker-reweight-alpha-max", type=float, default=Config().ticker_reweight_alpha_max)
+    ap.add_argument("--trade-focus-beta", type=float, default=Config().trade_focus_beta)
+    ap.add_argument("--trade-focus-tickers", type=str, default=",".join(PM10_TICKERS))
+
+    # Legacy weight flags retained as deprecated no-op for compatibility.
     ap.add_argument("--no-group-weights", action="store_true")
     ap.add_argument("--no-ticker-weights", action="store_true")
     ap.add_argument("--no-soft-quality-weight", action="store_true")
@@ -1945,6 +1939,12 @@ def main() -> None:
     end = datetime.strptime(args.end, "%Y-%m-%d").date()
     if end < start:
         raise SystemExit("--end must be >= --start")
+
+    if bool(args.no_group_weights) or bool(args.no_ticker_weights) or bool(args.no_soft_quality_weight):
+        print(
+            "[WARN] --no-group-weights / --no-ticker-weights / --no-soft-quality-weight are deprecated "
+            "and ignored under Weighting v3."
+        )
 
     cfg = Config(
         theta_base_url=str(args.theta_base_url),
@@ -1982,9 +1982,11 @@ def main() -> None:
         dividend_yield_default=float(args.dividend_yield_default),
         use_forward_moneyness=(not bool(args.no_forward_moneyness)),
 
-        add_group_weights=(not bool(args.no_group_weights)),
-        add_ticker_weights=(not bool(args.no_ticker_weights)),
-        use_soft_quality_weight=(not bool(args.no_soft_quality_weight)),
+        ticker_reweight_mode=str(args.ticker_reweight_mode),
+        ticker_reweight_alpha_min=float(args.ticker_reweight_alpha_min),
+        ticker_reweight_alpha_max=float(args.ticker_reweight_alpha_max),
+        trade_focus_beta=float(args.trade_focus_beta),
+        trade_focus_tickers=tuple(sorted({t.strip().upper() for t in str(args.trade_focus_tickers).split(",") if t.strip()})),
 
         rv_lookback_days=int(args.rv_lookback_days),
 
@@ -2014,6 +2016,12 @@ def main() -> None:
         raise SystemExit("--dividend-lookback-days must be > 0")
     if cfg.dividend_source == "yfinance" and yf is None:
         raise SystemExit("dividend_source=yfinance requires yfinance installed.")
+    if cfg.ticker_reweight_alpha_min <= 0 or cfg.ticker_reweight_alpha_max <= 0:
+        raise SystemExit("--ticker-reweight-alpha-min and --ticker-reweight-alpha-max must be > 0")
+    if cfg.ticker_reweight_alpha_max < cfg.ticker_reweight_alpha_min:
+        raise SystemExit("--ticker-reweight-alpha-max must be >= --ticker-reweight-alpha-min")
+    if cfg.trade_focus_beta <= 0 or not np.isfinite(cfg.trade_focus_beta):
+        raise SystemExit("--trade-focus-beta must be finite and > 0")
 
     prn_version = (args.prn_version or "v1").strip() or "v1"
     prn_config_hash = (args.prn_config_hash or "").strip() or compute_prn_config_hash(cfg)
@@ -2187,6 +2195,14 @@ def main() -> None:
         f"default_yield={cfg.dividend_yield_default} use_forward_moneyness={cfg.use_forward_moneyness}"
     )
     print(f"[CFG] prefer_bidask: {cfg.prefer_bidask}")
+    print(
+        "[CFG] weighting_v3 "
+        f"version={WEIGHTING_VERSION} "
+        f"ticker_reweight_mode={cfg.ticker_reweight_mode} "
+        f"alpha_clip=[{cfg.ticker_reweight_alpha_min},{cfg.ticker_reweight_alpha_max}] "
+        f"trade_focus_beta={cfg.trade_focus_beta} "
+        f"trade_focus_tickers={list(cfg.trade_focus_tickers)}"
+    )
     print(f"[CFG] threads={args.threads} cache={cfg.use_cache} stock_source={cfg.stock_source}")
     print(f"[CFG] prn_version={prn_version} prn_config_hash={prn_config_hash}")
     if cfg.sanity_report or cfg.sanity_drop:
@@ -2303,7 +2319,7 @@ def main() -> None:
     dupes = int(out_df["row_id"].duplicated().sum())
     if dupes > 0:
         before = len(out_df)
-        print(f"[WARN] row_id duplicates detected: {dupes}. Deduplicating with fallback/quality preference.")
+        print(f"[WARN] row_id duplicates detected: {dupes}. Deduplicating with fallback/quote-quality preference.")
         sort_cols = ["row_id"]
         ascending = [True]
         if "asof_fallback_days" in out_df.columns:
@@ -2314,14 +2330,38 @@ def main() -> None:
             out_df["__expiry_fallback_days"] = pd.to_numeric(out_df["expiry_fallback_days"], errors="coerce").fillna(1e9)
             sort_cols.append("__expiry_fallback_days")
             ascending.append(True)
-        if "quality_weight" in out_df.columns:
-            out_df["__quality_weight"] = pd.to_numeric(out_df["quality_weight"], errors="coerce").fillna(-1.0)
-            sort_cols.append("__quality_weight")
+        quote_rank = {"bidask_mid": 0, "close_fallback": 1}
+        if "theta_quote_source" in out_df.columns:
+            out_df["__quote_source_rank"] = (
+                out_df["theta_quote_source"]
+                .astype("string")
+                .str.lower()
+                .map(quote_rank)
+                .fillna(9)
+                .astype(float)
+            )
+            sort_cols.append("__quote_source_rank")
+            ascending.append(True)
+        if "n_chain_used" in out_df.columns:
+            out_df["__n_chain_used"] = pd.to_numeric(out_df["n_chain_used"], errors="coerce").fillna(-1.0)
+            sort_cols.append("__n_chain_used")
             ascending.append(False)
+        if "rel_spread_median" in out_df.columns:
+            out_df["__rel_spread_median"] = pd.to_numeric(out_df["rel_spread_median"], errors="coerce").fillna(1e9)
+            sort_cols.append("__rel_spread_median")
+            ascending.append(True)
 
         out_df = out_df.sort_values(sort_cols, ascending=ascending).drop_duplicates("row_id", keep="first")
         out_df = out_df.drop(columns=[
-            c for c in ["__asof_fallback_days", "__expiry_fallback_days", "__quality_weight"] if c in out_df.columns
+            c
+            for c in [
+                "__asof_fallback_days",
+                "__expiry_fallback_days",
+                "__quote_source_rank",
+                "__n_chain_used",
+                "__rel_spread_median",
+            ]
+            if c in out_df.columns
         ])
         out_df = out_df.sort_values(["asof_date", "ticker", "K"]).reset_index(drop=True)
         print(f"[WARN] Dropped {before - len(out_df)} duplicate rows after dedup.")
@@ -2329,33 +2369,90 @@ def main() -> None:
     # optional sanity (report and/or drop)
     out_df = _sanity_report_and_optional_drop(out_df, drops, cfg)
 
-    # Group weights: each group sums to ~1 across its rows
-    if cfg.add_group_weights and "group_id" in out_df.columns:
-        gsize = out_df.groupby("group_id")["K"].transform("count").astype(float)
-        out_df["group_size"] = gsize
-        out_df["group_weight"] = (1.0 / gsize).astype(float)
-    else:
-        out_df["group_size"] = np.nan
-        out_df["group_weight"] = 1.0
-
-    # Ticker weights: each ticker sums to ~1 across its groups
-    if cfg.add_ticker_weights and "group_id" in out_df.columns:
-        gcount = out_df.groupby("ticker")["group_id"].nunique()
-        out_df["ticker_group_count"] = out_df["ticker"].map(gcount).astype(float)
-        out_df["ticker_weight"] = (1.0 / out_df["ticker_group_count"]).astype(float)
-    else:
-        out_df["ticker_group_count"] = np.nan
-        out_df["ticker_weight"] = 1.0
-
-    # Final sample weight
-    qw = pd.to_numeric(out_df.get("quality_weight", 1.0), errors="coerce").fillna(1.0).clip(0.01, 1.0)
-    out_df["quality_weight"] = qw
-    out_df["sample_weight_final"] = (out_df["group_weight"] * out_df["ticker_weight"] * out_df["quality_weight"]).astype(float)
-    out_df["sample_weight_final"] = (
-        pd.to_numeric(out_df["sample_weight_final"], errors="coerce")
-        .replace([np.inf, -np.inf], np.nan)
-        .fillna(0.0)
+    # ---------------------------------------------------------------------
+    # Weighting (v3)
+    #
+    # Why v1/v2 weighting is inconsistent:
+    # - Rows within one chain snapshot share the same terminal S_T across strikes.
+    # - Strike labels are nested thresholds, so Bernoulli rows are not independent.
+    # - Naive row-wise likelihood overcounts evidence by roughly |g| for a snapshot g.
+    #
+    # v3 objective treats each chain snapshot group as one information unit:
+    #
+    # \[
+    # \hat{R}_{\text{iid}}(\theta)=\frac{1}{N}\sum_{i=1}^N \ell\!\left(y_i,p_\theta(x_i)\right)
+    # \]
+    #
+    # \[
+    # \hat{R}_{\text{cluster}}(\theta)=
+    # \sum_{g\in\mathcal{G}}
+    # \frac{1}{|g|}
+    # \sum_{i\in g}
+    # \ell\!\left(y_i,p_\theta(x_i)\right)
+    # \]
+    #
+    # \[
+    # w_{i\mid g}=\frac{1}{|g|}
+    # \]
+    #
+    # Optional ticker moderation:
+    #
+    # \[
+    # N_t=\left|\{g\in\mathcal{G}:\text{ticker}(g)=t\}\right|,\quad
+    # \alpha_t=
+    # \operatorname{clip}\!\left(
+    # \sqrt{\frac{\bar N}{N_t}},
+    # \alpha_{\min},
+    # \alpha_{\max}
+    # \right)
+    # \]
+    #
+    # Optional trading-focus multiplier:
+    #
+    # \[
+    # m_t=
+    # \begin{cases}
+    # \beta,& t\in \mathcal{U}_{\text{trade}}\\
+    # 1,& \text{otherwise}
+    # \end{cases}
+    # \]
+    #
+    # Final weights:
+    #
+    # \[
+    # w_i^{\text{raw}} = w_{i\mid g}\cdot \alpha_t\cdot m_t,\qquad
+    # w_i^{\text{final}}=
+    # \frac{w_i^{\text{raw}}}
+    # {\mathbb{E}[w^{\text{raw}}]}
+    # \]
+    #
+    # This is a composite-likelihood-style risk that equalizes influence by
+    # economically distinct snapshot units and improves logloss/calibration stability.
+    # Stored weight_final is global to the built dataset; for strict split-local
+    # regularization stability, training code may recompute from weight_group_key.
+    # ---------------------------------------------------------------------
+    out_df = drop_weight_columns(out_df)
+    out_df = apply_weighting_v3(
+        out_df,
+        ticker_reweight_mode=cfg.ticker_reweight_mode,
+        ticker_reweight_alpha_min=cfg.ticker_reweight_alpha_min,
+        ticker_reweight_alpha_max=cfg.ticker_reweight_alpha_max,
+        trade_focus_beta=cfg.trade_focus_beta,
+        trade_focus_tickers=cfg.trade_focus_tickers,
+        strict=True,
     )
+    out_df["weighting_version"] = WEIGHTING_VERSION
+
+    # Weight invariants
+    group_sums = out_df.groupby("weight_group_key", dropna=False)["weight_group_w"].sum()
+    if not np.all(np.isfinite(group_sums.to_numpy(dtype=float))):
+        raise RuntimeError("weight_group_w produced non-finite group sums.")
+    if not np.allclose(group_sums.to_numpy(dtype=float), 1.0, atol=1e-8):
+        raise RuntimeError("weight_group_w must sum to 1 inside every weight_group_key.")
+
+    mean_final = float(pd.to_numeric(out_df["weight_final"], errors="coerce").mean())
+    if not np.isfinite(mean_final) or abs(mean_final - 1.0) > 1e-8:
+        raise RuntimeError(f"weight_final mean must be 1.0 after renormalization (got {mean_final}).")
 
     # Summary
     weeks = out_df["asof_date"].dt.to_period("W-MON").nunique()
@@ -2364,6 +2461,12 @@ def main() -> None:
     if "group_id" in out_df.columns:
         print("[SUMMARY] per-ticker groups:")
         print(out_df.groupby("ticker")["group_id"].nunique().sort_values(ascending=False).to_string())
+    print(
+        "[SUMMARY] weight_final "
+        f"min={float(out_df['weight_final'].min()):.6g} "
+        f"mean={float(out_df['weight_final'].mean()):.6g} "
+        f"max={float(out_df['weight_final'].max()):.6g}"
+    )
 
     train_view_path = os.path.join(run_dir, train_view_out_name)
     snapshot_path = os.path.join(run_dir, snapshot_out_name)

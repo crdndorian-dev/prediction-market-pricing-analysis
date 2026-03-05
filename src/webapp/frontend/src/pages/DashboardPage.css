@@ -1,7 +1,9 @@
 .dashboard {
+  --dashboard-header-offset: calc(68px + var(--space-8));
   display: flex;
   flex-direction: column;
   gap: var(--space-8);
+  padding-top: var(--dashboard-header-offset);
 }
 
 .dashboard-banner {
@@ -170,22 +172,6 @@
   color: var(--ink-700);
 }
 
-.doc-card {
-  gap: var(--space-4);
-}
-
-.doc-card .card-header {
-  margin-bottom: 0;
-}
-
-.doc-paragraph {
-  margin: 0;
-  color: var(--ink-500);
-  font-size: var(--text-md);
-  line-height: 1.5;
-}
-
-
 .dashboard-overview {
   margin-top: var(--space-10);
 }
@@ -256,33 +242,6 @@
 
 .stage-actions {
   margin-top: auto;
-}
-
-.reveal {
-  animation: fade-up 0.6s ease both;
-}
-
-.delay-1 {
-  animation-delay: 0.05s;
-}
-
-.delay-2 {
-  animation-delay: 0.12s;
-}
-
-.delay-3 {
-  animation-delay: 0.2s;
-}
-
-@keyframes fade-up {
-  from {
-    opacity: 0;
-    transform: translateY(16px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
 }
 
 @media (max-width: 1000px) {

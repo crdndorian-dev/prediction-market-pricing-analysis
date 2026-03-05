@@ -4,6 +4,8 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from app.models.datasets import (
+    DatasetBackfillRequest,
+    DatasetBackfillResponse,
     DatasetJobStatus,
     DatasetListResponse,
     DatasetPreviewResponse,
@@ -13,6 +15,7 @@ from app.models.datasets import (
     DatasetRunSummary,
 )
 from app.services.datasets import (
+    backfill_dataset_for_polymarket,
     cancel_dataset_job,
     get_dataset_job,
     run_dataset,
@@ -77,6 +80,20 @@ def list_dataset_runs_route() -> DatasetListResponse:
     return list_dataset_runs()
 
 
+@router.post("/runs/backfill", response_model=DatasetBackfillResponse)
+def backfill_dataset_route(payload: DatasetBackfillRequest) -> DatasetBackfillResponse:
+    try:
+        ensure_no_active_jobs()
+        return backfill_dataset_for_polymarket(payload)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        status = 409 if "Another job is already running" in str(exc) else 500
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+
 @router.get("/runs/preview", response_model=DatasetPreviewResponse)
 def preview_dataset_file_route(
     path: str = Query(...),
@@ -110,6 +127,8 @@ def delete_dataset_run_route(run_dir: str = Query(...)) -> DatasetRunSummary:
         raise HTTPException(status_code=404, detail=f"Run {run_dir} not found.")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.patch("/runs/rename", response_model=DatasetRunSummary)

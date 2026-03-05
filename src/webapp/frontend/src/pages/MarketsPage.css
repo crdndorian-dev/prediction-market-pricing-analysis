@@ -3,8 +3,43 @@
    =================================================================== */
 
 .markets-page {
-  gap: var(--space-7);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "header meta"
+    "workspace workspace";
+  column-gap: var(--space-6);
+  row-gap: var(--space-8);
+  align-items: start;
   container-type: inline-size;
+}
+
+.markets-page-header {
+  grid-area: header;
+  align-items: center;
+  min-width: 0;
+}
+
+.markets-meta {
+  grid-area: meta;
+  width: min(100%, 320px);
+  align-self: start;
+  justify-self: end;
+}
+
+.markets-title-row {
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-6);
+  flex-wrap: wrap;
+  min-height: 68px;
+}
+
+.markets-page-title {
+  display: flex;
+  align-items: center;
+  font-size: clamp(2rem, 2.8vw, 2.6rem);
+  line-height: 1.05;
 }
 
 /* ===================================================================
@@ -12,6 +47,7 @@
    =================================================================== */
 
 .markets-pipeline-grid {
+  grid-area: workspace;
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 1.5rem;
@@ -20,6 +56,27 @@
 @container (max-width: 960px) {
   .markets-pipeline-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .markets-page {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "header"
+      "meta"
+      "workspace";
+    row-gap: var(--space-5);
+  }
+
+  .markets-meta {
+    justify-self: start;
+  }
+
+  .markets-title-row {
+    min-height: 0;
+    align-items: center;
+    gap: var(--space-5);
   }
 }
 
@@ -255,7 +312,7 @@
 }
 
 .progress-section {
-  padding: 0.75rem 0;
+  padding: 0.75rem var(--space-3);
 }
 
 .progress-header {
@@ -282,6 +339,12 @@
   border-radius: var(--radius-full);
   overflow: hidden;
   position: relative;
+}
+
+.markets-page .progress-bar.running {
+  height: 10px;
+  padding: 2px;
+  box-sizing: border-box;
 }
 
 .progress-bar-fill {

@@ -5,6 +5,7 @@ AGENTS.md
 /.cursor/
 /.vscode/
 !/.vscode/extensions.json
+/deadcode/
 
 
 .env
@@ -14,6 +15,9 @@ AGENTS.md
 
 /ci/
 /tests/
+!/tests/backend/
+!/tests/backend/services/
+!/tests/backend/services/test_markets_refresh_run_resolution.py
 /tools/
 /context/
 /docs/

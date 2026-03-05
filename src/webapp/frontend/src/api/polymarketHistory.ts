@@ -8,6 +8,7 @@ export type PolymarketHistoryRunRequest = {
   fidelityMin?: number;
   barsFreqs?: string;
   outDir?: string;
+  runDirName?: string;
   barsDir?: string;
   dimMarketOut?: string;
   factTradeDir?: string;
@@ -34,6 +35,24 @@ export type PolymarketHistoryRunResponse = {
   features_manifest_path: string | null;
 };
 
+export type PolymarketRunFeaturesRequest = {
+  prnDataset?: string;
+  skipSubgraphLabels?: boolean;
+};
+
+export type PolymarketRunFeaturesResponse = {
+  ok: boolean;
+  run_id: string;
+  run_dir: string;
+  features_built: boolean;
+  features_path: string | null;
+  features_manifest_path: string | null;
+  stdout: string;
+  stderr: string;
+  duration_s: number;
+  command: string[];
+};
+
 export type PolymarketHistoryJobPhase = "history" | "features" | "finalizing";
 
 export type PipelineProgress = {
@@ -58,13 +77,18 @@ export type PolymarketHistoryJobStatus = {
 export type CsvPreview = {
   filename: string;
   headers: string[];
-  rows: Record<string, string>[];
-  total_rows: number;
-  preview_limit: number;
-  truncated: boolean;
+  rows: Record<string, string | null>[];
+  row_count?: number | null;
+  mode: "head" | "tail";
+  limit: number;
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+
+export const getPipelineRunFileUrl = (runId: string, filename: string): string => {
+  const params = new URLSearchParams({ filename });
+  return `${API_BASE}/polymarket-history/runs/${encodeURIComponent(runId)}/file?${params.toString()}`;
+};
 
 export async function startPolymarketHistoryJob(
   payload: PolymarketHistoryRunRequest,
@@ -82,6 +106,7 @@ export async function startPolymarketHistoryJob(
       fidelity_min: payload.fidelityMin,
       bars_freqs: payload.barsFreqs,
       out_dir: payload.outDir,
+      run_dir_name: payload.runDirName,
       bars_dir: payload.barsDir,
       dim_market_out: payload.dimMarketOut,
       fact_trade_dir: payload.factTradeDir,
@@ -134,15 +159,66 @@ export async function cancelPolymarketHistoryJob(
 export async function getCsvPreview(
   jobId: string,
   filename: string,
-  limit: number = 100,
+  mode: "head" | "tail" = "head",
+  limit: number = 20,
 ): Promise<CsvPreview> {
+  const params = new URLSearchParams({
+    mode,
+    limit: String(limit),
+  });
   const response = await fetch(
-    `${API_BASE}/polymarket-history/jobs/${jobId}/csv-preview/${filename}?limit=${limit}`,
+    `${API_BASE}/polymarket-history/jobs/${jobId}/csv-preview/${filename}?${params.toString()}`,
   );
   if (!response.ok) {
     const detail = await response.text();
     throw new Error(
       `CSV preview failed (${response.status}): ${detail || "unknown error"}`,
+    );
+  }
+  return response.json();
+}
+
+export async function previewPipelineRunCsv(
+  runId: string,
+  filename: string,
+  mode: "head" | "tail" = "head",
+  limit: number = 20,
+): Promise<CsvPreview> {
+  const params = new URLSearchParams({
+    mode,
+    limit: String(limit),
+  });
+  const response = await fetch(
+    `${API_BASE}/polymarket-history/runs/${encodeURIComponent(runId)}/csv-preview/${filename}?${params.toString()}`,
+  );
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      `Run CSV preview failed (${response.status}): ${detail || "unknown error"}`,
+    );
+  }
+  return response.json();
+}
+
+export async function buildDecisionFeaturesForRun(
+  runId: string,
+  payload: PolymarketRunFeaturesRequest = {},
+): Promise<PolymarketRunFeaturesResponse> {
+  const response = await fetch(
+    `${API_BASE}/polymarket-history/runs/${encodeURIComponent(runId)}/build-features`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prn_dataset: payload.prnDataset,
+        skip_subgraph_labels: payload.skipSubgraphLabels ?? false,
+      }),
+    },
+  );
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      `Decision features build failed (${response.status}): ${detail || "unknown error"}`,
     );
   }
   return response.json();
@@ -154,6 +230,7 @@ export async function getCsvPreview(
 
 export type PipelineRunSummary = {
   run_id: string;
+  run_dir: string;
   label: string | null;
   status: string;
   created_at_utc: string | null;
@@ -168,6 +245,11 @@ export type PipelineRunSummary = {
   pinned: boolean;
   is_active: boolean;
   artifact_count: number;
+  csv_files: {
+    name: string;
+    size_bytes: number;
+    row_count?: number | null;
+  }[];
   size_bytes: number;
   error_summary: string | null;
 };

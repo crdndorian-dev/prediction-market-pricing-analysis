@@ -549,12 +549,14 @@ def _resolve_objective_value(
 ) -> Optional[float]:
     if objective_name in {"test_logloss", "test"}:
         return test_metrics.get("logloss")
-    # default: prefer rolling/validation logloss if available
-    if metrics_summary.get("val_logloss_mean") is not None:
+    if objective_name == "logloss":
         return metrics_summary.get("val_logloss_mean")
-    if rolling_summary.get("avg_roll_logloss_model") is not None:
-        return rolling_summary.get("avg_roll_logloss_model")
-    return test_metrics.get("logloss")
+    if objective_name == "roll_val_logloss":
+        if rolling_summary.get("avg_roll_logloss_model") is not None:
+            return rolling_summary.get("avg_roll_logloss_model")
+        return metrics_summary.get("val_logloss_mean")
+    # Unknown objective: do not silently fallback to test.
+    return None
 
 
 def run_trial(
@@ -568,7 +570,11 @@ def run_trial(
         try:
             cached = json.loads(result_path.read_text())
             if cached.get("status") == "success":
-                return cached
+                cached_objective_name = str(cached.get("objective_name") or "logloss")
+                cached_objective_value = cached.get("objective")
+                if cached_objective_name == objective_name:
+                    if objective_name in {"test_logloss", "test"} or cached_objective_value is not None:
+                        return cached
         except Exception:
             pass
 
@@ -611,10 +617,18 @@ def run_trial(
     )
 
     status = "success" if return_code == 0 else "failed"
+    objective_error: Optional[str] = None
+    if status == "success" and objective_name not in {"test_logloss", "test"} and objective_value is None:
+        status = "failed"
+        objective_error = (
+            "Validation objective requested but no validation summary was produced "
+            "(missing metrics_summary.json / rolling_summary.csv)."
+        )
     result = {
         "status": status,
         "return_code": return_code,
         "runtime_seconds": runtime_seconds,
+        "objective_name": objective_name,
         "objective": objective_value,
         "score": objective_value,
         "delta_brier": None,
@@ -626,7 +640,8 @@ def run_trial(
         "test_weeks_range": test_range,
         "command": cmd,
         "stdout": stdout,
-        "stderr": stderr,
+        "stderr": stderr if objective_error is None else f"{stderr}\n{objective_error}".strip(),
+        "objective_error": objective_error,
     }
 
     result_path.write_text(json.dumps(result, indent=2))
@@ -799,7 +814,14 @@ def _load_config_from_json(path: Path) -> Dict[str, Any]:
 def _resolve_objective(value: Optional[str]) -> str:
     if not value:
         return "logloss"
-    return value
+    obj = str(value).strip().lower()
+    if obj in {"test", "test_logloss"}:
+        return "test_logloss"
+    if obj in {"roll_val_logloss", "logloss"}:
+        return obj
+    raise ValueError(
+        f"Unsupported objective {value!r}. Expected one of: logloss, roll_val_logloss, test_logloss."
+    )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -863,6 +885,11 @@ def main() -> None:
         n_workers = int(_get_config("parallel", _get_config("n_workers", 1)) or 1)
 
     objective = _resolve_objective(args.objective if args.objective is not None else _get_config("objective"))
+    if objective == "test_logloss":
+        print(
+            "[WARN] objective=test_logloss uses test split for model selection. "
+            "Use only for explicit diagnostics, not unbiased evaluation."
+        )
     max_trials = args.max_trials if args.max_trials is not None else _get_config("max_trials")
 
     catalog_path = Path(args.catalog_path)

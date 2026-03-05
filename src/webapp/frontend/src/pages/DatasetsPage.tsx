@@ -577,6 +577,9 @@ export default function DatasetsPage() {
       setRunError(null);
     }
   };
+  const isDatasetJobActive = Boolean(
+    jobId && (!jobStatus || jobStatus.status === "running" || jobStatus.status === "queued"),
+  );
 
   useEffect(() => {
     refreshDatasetRuns();
@@ -601,6 +604,12 @@ export default function DatasetsPage() {
       setRunJobPanel("active_run");
     }
   }, [jobStatus?.status]);
+
+  useEffect(() => {
+    if (isDatasetJobActive) {
+      setRunJobPanel("active_run");
+    }
+  }, [isDatasetJobActive]);
 
   const resolvedRange =
     formState.start && formState.end
@@ -959,10 +968,11 @@ export default function DatasetsPage() {
   }, []);
 
   const handleNewJob = useCallback(() => {
+    if (isDatasetJobActive) return;
     setRunJobPanel("configuration");
     setActiveLog(null);
     setWorkspaceTab("run_job");
-  }, []);
+  }, [isDatasetJobActive]);
   const deleteTargetRun = deleteConfirmRun
     ? datasetRuns.find((run) => run.id === deleteConfirmRun) ?? null
     : null;
@@ -1014,7 +1024,7 @@ export default function DatasetsPage() {
             }`}
             onClick={() => setWorkspaceTab("run_directory")}
           >
-            History directory
+            Datasets
           </button>
           <button
             id="datasets-tab-documentation"
@@ -1039,7 +1049,7 @@ export default function DatasetsPage() {
             className="datasets-tab-panel"
           >
             <div className="datasets-grid">
-              {runJobPanel === "configuration" ? (
+              {runJobPanel === "configuration" && !isDatasetJobActive ? (
                 <section className="panel">
           <div className="panel-header datasets-job-config-header">
             <div>
@@ -2066,7 +2076,7 @@ export default function DatasetsPage() {
                 <section className="panel">
           <div className="panel-header">
             <div>
-              <h2>Active Run</h2>
+              <h2 className="datasets-job-config-title">Active Run</h2>
               <span className="panel-hint">
                 Captures stdout/stderr from the dataset script.
               </span>
@@ -2162,7 +2172,7 @@ export default function DatasetsPage() {
                       {(jobStatus.status === "running" ||
                         jobStatus.status === "queued") ? (
                         <button
-                          className="button ghost kill-button"
+                          className="button ghost kill-button danger"
                           type="button"
                           disabled={killLoading}
                           onClick={handleKill}
@@ -2296,7 +2306,7 @@ export default function DatasetsPage() {
             <section className="panel dataset-registry-panel">
         <div className="panel-header datasets-job-config-header">
           <div>
-            <h2 className="datasets-job-config-title">History Directory</h2>
+            <h2 className="datasets-job-config-title">Datasets</h2>
           </div>
         </div>
         <div className="panel-body dataset-registry-body">

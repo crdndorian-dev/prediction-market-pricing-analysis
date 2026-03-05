@@ -20,6 +20,7 @@ from app.models.market_map import (
     MarketMapRunRequest,
     MarketMapRunResponse,
 )
+from app.services.process_runtime import spawn_managed_process
 
 BASE_DIR = Path(__file__).resolve().parents[5]
 SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "02-polymarket-market-map-v1.0.py"
@@ -266,11 +267,24 @@ def run_market_map(payload: MarketMapRunRequest) -> MarketMapRunResponse:
     env["PYTHONPATH"] = os.pathsep.join([existing, root]) if existing else root
 
     start = time.monotonic()
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
+    handle = spawn_managed_process(
+        cmd,
+        job_id="market_map",
+        service="market_map",
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    proc = handle.process
+    if proc is None:
+        raise RuntimeError("Failed to start market map process.")
+    stdout_value, stderr_value = proc.communicate()
     duration_s = round(time.monotonic() - start, 3)
 
-    output_value = _parse_stdout_value(result.stdout, "[dim_market] output")
-    source_run = _parse_stdout_value(result.stdout, "[dim_market] source_run")
+    output_value = _parse_stdout_value(stdout_value or "", "[dim_market] output")
+    source_run = _parse_stdout_value(stdout_value or "", "[dim_market] source_run")
     output_path = None
     if output_value:
         output_path = Path(output_value)
@@ -285,8 +299,8 @@ def run_market_map(payload: MarketMapRunRequest) -> MarketMapRunResponse:
         output_path=str(output_path.relative_to(BASE_DIR)) if output_path else None,
         row_count=row_count,
         source_run=source_run,
-        stdout=result.stdout,
-        stderr=result.stderr,
+        stdout=stdout_value or "",
+        stderr=stderr_value or "",
         duration_s=duration_s,
     )
 

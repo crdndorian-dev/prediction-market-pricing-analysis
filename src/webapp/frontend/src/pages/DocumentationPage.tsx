@@ -1,8 +1,10 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
+import katex from "katex";
 import { Link, useLocation } from "react-router-dom";
 
 import PipelineStatusCard from "../components/PipelineStatusCard";
 import { useAnyJobRunning } from "../contexts/jobGuard";
+import "katex/dist/katex.min.css";
 import "./DocumentationPage.css";
 
 type DocPageLink = {
@@ -26,6 +28,25 @@ const docPages: DocPageLink[] = [
   { id: "markets", label: "Markets", route: "/markets" },
   { id: "backtests", label: "Backtests", route: "/backtests" },
 ];
+
+function DocEquation({ latex }: { latex: string }) {
+  const rendered = useMemo(() => {
+    try {
+      return katex.renderToString(latex, {
+        throwOnError: false,
+        displayMode: true,
+      });
+    } catch {
+      return "";
+    }
+  }, [latex]);
+
+  if (!rendered) {
+    return <pre className="docs-equation-fallback">{latex}</pre>;
+  }
+
+  return <div className="docs-equation" dangerouslySetInnerHTML={{ __html: rendered }} />;
+}
 
 export const optionChainDoc = (
   <>
@@ -1067,10 +1088,10 @@ export const optionChainDoc = (
         <tbody>
           <tr>
             <td><code>group_id</code></td>
-            <td>Group key <code>ticker|asof_date|week_friday</code>.</td>
+            <td>Compatibility alias for v3 snapshot group key (<code>cluster_snapshot</code>).</td>
             <td>
-              Computed per snapshot group.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1478</code>.
+              Equals <code>ticker|expiry_date|snapshot_date|snapshot_dow</code>.
+              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
             </td>
           </tr>
           <tr>
@@ -1107,58 +1128,75 @@ export const optionChainDoc = (
         </thead>
         <tbody>
           <tr>
-            <td><code>quality_weight</code></td>
-            <td>Soft quality weight based on quote source, spreads, and pRN adjustments.</td>
+            <td><code>weight_group_key</code></td>
+            <td>Primary cluster key <code>ticker|expiry_date|snapshot_date|snapshot_dow</code>.</td>
             <td>
-              Computed and clipped to [0.01, 1].
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1011</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1487</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L2351</code>.
+              Computed in weighting v3 from canonical snapshot and expiry dates.
+              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
             </td>
           </tr>
           <tr>
-            <td><code>group_size</code></td>
-            <td>Number of strikes in the group (when group weights enabled).</td>
+            <td><code>weight_group_size</code></td>
+            <td>Number of rows in <code>weight_group_key</code>.</td>
             <td>
-              Computed from <code>group_id</code> counts.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L2333</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L2335</code>.
+              Group size used to avoid over-counting correlated strikes.
+              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
             </td>
           </tr>
           <tr>
-            <td><code>group_weight</code></td>
-            <td>Per-row group weight (<code>1 / group_size</code> when enabled).</td>
+            <td><code>weight_group_w</code></td>
+            <td>Per-row group weight, exactly <code>1 / weight_group_size</code>.</td>
             <td>
-              Computed from group sizes; defaults to 1 if disabled.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L2333</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L2339</code>.
+              Invariant: sum of <code>weight_group_w</code> per group is 1.
+              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
             </td>
           </tr>
           <tr>
-            <td><code>ticker_group_count</code></td>
-            <td>Number of groups for the ticker (when ticker weights enabled).</td>
+            <td><code>weight_ticker_group_count</code></td>
+            <td>Number of unique snapshot groups for each ticker.</td>
             <td>
-              Computed by counting groups per ticker.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L2342</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L2344</code>.
+              Used by optional ticker moderation.
+              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
             </td>
           </tr>
           <tr>
-            <td><code>ticker_weight</code></td>
-            <td>Per-row ticker weight (<code>1 / ticker_group_count</code> when enabled).</td>
+            <td><code>weight_ticker_w_raw</code></td>
+            <td>Ticker moderation multiplier (<code>1</code> or clipped sqrt-inverse count).</td>
             <td>
-              Computed from ticker group counts; defaults to 1 if disabled.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L2343</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L2348</code>.
+              Defaults to 1 in <code>none</code> mode.
+              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
             </td>
           </tr>
           <tr>
-            <td><code>sample_weight_final</code></td>
-            <td>Final sample weight.</td>
+            <td><code>weight_trade_focus_mult</code></td>
+            <td>Trading-universe multiplier (<code>beta</code> for selected tickers, else <code>1</code>).</td>
             <td>
-              <code>group_weight * ticker_weight * quality_weight</code>.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L2351</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L2353</code>.
+              Applied after group and ticker weighting.
+              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
+            </td>
+          </tr>
+          <tr>
+            <td><code>weight_raw</code></td>
+            <td>Unnormalized product of group, ticker, and trade-focus multipliers.</td>
+            <td>
+              <code>weight_group_w * weight_ticker_w_raw * weight_trade_focus_mult</code>.
+              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
+            </td>
+          </tr>
+          <tr>
+            <td><code>weight_final</code></td>
+            <td>Final training weight after mean-1 renormalization.</td>
+            <td>
+              <code>weight_raw / mean(weight_raw)</code>; required default weight column for model training.
+              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
+            </td>
+          </tr>
+          <tr>
+            <td><code>weighting_version</code></td>
+            <td>Weighting schema tag (current: <code>v3</code>).</td>
+            <td>
+              Added to support deterministic migration and auditability.
+              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
             </td>
           </tr>
         </tbody>
@@ -1343,8 +1381,9 @@ const polymarketHistoryDoc = (
       The Polymarket History Builder manages two related workflows: a weekly
       history backfill for closed markets (including CLOB history), and a
       lightweight market-map run that builds the <code>dim_market</code> mapping
-      for live markets. It centralizes configuration, live run monitoring, and
-      a browseable archive of past runs.
+      for live markets. The active weekly run is also extended by the Markets
+      page refresh, which appends raw trades, option‑chain pRN curves, and
+      daily close snapshots into the same run directory.
     </p>
 
     <div className="docs-split">
@@ -1369,7 +1408,11 @@ const polymarketHistoryDoc = (
         <ul>
           <li>
             Weekly history run directory under <code>src/data/raw/polymarket/weekly_history</code>
-            (plus artifacts recorded in the Past Runs browser).
+            (customizable via the run-directory-name field, plus artifacts recorded
+            in the Run Directory browser).
+          </li>
+          <li>
+            Daily close snapshots appended to <code>snapshot_daily.csv</code> for inference.
           </li>
           <li>
             Market map output file path shown in the latest run output panel.
@@ -1391,7 +1434,10 @@ const polymarketHistoryDoc = (
         Latest run output: live status, progress bars, and log output.
       </li>
       <li>
-        Past runs browser: inspect, label, pin, activate, and delete run records.
+        Run directory browser: inspect, preview CSVs, rename, activate, and delete
+        run records, plus build missing <code>decision_features.csv</code> outputs
+        (selecting a training dataset from Option Chain History and optionally
+        backfilling it for overlap before feature generation).
       </li>
     </ul>
 
@@ -1400,9 +1446,17 @@ const polymarketHistoryDoc = (
       <li>Decide whether you need weekly history or just a market-map refresh.</li>
       <li>Select tickers from the trading universe (only these are allowed).</li>
       <li>For weekly backfill, set start/end dates to auto-generate event URLs.</li>
+      <li>Optionally provide a run directory name (sanitized to kebab-case).</li>
       <li>Optionally enable subgraph ingestion or feature building.</li>
       <li>Run the pipeline and monitor progress in the output panel.</li>
-      <li>Use the Past Runs table to activate or label the run for downstream use.</li>
+      <li>
+        Use the Run Directory tab to preview CSVs and activate or rename the run for
+        downstream use.
+      </li>
+      <li>
+        If decision feature builds report missing overlap, backfill the selected
+        option-chain dataset before rebuilding features.
+      </li>
     </ol>
 
     <h3>Run Configuration</h3>
@@ -1471,6 +1525,10 @@ const polymarketHistoryDoc = (
           <li>
             A helper panel shows how many URLs and Fridays were generated.
           </li>
+          <li>
+            Optional run directory name controls the weekly run folder and CSV naming
+            convention (<code>&lt;run-directory&gt;-&lt;csv-type&gt;.csv</code>).
+          </li>
         </ul>
       </div>
       <div className="docs-panel">
@@ -1516,7 +1574,7 @@ const polymarketHistoryDoc = (
       </li>
     </ul>
 
-    <h3>Past Runs Browser</h3>
+    <h3>Run Directory Browser</h3>
     <ul>
       <li>
         Lists all historical backfill runs with status, dates, market counts, and artifacts.
@@ -1525,19 +1583,23 @@ const polymarketHistoryDoc = (
         Storage badge shows total runs and disk usage when expanded.
       </li>
       <li>
-        Click a label cell to rename; changes are saved on blur or Enter.
+        Expand a run to view all CSVs in that run directory with inline preview and
+        open/download actions.
+      </li>
+      <li>
+        Use <strong>Rename run</strong> to update the run label (saved immediately).
       </li>
       <li>
         Activate marks a run as the active/default run for downstream workflows.
-      </li>
-      <li>
-        Pin highlights a run without changing the active selection.
       </li>
       <li>
         Delete is disabled for the active run and requires typing <code>DELETE</code>.
       </li>
       <li>
         Error summaries appear inline for failed runs (hover for full text).
+      </li>
+      <li>
+        Existing legacy runs remain browseable even if they still use older CSV names.
       </li>
     </ul>
 
@@ -1559,208 +1621,362 @@ const polymarketHistoryDoc = (
 const calibrateDoc = (
   <>
     <p>
-      The Calibrate page trains probabilistic models that translate option‑derived
-      risk‑neutral signals (pRN) into realized outcome probabilities. It supports
-      a base calibration model, an optional two‑stage Polymarket overlay, and a
-      mixed Polymarket + pRN model. Outputs are versioned under
-      <code>src/data/models</code> and can be reviewed, compared, and reused in
-      downstream workflows.
+      The Calibrate page estimates probability mappings from option-chain features to
+      realized outcomes using temporally ordered evaluation and dependence-aware weighting.
+      The workflow is organized into three tabs: <code>Run Job</code>, <code>Models</code>,
+      and <code>Documentation</code>. All controls on <code>Run Job</code> map to active
+      backend behavior; model artifacts are versioned under <code>src/data/models</code>.
     </p>
 
     <div className="docs-split">
       <div className="docs-panel">
-        <h3>Primary Inputs</h3>
+        <h3>Base Model</h3>
+        <DocEquation latex={"\\hat p = \\sigma(\\beta_0 + \\beta^\\top x)"} />
+      </div>
+      <div className="docs-panel">
+        <h3>Selection Objective</h3>
+        <DocEquation
+          latex={
+            "\\mathcal{L} = -\\frac{1}{N}\\sum_i\\left[y_i\\log\\hat p_i + (1-y_i)\\log(1-\\hat p_i)\\right]"
+          }
+        />
+      </div>
+      <div className="docs-panel">
+        <h3>Group Equalization</h3>
+        <DocEquation
+          latex={
+            "w_{i\\mid g}=\\frac{1}{|g|},\\quad w_i^{\\mathrm{final}}=\\frac{w_i^{\\mathrm{raw}}}{\\mathbb{E}[w^{\\mathrm{raw}}]}"
+          }
+        />
+      </div>
+    </div>
+
+    <h3>Page Layout</h3>
+    <ul>
+      <li>
+        Top-level tabs: <code>Run Job</code>, <code>Models</code>, and <code>Documentation</code>.
+      </li>
+      <li>
+        <code>Run Job</code> has two panel states: <code>Run Configuration</code> and
+        <code>Active Run</code>, matching builder-page job UX.
+      </li>
+      <li>
+        <code>Run Configuration</code> is organized into five required sections:
+        Basic Settings, Regression and Set Settings, Model Structure, Weights and Groups, and Bootstrap and Confidence.
+      </li>
+      <li>
+        <code>Active Run</code> shows job status, stdout/stderr logs, metrics summary,
+        diagnostics availability, and artifact links.
+      </li>
+      <li>
+        Every run writes reproducibility and audit artifacts:
+        <code>config.executed.json</code>, <code>audit_split_composition.csv</code>,
+        <code>audit_overlap.json</code>, and <code>audit_weight_distribution.json</code>.
+      </li>
+      <li>
+        <code>Models</code> includes a visual artifact inspector: diagnostics, audits, and metrics render
+        as charts and structured tables by default, with an optional raw toggle for power users.
+      </li>
+    </ul>
+
+    <h3>Auto-Calibrate Mode</h3>
+    <ul>
+      <li>
+        Auto run searches a curated, option-only grid of feature sets and hyperparameters while keeping
+        split settings fixed. The time regime (day-of-week / DTE bucket) is locked and never searched.
+      </li>
+      <li>
+        By default, selection uses validation logloss only (mean across folds) with a robustness filter and a
+        1-SE rule to avoid winner’s curse. Optional outer backtests can be enabled to select by median/worst
+        test delta logloss across folds, trading runtime for stronger generalization checks.
+      </li>
+      <li>
+        During the search, the UI shows candidate progress and a rolling top-N leaderboard. Artifacts include
+        <code>auto_search_leaderboard.csv</code>, <code>best_config.json</code>, and <code>auto_search_summary.json</code>.
+        Outer backtests write <code>outer_folds.json</code>, <code>outer_cv_summary.json</code>, plus per-trial
+        <code>outer_fold_results.csv</code>.
+      </li>
+    </ul>
+
+    <h3>Models Tab: Manual vs Auto</h3>
+    <ul>
+      <li>
+        Each model card shows a run-type badge: <code>MANUAL</code> for direct runs and <code>AUTO</code> for auto-search runs.
+      </li>
+      <li>
+        AUTO cards also show auto status (<code>selected</code>, <code>no_viable_model</code>, etc.) and selected trial id when available.
+      </li>
+      <li>
+        AUTO run directories use a dual layout:
+        <code>src/data/models/&lt;run_name&gt;/selected_model/</code> for the final selected model and
+        <code>src/data/models/&lt;run_name&gt;/auto_search/</code> for search diagnostics, with
+        <code>run_manifest.json</code> at run root.
+      </li>
+      <li>
+        Selected-model metrics and equations are displayed exactly like manual runs, sourced from
+        <code>selected_model/metrics.csv</code> and companion artifacts.
+      </li>
+      <li>
+        Artifact browsing is sectioned: <code>Selected Model</code> and <code>Auto Search</code>.
+        Legacy flat auto-run folders are still supported and mapped into these sections at runtime.
+      </li>
+      <li>
+        If no candidate passes acceptance gates, the card shows a no-viable callout while still exposing
+        leaderboard and rejection artifacts under <code>Auto Search</code>.
+      </li>
+    </ul>
+
+    <h3>Basic Settings</h3>
+    <ul>
+      <li>
+        Choose the training dataset artifact, model directory name, random seed, and weight-column strategy.
+      </li>
+      <li>
+        <code>Time regime</code> is a required single-choice control: Monday/Tuesday/Wednesday/Thursday map to
+        4/3/2/1 DTE respectively.
+      </li>
+      <li>
+        Calibration runs train on exactly one day-of-week regime at a time to avoid mixed-horizon behavior.
+      </li>
+    </ul>
+
+    <h3>Regression and Set Settings</h3>
+    <p>
+      This section configures temporal splits and regularization search. The default
+      objective is <code>logloss</code> because it is a proper scoring rule for probabilities
+      and remains stable across class-imbalance regimes.
+    </p>
+    <div className="docs-split">
+      <div className="docs-panel">
+        <h3>Split Controls</h3>
         <ul>
           <li>
-            Option‑chain training dataset (CSV) from the Option Chain History Builder.
+            <code>Split strategy</code>: <code>walk_forward</code> (default) or <code>single_holdout</code>.
           </li>
           <li>
-            Optional Polymarket decision features dataset (<code>decision_features.csv</code>
-            / <code>.parquet</code>) for mixed or two‑stage modes.
+            <code>Window mode</code>: <code>rolling</code> or <code>expanding</code> for walk-forward folds.
           </li>
           <li>
-            Labels are required for any model training. The base model searches
-            <code>label</code>, <code>outcome_ST_gt_K</code>, or <code>outcome</code>.
+            <code>Rolling</code> uses a fixed-length training window; early folds are skipped until
+            the full training window is available.
+          </li>
+          <li>
+            Train/validation/test window lengths define fold boundaries in weeks.
+          </li>
+          <li>
+            <code>Embargo (days)</code> removes near-boundary rows to reduce temporal leakage.
+          </li>
+          <li>
+            Embargo uses day-level timestamps when available; otherwise it falls back to week-level
+            embargo and emits a warning.
           </li>
         </ul>
       </div>
       <div className="docs-panel">
-        <h3>Primary Outputs</h3>
+        <h3>Regularization Controls</h3>
         <ul>
           <li>
-            Base calibration artifacts: <code>final_model.joblib</code>,
-            <code>metadata.json</code>, <code>metrics.csv</code>.
+            <code>C grid</code> can be preset or custom; lower <code>C</code> implies stronger regularization.
           </li>
           <li>
-            Two‑stage overlay artifacts (when enabled):
-            <code>two_stage_model.joblib</code>, <code>two_stage_metrics.csv</code>,
-            <code>two_stage_metadata.json</code>.
+            <code>Calibration method</code>: <code>none</code> or <code>platt</code>.
           </li>
           <li>
-            Mixed model artifacts (when enabled) under
-            <code>src/data/models/mixed/&lt;run-id&gt;</code>.
+            <code>Selection objective</code>: <code>logloss</code>, <code>brier</code>, or <code>ece_q</code>.
+          </li>
+          <li>
+            Under walk-forward CV, <code>C</code> is selected with the 1-SE rule to favor
+            more stable regularization when scores are statistically close.
+          </li>
+          <li>
+            Guardrails block runs with invalid windows or folds lacking both target classes.
           </li>
         </ul>
       </div>
     </div>
 
-    <h3>Run Modes & Layout</h3>
-    <ul>
-      <li>
-        The configuration panel starts with a Manual run vs Auto-calibrate run toggle; only one mode is active at a
-        time.
-      </li>
-      <li>
-        Manual mode exposes the full model configuration, feature selection, and CLI preview. Auto-calibrate mode
-        focuses on trial search settings plus regime/foundation/bootstrapping controls.
-      </li>
-      <li>
-        Latest run output is stacked directly beneath the configuration panel for quick feedback.
-      </li>
-    </ul>
-
-    <h3>Base Calibration Model (Stage A)</h3>
+    <h3>Feature Selection</h3>
     <p>
-      The base model is a logistic regression trained on the option‑chain dataset.
-      It learns a mapping from pRN features to realized outcomes.
+      Feature selection is now an explicit subsection in <code>Run Job</code>. The base feature
+      <code>x_logit_prn</code> is always included, and optional features are selected with dependency
+      and exclusivity guardrails.
     </p>
     <ul>
       <li>
-        Features are chosen from the training CSV (pRN, moneyness, volatility,
-        time‑to‑expiry, and related engineered features). The UI lets you toggle
-        additional interactions such as <code>x_logit_prn</code> with
-        <code>T_days</code>, <code>rv20</code>, and log‑moneyness.
+        Optional features are grouped by category (Moneyness, Volatility, Market Quality, Coverage and Sanity, Interactions).
       </li>
       <li>
-        Preprocessing: median imputation and standardization for numeric
-        features; optional categorical handling (e.g. ticker intercepts).
+        Optional features are loaded from dataset metadata so unavailable fields are not selectable.
       </li>
       <li>
-        Regularization: a grid of <code>C</code> values is evaluated on a
-        time‑ordered validation split (last 20% of train). Best log‑loss wins.
+        Time-only optional features (<code>T_days</code> and <code>sqrt_T_years</code>) are intentionally excluded.
       </li>
       <li>
-        Time split: the default uses <code>week_friday</code> to hold out the
-        last N weeks; if unavailable, an 80/20 time split is used.
+        Mutual-exclusion rules are enforced (for example, only one of <code>log_m_fwd</code> and <code>abs_log_m_fwd</code>;
+        only one of <code>x_m</code> and <code>x_abs_m</code>).
       </li>
       <li>
-        Optional Platt scaling is applied when <code>calibrate=platt</code> and
-        the validation set is large enough.
+        Dependency rules are enforced (for example, <code>x_m</code> requires <code>log_m_fwd</code> and
+        <code>x_abs_m</code> requires <code>abs_log_m_fwd</code>).
       </li>
       <li>
-        Ticker intercepts can be disabled, enabled for all tickers, or enabled
-        for non‑foundation tickers (foundation tickers are grouped).
+        Required flags are wired from the feature set (for example, selecting <code>x_abs_m</code> enables
+        the matching trainer flag automatically).
       </li>
     </ul>
 
-    <h3>Two‑Stage Polymarket Overlay (Stage B)</h3>
+    <h3>Model Structure</h3>
     <p>
-      When enabled, the overlay trains a second logistic model that blends the
-      base prediction with Polymarket signals. Stage B only runs where
-      Polymarket features exist; otherwise the system falls back to Stage A.
+      Model structure controls define ticker participation and feature expansion rules.
+      Foundation tickers are constrained to the trading universe and can be upweighted.
     </p>
     <ul>
       <li>
-        Merge keys are strict: <code>ticker</code>, <code>threshold</code>,
-        <code>expiry_date</code>, and <code>snapshot_date</code>.
+        <code>Trading universe</code> defines the tickers targeted by downstream usage.
       </li>
       <li>
-        Stage A is re‑trained on pre‑overlap data to avoid leakage. Stage B is
-        trained only on rows where Polymarket probabilities are present.
+        <code>Train tickers</code> chooses which universe members participate in fitting.
       </li>
       <li>
-        Stage B features include <code>p_base</code> plus Polymarket signals
-        (e.g. <code>pm_mid</code>, spread, liquidity, momentum, volatility, and
-        time‑to‑resolution). <code>T_days</code> and categorical features
-        (ticker, snapshot day‑of‑week) are added when available.
+        <code>Foundation tickers</code> default to the trading universe and receive the
+        <code>foundation_weight</code> multiplier.
       </li>
       <li>
-        Prediction logic: <code>p_final = p_base</code> when PM is missing;
-        otherwise <code>p_final = sigmoid(γ₀ + γᵀ·features)</code>.
+        <code>Ticker intercept mode</code> supports <code>none</code>, <code>all</code>, or <code>non_foundation</code>.
       </li>
       <li>
-        Metrics compare Stage A, the PM baseline, and the two‑stage output on
-        the same test split. Edge statistics use <code>edge = p_final − pm_mid</code>.
+        <code>Per-ticker interactions</code> is advanced and should only be enabled with adequate support thresholds.
       </li>
     </ul>
-
-    <h3>Mixed Model (PM + pRN Blend)</h3>
+    <h4>Foundation tickers and intercept modes</h4>
     <p>
-      Mixed mode trains a ridge regression on the decision‑features dataset to
-      combine Polymarket and pRN information directly.
+      Foundation tickers are the subset of training tickers you care about most (for example,
+      Polymarket-tradable names). They are upweighted during training via <code>foundation_weight</code>.
     </p>
     <ul>
       <li>
-        Model types: <code>residual</code> learns <code>y − pm</code>, and
-        <code>blend</code> learns a weight that mixes PM and pRN probabilities.
+        <code>none</code>: no ticker-specific intercepts (single pooled intercept).
       </li>
       <li>
-        The default feature set is numeric PM + pRN columns found in the
-        decision‑features dataset (time columns are excluded).
+        <code>all</code>: every ticker gets its own intercept (highest flexibility, highest variance).
       </li>
       <li>
-        Splits can be a single train/test split or walk‑forward windows with an
-        embargo and min time‑to‑resolution filter.
+        <code>non_foundation</code>: all foundation tickers are mapped to a single
+        <code>FOUNDATION</code> category, while non-foundation tickers keep their own intercepts. This is applied
+        consistently during training and inference, so it affects pHAT output directly.
+      </li>
+    </ul>
+    <p>
+      Practical guidance: if you want stable pHAT for tradable foundation tickers, <code>non_foundation</code>
+      plus foundation weighting is typically preferred. Use <code>all</code> only when you have ample data
+      per foundation ticker and want ticker-specific adjustments; otherwise it can overfit.
+    </p>
+    <p>
+      If ticker × <code>x_logit_prn</code> interactions are enabled, <code>non_foundation</code> also collapses
+      foundation tickers to a shared interaction group (<code>FOUNDATION</code>), reducing degrees of freedom.
+    </p>
+
+    <h3>Weights and Groups</h3>
+    <p>
+      Option outcomes are dependent within snapshots and strike clusters. Weighting therefore
+      combines dataset-provided dependence-aware weights with optional training-time equalization.
+    </p>
+    <ul>
+      <li>
+        <code>Base weight source</code> chooses dataset weights or uniform fallback.
+      </li>
+      <li>
+        <code>Grouping key</code> controls equalization target (for example <code>group_id</code> or <code>contract_id</code>).
+      </li>
+      <li>
+        <code>Per-group equalization</code> enforces approximately constant contribution across groups.
+      </li>
+      <li>
+        <code>Trading-universe upweight</code> increases influence of tradable tickers during fitting.
+      </li>
+      <li>
+        <code>Ticker balancing</code> applies bounded balancing; full 1/N normalization is intentionally avoided.
+      </li>
+      <li>
+        <code>Preview weights</code> reports min/mean/max weights, per-group sum diagnostics, and split-level group counts.
       </li>
     </ul>
 
-    <h3>Economics Intuition</h3>
+    <h3>Bootstrap and Confidence</h3>
+    <p>
+      Bootstrap diagnostics quantify uncertainty of model deltas under grouped dependence.
+      Group-level resampling is recommended over IID resampling when contracts repeat over time.
+    </p>
     <ul>
       <li>
-        pRN probabilities are risk‑neutral and can be biased by risk premia or
-        microstructure effects; calibration learns a mapping to realized outcomes.
+        <code>Bootstrap group key</code> defaults to <code>contract_id</code> when available.
       </li>
       <li>
-        Polymarket provides an alternate probability signal; the overlay learns
-        when to trust it based on liquidity, spreads, and momentum.
+        <code>B</code> controls resample count; larger values improve CI stability at higher runtime cost.
       </li>
       <li>
-        The model surfaces an “edge” when the calibrated probability diverges
-        from the market’s implied probability.
+        <code>Confidence level</code> supports 90/95/99%.
+      </li>
+      <li>
+        Diagnostic toggles write artifacts for split timeline, per-fold deltas, and optional group delta distribution.
+      </li>
+      <li>
+        Warnings are raised when estimated groups are too small or highly imbalanced for reliable intervals.
       </li>
     </ul>
 
-    <h3>Common Failure Modes</h3>
+    <h3>Leakage and Dependence Warnings</h3>
     <ul>
       <li>
-        Two‑stage overlay requires labels and overlapping dates between pRN and
-        Polymarket datasets; otherwise it fails early.
+        Never interpret high validation performance without checking test deltas and overlap diagnostics.
       </li>
       <li>
-        Mixed mode requires a decision‑features dataset; it is unavailable for
-        daily/1DTE datasets in the UI.
+        Dependence across strikes and repeated snapshots requires grouped weighting and grouped bootstrap.
       </li>
       <li>
-        If the label column is missing or filtered to zero rows, training halts.
+        Train/validation/test splits now enforce group-disjointness using the selected grouping key; any groups that
+        appear in validation or test are removed from training to prevent leakage.
+      </li>
+      <li>
+        Embargo is mandatory when adjacent timestamps can leak signal across split boundaries.
+      </li>
+      <li>
+        If validation is strong but test degrades, inspect split timeline and fold-level delta artifacts first.
       </li>
     </ul>
   </>
 );
 
+export function CalibrateDocContent({ className }: { className?: string }) {
+  return <div className={className}>{calibrateDoc}</div>;
+}
+
 const marketsDoc = (
   <>
     <p>
       The Markets page refreshes and visualizes weekly Polymarket market data.
-      It fetches historical bid/ask curves and the option-chain-derived
-      risk‑neutral probability (pRN) for the selected week, then lets you explore
-      tickers and strikes in a focused chart.
+      It extends the active weekly history run by appending raw CLOB trades,
+      aligning option‑chain pRN snapshots to hourly timestamps, and producing a
+      daily close snapshot for downstream pHAT inference.
     </p>
 
     <div className="docs-split">
       <div className="docs-panel">
         <h3>What It Produces</h3>
         <ul>
-          <li>Weekly Polymarket bid/ask series by ticker and strike.</li>
-          <li>Risk‑neutral probability (pRN) series aligned to the same timestamps.</li>
+          <li>Raw CLOB trade history appended to <code>price_history.csv</code> (YES/NO).</li>
+          <li>Hourly Polymarket + pRN chart series in <code>markets_prn_hourly.csv</code>.</li>
+          <li>Daily close snapshot appended to <code>snapshot_daily.csv</code>.</li>
+          <li>Decision feature append for the latest close in <code>decision_features</code>.</li>
           <li>Summary metadata for the week: market counts, tickers, and timestamps.</li>
         </ul>
       </div>
       <div className="docs-panel">
         <h3>When To Use It</h3>
         <ul>
-          <li>Inspect historical pricing for a specific weekly market week.</li>
-          <li>Compare Polymarket quotes vs pRN for a single strike.</li>
-          <li>Validate that the weekly refresh pipeline is producing data.</li>
+          <li>Continue the active weekly history run with live updates.</li>
+          <li>Compare Polymarket quotes vs option‑chain pRN for a strike.</li>
+          <li>Generate the latest daily close snapshot and feature append.</li>
         </ul>
       </div>
     </div>
@@ -1787,6 +2003,12 @@ const marketsDoc = (
       <code>America/New_York</code> timezone and can auto‑refresh on first load.
       The refresh job is blocked if another pipeline job is already running.
     </p>
+    <h3>Data Integrity</h3>
+    <ul>
+      <li>pRN curves come from option‑chain snapshots (no BS/yfinance).</li>
+      <li>Raw CLOB trades are appended; hourly bars are rebuilt from raw history.</li>
+      <li>Daily snapshots use the latest completed NY close to avoid leakage.</li>
+    </ul>
 
     <div className="docs-split">
       <div className="docs-panel">
@@ -2075,7 +2297,7 @@ export default function DocumentationPage() {
               </div>
               {page.id === "option-chain" ? <OptionChainDocContent /> : null}
               {page.id === "polymarket-history" ? polymarketHistoryDoc : null}
-              {page.id === "calibrate" ? calibrateDoc : null}
+              {page.id === "calibrate" ? <CalibrateDocContent /> : null}
               {page.id === "markets" ? marketsDoc : null}
               {page.id === "backtests" ? backtestsDoc : null}
             </section>

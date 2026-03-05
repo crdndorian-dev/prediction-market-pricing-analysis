@@ -28,8 +28,16 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
+SCRIPTS_ROOT = REPO_ROOT / "src" / "scripts"
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from calibration.calibrate_common import EPS, _logit
+from polymarket.snapshot_enrichment import (
+    compute_forward_price,
+    enrich_snapshot_features,
+    infer_asof_fallback_days,
+)
 
 
 # -----------------------------
@@ -1357,17 +1365,6 @@ def count_splits_in_range(
         return None
 
 
-def infer_asof_fallback_days(spot_source: Optional[str]) -> Optional[int]:
-    if not spot_source:
-        return None
-    src = spot_source.strip().lower()
-    if src in ("intraday_1m", "intraday_prepost_1m"):
-        return 0
-    if src == "prev_close":
-        return 1
-    return None
-
-
 def compute_band_counts(
     strikes: np.ndarray,
     spot: float,
@@ -1398,42 +1395,6 @@ def compute_band_counts(
     k_inside = k_band[(k_band > k_min) & (k_band < k_max)]
     return float(k_band.size), float(k_inside.size)
 
-
-def compute_forward_price(S: float, r: float, q: float, T_years: float) -> Optional[float]:
-    """
-    Compute forward price using: F = S * exp((r - q) * T)
-
-    Args:
-        S: Spot price
-        r: Risk-free rate
-        q: Continuous dividend yield
-        T_years: Time to maturity in years
-
-    Returns: Forward price, or None if computation fails
-    """
-    try:
-        if S <= 0 or T_years <= 0:
-            return None
-        if not (0.0 <= r <= 1.0) or not (0.0 <= q <= 1.0):
-            return None
-
-        forward = S * math.exp((r - q) * T_years)
-        if np.isfinite(forward) and forward > 0:
-            return float(forward)
-        return None
-    except Exception:
-        return None
-
-
-# Cache for historical computations (avoid redundant API calls)
-_rv20_cache: Dict[str, RV20Result] = {}
-_div_yield_cache: Dict[str, Optional[float]] = {}
-_split_count_cache: Dict[Tuple[str, date, date], Optional[int]] = {}
-
-
-# -----------------------------
-# pRN estimation (yfinance)
-# -----------------------------
 
 def compute_d2(S: float, K: float, T: float, r: float, sigma: float) -> Optional[float]:
     if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
@@ -2036,141 +1997,6 @@ SNAPSHOT_STANDARD_FEATURE_COLUMNS = [
     "split_events_in_preload_range",
 ]
 
-
-def enrich_snapshot_features(
-    df: pd.DataFrame,
-    cfg: Config,
-    manifest: Optional[Dict[str, Any]] = None,
-) -> pd.DataFrame:
-    """
-    Enrich snapshot with all guaranteed baseline columns and derived features.
-
-    This function GUARANTEES that all columns from pipeline_schema_contract.json
-    baseline schema will exist (even if NaN). This ensures schema compatibility
-    with any downstream calibration model.
-    """
-    out = df.copy()
-
-    # Step 1: Populate baseline columns
-    expiry_src = out["expiry_ts_utc"] if "expiry_ts_utc" in out.columns else out["event_endDate"]
-    expiry_dt = pd.to_datetime(expiry_src, utc=True, errors="coerce")
-    out["expiry_date"] = expiry_dt.dt.strftime("%Y-%m-%d")
-    out["expiry_close_date_used"] = expiry_dt.dt.tz_convert(ZoneInfo(cfg.tz_name)).dt.date.astype(str)
-    if "snapshot_time_utc" in out.columns:
-        asof_dt = pd.to_datetime(out["snapshot_time_utc"], utc=True, errors="coerce")
-        out["asof_date"] = asof_dt.dt.tz_convert(ZoneInfo(cfg.tz_name)).dt.date.astype(str)
-    else:
-        out["asof_date"] = np.nan
-    out["S_asof_close"] = pd.to_numeric(out.get("S", np.nan), errors="coerce")
-    out["S_asof_close_adj"] = out["S_asof_close"]
-    out["S_expiry_close"] = out["S_asof_close"]
-    out["S_expiry_close_adj"] = out["S_asof_close"]
-    out["r"] = cfg.risk_free_rate
-
-    # Ensure baseline diagnostic columns exist
-    baseline_defaults = {
-        "rv20": cfg.rv20_fallback,  # Fallback value when rv20 is truly missing
-        "rv20_source": "fallback",
-        "rv20_window": 0,
-        "is_missing_rv20": True,
-        "dividend_yield": 0.0,  # Default to 0 (no dividends) for forward price computation
-        "rel_spread_median": np.nan,
-        "n_chain_raw": np.nan,
-        "n_chain_used": np.nan,
-        "n_band_raw": np.nan,
-        "n_band_inside": np.nan,
-        "dropped_intrinsic": np.nan,
-        "asof_fallback_days": np.nan,
-        "expiry_fallback_days": 0,
-        "split_events_in_preload_range": np.nan,
-        "spot_scale_used": "raw",
-    }
-    for col, default in baseline_defaults.items():
-        if col not in out.columns:
-            out[col] = default
-    if "spot_scale_used" in out.columns:
-        out["spot_scale_used"] = out["spot_scale_used"].fillna("raw").astype(str)
-    if "asof_fallback_days" in out.columns and out["asof_fallback_days"].isna().all() and "spot_source" in out.columns:
-        out["asof_fallback_days"] = out["spot_source"].map(infer_asof_fallback_days)
-
-    # Step 2: Compute derived features
-    out["T_days"] = pd.to_numeric(out["T_days"], errors="coerce")
-    out["T_years"] = out["T_days"] / 365.0
-    out["sqrt_T_years"] = np.sqrt(out["T_years"].clip(lower=0))
-    out["log_T_days"] = np.log1p(out["T_days"].clip(lower=0))
-
-    K = pd.to_numeric(out["K"], errors="coerce")
-    S = pd.to_numeric(out["S"], errors="coerce")
-    out["log_m"] = np.log(np.clip(K, 1e-12, None) / np.clip(S, 1e-12, None))
-    out["abs_log_m"] = out["log_m"].abs()
-
-    prn = pd.to_numeric(out["pRN"], errors="coerce")
-    prn_clipped = prn.clip(EPS, 1.0 - EPS)
-    out["x_logit_prn"] = _logit(prn_clipped.to_numpy(dtype=float))
-    out["pRN"] = prn
-
-    # Ensure pRN_raw exists for gap calculation
-    if "pRN_raw" not in out.columns or pd.isna(out["pRN_raw"]).all():
-        out["pRN_raw"] = out["pRN"]
-    out["prn_raw_gap"] = prn - pd.to_numeric(out["pRN_raw"], errors="coerce")
-
-    # Interaction features
-    out["x_prn_x_tdays"] = out["x_logit_prn"] * out["T_days"]
-    out["x_prn_x_rv20"] = out["x_logit_prn"] * pd.to_numeric(out.get("rv20", np.nan), errors="coerce")
-    out["x_prn_x_logm"] = out["x_logit_prn"] * out["log_m"]
-
-    # Volatility-scaled features
-    rv20 = pd.to_numeric(out.get("rv20", np.nan), errors="coerce")
-    vol_denom = rv20 * out["sqrt_T_years"]
-    vol_denom = vol_denom.replace(0, np.nan)
-    out["rv20_sqrtT"] = rv20 * out["sqrt_T_years"]
-    out["log_m_over_volT"] = out["log_m"] / vol_denom
-    out["abs_log_m_over_volT"] = out["log_m"].abs() / vol_denom
-
-    # Forward price features
-    # Ensure dividend_yield has a fallback (0.0 = no dividends)
-    if "dividend_yield" not in out.columns:
-        out["dividend_yield"] = 0.0
-    out["dividend_yield"] = pd.to_numeric(out["dividend_yield"], errors="coerce").fillna(0.0)
-
-    if "forward_price" not in out.columns:
-        out["forward_price"] = np.nan
-    F = pd.to_numeric(out.get("forward_price", np.nan), errors="coerce")
-
-    # Compute forward_price for any rows where it's missing but S is available
-    S_vals = pd.to_numeric(out.get("S", np.nan), errors="coerce")
-    r_vals = pd.to_numeric(out.get("r", cfg.risk_free_rate), errors="coerce").fillna(cfg.risk_free_rate)
-    q_vals = out["dividend_yield"]  # Already filled with 0.0 fallback
-
-    # Compute forward price: F = S * exp((r - q) * T)
-    forward_computed = S_vals * np.exp((r_vals - q_vals) * out["T_years"])
-    forward_computed = forward_computed.where(np.isfinite(forward_computed) & (forward_computed > 0), np.nan)
-
-    # Fill in missing forward_price values with computed values
-    F = F.where(F.notna() & np.isfinite(F), forward_computed)
-    out["forward_price"] = F
-    out["log_m_fwd"] = np.log(np.clip(K, 1e-12, None) / np.clip(F, 1e-12, None))
-    out["abs_log_m_fwd"] = out["log_m_fwd"].abs()
-    out["log_m_fwd_over_volT"] = out["log_m_fwd"] / vol_denom
-    out["abs_log_m_fwd_over_volT"] = out["abs_log_m_fwd"] / vol_denom
-
-    moneyness = out["log_m_fwd"].where(np.isfinite(out["log_m_fwd"]), out["log_m"])
-    out["x_m"] = out["x_logit_prn"] * moneyness
-    out["x_abs_m"] = out["x_logit_prn"] * moneyness.abs()
-
-    # Step 3: Add any columns from model manifest (for forward compatibility)
-    if manifest is not None:
-        for col in manifest.get("required_columns", []):
-            if col not in out.columns:
-                out[col] = np.nan
-
-    return out
-
-# -----------------------------
-# Naming helpers (updated convention)
-# Following format: polymarket-snapshot-YYYY-MM-DD-HH.csv
-# where HH is 24-hour zero-padded hour
-# -----------------------------
 
 def fname_pm_snapshot_new_convention() -> str:
     """Generate snapshot filename: polymarket-snapshot-YYYY-MM-DD-HH.csv"""

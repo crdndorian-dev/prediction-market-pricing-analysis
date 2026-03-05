@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from app.models.calibrate_models import (
     AutoModelRunRequest,
@@ -18,6 +18,8 @@ from app.models.calibrate_models import (
     RegimePreviewResponse,
     RenameModelRequest,
     TrainModelV2Request,
+    WeightingPreviewRequest,
+    WeightingPreviewResponse,
 )
 from app.services.calibrate_models import (
     delete_model,
@@ -25,14 +27,17 @@ from app.services.calibrate_models import (
     get_dataset_tickers,
     get_model_detail,
     get_model_file_content,
+    get_model_file_content_by_path,
     list_datasets,
     list_polymarket_datasets,
     list_model_files,
     list_models,
     preview_regime,
+    preview_weighting,
     start_auto_calibration_job,
     start_calibration_job,
     get_calibration_job,
+    cancel_calibration_job,
     rename_model,
     run_auto_model_selection,
     run_calibration,
@@ -142,6 +147,14 @@ def preview_regime_route(payload: RegimePreviewRequest) -> RegimePreviewResponse
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/weighting-preview", response_model=WeightingPreviewResponse)
+def preview_weighting_route(payload: WeightingPreviewRequest) -> WeightingPreviewResponse:
+    try:
+        return preview_weighting(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/jobs", response_model=CalibrationJobStatus)
 def start_calibration_job_route(payload: CalibrateModelRunRequest) -> CalibrationJobStatus:
     try:
@@ -172,12 +185,24 @@ def get_calibration_job_route(job_id: str) -> CalibrationJobStatus:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found.")
 
 
+@router.post("/jobs/{job_id}/cancel", response_model=CalibrationJobStatus)
+def cancel_calibration_job_route(job_id: str) -> CalibrationJobStatus:
+    try:
+        return cancel_calibration_job(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found.")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.delete("/models/{model_id}", response_model=ModelRunSummary)
 def delete_calibration_model(model_id: str) -> ModelRunSummary:
     try:
         return delete_model(model_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found.")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.patch("/models/{model_id}", response_model=ModelRunSummary)
@@ -204,6 +229,19 @@ def get_model_file_content_route(model_id: str, filename: str) -> ModelFileConte
         return get_model_file_content(model_id, filename)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"File not found.")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/models/{model_id}/file-content", response_model=ModelFileContentResponse)
+def get_model_file_content_by_path_route(
+    model_id: str,
+    path: str = Query(..., description="Relative file path from model run root."),
+) -> ModelFileContentResponse:
+    try:
+        return get_model_file_content_by_path(model_id, path)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="File not found.")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

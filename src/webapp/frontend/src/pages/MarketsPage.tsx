@@ -483,6 +483,7 @@ export default function MarketsPage() {
     { label: "Markets", value: summary?.markets.length != null ? String(summary.markets.length) : "--" },
     { label: "Run ID", value: summary?.run_id ?? jobStatus?.result?.run_id ?? "--" },
     { label: "Last refresh", value: formatTimestamp(summary?.last_refresh_utc) },
+    { label: "Last snapshot", value: summary?.last_snapshot_date ?? "--" },
     { label: "Duration", value: durationLabel },
     { label: "Last update", value: formatTimestamp(jobStatus?.finished_at ?? jobStatus?.started_at) },
   ];
@@ -548,18 +549,35 @@ export default function MarketsPage() {
       setError("Markets refresh already in progress.");
       return;
     }
+    const requestRunId = summary?.run_id ?? undefined;
+    const requestTickers = tickers.length > 0 ? tickers : undefined;
     setError(null);
     setJobStatus(null);
     setSeriesByTicker(null);
     setSummary(null);
     try {
-      const status = await startMarketsRefresh({ week_friday: weekFriday, force_refresh: true });
+      const status = await startMarketsRefresh({
+        week_friday: weekFriday,
+        run_id: requestRunId,
+        tickers: requestTickers,
+        force_refresh: true,
+      });
       setJobId(status.job_id);
       setJobStatus(status);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
-  }, [anyJobRunning, jobStatus?.status, maxActiveJobs, primaryJob?.name, weekFriday, setJobId, setJobStatus]);
+  }, [
+    anyJobRunning,
+    jobStatus?.status,
+    maxActiveJobs,
+    primaryJob?.name,
+    summary?.run_id,
+    tickers,
+    weekFriday,
+    setJobId,
+    setJobStatus,
+  ]);
 
   // On mount: resume in-progress job, load summary if finished, or auto-start
   useEffect(() => {
@@ -600,15 +618,13 @@ export default function MarketsPage() {
 
   return (
     <div className="page markets-page">
-      <PipelineStatusCard className="page-sticky-meta" activeJobsCount={activeJobs.length} />
-      <header className="page-header">
-        <div>
-          <p className="page-kicker">Weekly Markets</p>
-          <h1 className="page-title">Markets Refresh</h1>
-          <p className="page-subtitle">
-            Hourly Polymarket bid/ask and Black-Scholes risk-neutral probability
-            curves — strictly historical, no look-ahead.
-          </p>
+      <PipelineStatusCard
+        className="page-sticky-meta markets-meta"
+        activeJobsCount={activeJobs.length}
+      />
+      <header className="page-header markets-page-header">
+        <div className="markets-title-row">
+          <h1 className="page-title markets-page-title">Markets</h1>
         </div>
       </header>
 
@@ -619,7 +635,7 @@ export default function MarketsPage() {
             <div className="panel-header">
               <div>
                 <h2>Run Configuration</h2>
-                <p className="panel-hint">Select week and tickers, then refresh</p>
+                <p className="panel-hint">Select week, then refresh. Ticker pills control chart data.</p>
               </div>
               {selectedTicker && (
                 <span className="meta-pill">Selected: {selectedTicker}</span>

@@ -1,11 +1,14 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Literal
 
 from app.models.polymarket_history import (
     PolymarketHistoryJobStatus,
     PolymarketHistoryRunRequest,
     PolymarketHistoryRunResponse,
+    PolymarketRunFeaturesRequest,
+    PolymarketRunFeaturesResponse,
 )
 from app.services.polymarket_history import (
     get_polymarket_history_job,
@@ -20,6 +23,9 @@ from app.services.polymarket_history import (
     toggle_pin_run,
     get_runs_storage_summary,
     get_latest_pointer,
+    get_pipeline_run_file_path,
+    get_run_csv_preview,
+    build_run_decision_features,
 )
 from app.services.job_guard import ensure_no_active_jobs
 
@@ -66,9 +72,14 @@ def cancel_history_job(job_id: str) -> PolymarketHistoryJobStatus:
 
 
 @router.get("/jobs/{job_id}/csv-preview/{filename}")
-def get_csv_preview_endpoint(job_id: str, filename: str, limit: int = 100) -> Dict[str, Any]:
+def get_csv_preview_endpoint(
+    job_id: str,
+    filename: str,
+    limit: int = 20,
+    mode: Literal["head", "tail"] = Query("head"),
+) -> Dict[str, Any]:
     try:
-        return get_csv_preview(job_id, filename, limit)
+        return get_csv_preview(job_id, filename, limit=limit, mode=mode)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found.")
     except FileNotFoundError as exc:
@@ -101,6 +112,54 @@ def list_runs() -> Dict[str, Any]:
         "storage": storage,
         "latest": latest,
     }
+
+
+@router.get("/runs/{run_id}/file")
+def get_run_file(run_id: str, filename: str = Query(...)) -> FileResponse:
+    """Open/download a file from a pipeline run directory."""
+    try:
+        file_path = get_pipeline_run_file_path(run_id, filename)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    media_type = "text/csv" if file_path.suffix.lower() == ".csv" else "application/octet-stream"
+    return FileResponse(file_path, media_type=media_type, filename=file_path.name)
+
+
+@router.get("/runs/{run_id}/csv-preview/{filename}")
+def get_run_csv_preview_endpoint(
+    run_id: str,
+    filename: str,
+    limit: int = 20,
+    mode: Literal["head", "tail"] = Query("head"),
+) -> Dict[str, Any]:
+    """Preview a CSV file from a persisted pipeline run."""
+    try:
+        return get_run_csv_preview(run_id, filename, limit=limit, mode=mode)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/build-features", response_model=PolymarketRunFeaturesResponse)
+def build_run_features(
+    run_id: str,
+    body: PolymarketRunFeaturesRequest,
+) -> PolymarketRunFeaturesResponse:
+    """Build decision features for an existing pipeline run directory."""
+    try:
+        ensure_no_active_jobs()
+        return build_run_decision_features(run_id, body)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        status = 409 if "Maximum active jobs reached" in str(exc) else 500
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
 @router.patch("/runs/{run_id}")

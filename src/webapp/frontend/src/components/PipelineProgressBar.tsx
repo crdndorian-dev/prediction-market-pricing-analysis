@@ -43,13 +43,17 @@ export default function PipelineProgressBar({
   const fillStyle =
     hasProgress ? { width: `${percent}%` } : showIndeterminate ? undefined : { width: "0%" };
 
+  const barClassName = `progress-bar${showIndeterminate ? " indeterminate" : ""}${
+    running ? " running" : ""
+  }`;
+
   return (
     <div className={`progress-section${hasError ? " error" : ""}`}>
       <div className="progress-header">
         <span className="progress-label">{title}</span>
         <span className="progress-stats">{stats}</span>
       </div>
-      <div className={`progress-bar${showIndeterminate ? " indeterminate" : ""}`}>
+      <div className={barClassName}>
         <div
           className="progress-bar-fill"
           style={fillStyle}

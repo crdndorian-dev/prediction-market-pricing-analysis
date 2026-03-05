@@ -88,9 +88,6 @@ export default function App() {
                       <NavLink to="/backtests" className={linkClass}>
                         Backtests
                       </NavLink>
-                      <NavLink to="/docs" className={linkClass}>
-                        Documentation
-                      </NavLink>
                     </div>
                   </nav>
                   <main className="app-main">

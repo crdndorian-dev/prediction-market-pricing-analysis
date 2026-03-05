@@ -20,7 +20,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 EPS = 1e-6
-FOUNDATION_LABEL = "0_FOUNDATION"
+FOUNDATION_LABEL = "FOUNDATION"
+FOUNDATION_LABEL_ALIASES = ("FOUNDATION", "0_FOUNDATION")
 
 FORBIDDEN_NUMERIC_FEATURE_PATTERNS = [
     r".*fallback.*",
@@ -257,8 +258,8 @@ def make_pipeline(
         enable_interactions=enable_interactions,
     )
     clf = LogisticRegression(
-        penalty="l2",
         C=float(C),
+        l1_ratio=0.0,
         solver="lbfgs",
         max_iter=4000,
         random_state=int(random_state),
@@ -275,8 +276,8 @@ def fit_platt_on_logits(
 ) -> LogisticRegression:
     Xc = logits.reshape(-1, 1)
     cal = LogisticRegression(
-        penalty="l2",
         C=1e6,
+        l1_ratio=0.0,
         solver="lbfgs",
         max_iter=2000,
         random_state=int(random_state),
@@ -853,6 +854,57 @@ class FinalModelBundle:
     stage2_categorical_features: Optional[List[str]] = None
     eps: float = EPS
 
+    def _fitted_categories_for_column(self, column: Optional[str]) -> Optional[set[str]]:
+        if not column or self.base_pipeline is None:
+            return None
+        try:
+            pre = self.base_pipeline.named_steps.get("pre")
+        except Exception:
+            return None
+        if pre is None or not hasattr(pre, "transformers_"):
+            return None
+
+        cat_transformer = None
+        cat_cols: List[str] = []
+        for name, transformer, cols in pre.transformers_:
+            if name != "cat":
+                continue
+            cat_transformer = transformer
+            cat_cols = [str(c) for c in cols]
+            break
+        if cat_transformer is None or column not in cat_cols:
+            return None
+
+        if isinstance(cat_transformer, Pipeline):
+            onehot = cat_transformer.named_steps.get("onehot")
+        elif hasattr(cat_transformer, "named_steps"):
+            onehot = cat_transformer.named_steps.get("onehot")
+        else:
+            onehot = cat_transformer
+        if onehot is None or not hasattr(onehot, "categories_"):
+            return None
+
+        try:
+            idx = cat_cols.index(column)
+            return {normalize_ticker(str(val)) for val in onehot.categories_[idx]}
+        except Exception:
+            return None
+
+    def _resolve_foundation_label(self, column: Optional[str]) -> str:
+        stored = str(self.foundation_label or FOUNDATION_LABEL).strip()
+        if not stored:
+            stored = FOUNDATION_LABEL
+        fitted_categories = self._fitted_categories_for_column(column)
+        if not fitted_categories:
+            return stored
+
+        if normalize_ticker(stored) in fitted_categories:
+            return normalize_ticker(stored)
+        for alias in FOUNDATION_LABEL_ALIASES:
+            if normalize_ticker(alias) in fitted_categories:
+                return alias
+        return stored
+
     def predict_proba_from_df(self, df: pd.DataFrame) -> np.ndarray:
         if self.kind == "baseline_pRN":
             if "pRN" not in df.columns:
@@ -883,14 +935,18 @@ class FinalModelBundle:
             is_foundation = data[self.ticker_col].map(normalize_ticker).isin(foundation_set).to_numpy()
         else:
             is_foundation = np.zeros(len(data), dtype=bool)
+        ticker_foundation_label = self._resolve_foundation_label(self.ticker_feature_col)
+        interaction_foundation_label = self._resolve_foundation_label(self.interaction_ticker_col)
 
         if self.ticker_feature_col and self.ticker_feature_col not in data.columns:
             if self.ticker_intercepts == "non_foundation" and foundation_set:
-                base = np.where(is_foundation, self.foundation_label, data[self.ticker_col])
+                base = np.where(is_foundation, ticker_foundation_label, data[self.ticker_col])
             else:
                 base = data[self.ticker_col]
             if self.ticker_support:
                 support = {normalize_ticker(t) for t in self.ticker_support}
+                if normalize_ticker("FOUNDATION") in support or normalize_ticker("0_FOUNDATION") in support:
+                    support |= {normalize_ticker("FOUNDATION"), normalize_ticker("0_FOUNDATION")}
                 base_norm = pd.Series(base).map(normalize_ticker)
                 scoped = np.where(base_norm.isin(support), base, self.ticker_other_label)
                 data[self.ticker_feature_col] = scoped
@@ -899,11 +955,13 @@ class FinalModelBundle:
 
         if self.interaction_ticker_col and self.interaction_ticker_col not in data.columns:
             if self.ticker_intercepts == "non_foundation" and foundation_set:
-                base = np.where(is_foundation, self.foundation_label, data[self.ticker_col])
+                base = np.where(is_foundation, interaction_foundation_label, data[self.ticker_col])
             else:
                 base = data[self.ticker_col]
             if self.interaction_ticker_support:
                 support = {normalize_ticker(t) for t in self.interaction_ticker_support}
+                if normalize_ticker("FOUNDATION") in support or normalize_ticker("0_FOUNDATION") in support:
+                    support |= {normalize_ticker("FOUNDATION"), normalize_ticker("0_FOUNDATION")}
                 base_norm = pd.Series(base).map(normalize_ticker)
                 scoped = np.where(base_norm.isin(support), base, self.ticker_other_label)
                 data[self.interaction_ticker_col] = scoped

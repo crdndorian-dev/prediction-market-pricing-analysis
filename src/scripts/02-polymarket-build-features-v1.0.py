@@ -16,13 +16,12 @@ import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone, time as dt_time
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from zoneinfo import ZoneInfo
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_ROOT = REPO_ROOT / "src" / "scripts"
@@ -30,6 +29,13 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from polymarket.subgraph_client import SubgraphClient
+from polymarket.prn_loader import (
+    PRN_COL_CANDIDATES,
+    asof_time_from_date,
+    find_latest_prn_dataset,
+    load_prn_dataset,
+    normalize_threshold,
+)
 
 SCRIPT_VERSION = "1.0.0"
 SCHEMA_VERSION = "pm_features_v1.0"
@@ -38,23 +44,6 @@ DEFAULT_DIM_PATH = REPO_ROOT / "src" / "data" / "models" / "polymarket" / "dim_m
 DEFAULT_BARS_DIR = REPO_ROOT / "src" / "data" / "analysis" / "polymarket" / "bars"
 DEFAULT_BARS_HISTORY_DIR = REPO_ROOT / "src" / "data" / "analysis" / "polymarket" / "bars_history"
 DEFAULT_OUT_DIR = REPO_ROOT / "src" / "data" / "models" / "polymarket"
-
-PRN_COL_CANDIDATES = [
-    "pRN",
-    "qRN",
-    "pRN_raw",
-    "qRN_raw",
-    "rv20",
-    "log_m",
-    "abs_log_m",
-    "log_m_fwd",
-    "abs_log_m_fwd",
-    "x_logit_prn",
-    "T_days",
-    "S_asof_close",
-    "forward_price",
-    "dividend_yield",
-]
 
 
 # ----------------------------
@@ -144,61 +133,10 @@ class Config:
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
-def _safe_zoneinfo(tz_name: str) -> ZoneInfo:
-    try:
-        return ZoneInfo(tz_name)
-    except Exception:
-        print(f"[WARN] Invalid prn_asof_tz '{tz_name}', falling back to UTC.")
-        return ZoneInfo("UTC")
-
-
-def _parse_close_time(value: str) -> dt_time:
-    if not value:
-        return dt_time(16, 0)
-    raw = value.strip()
-    parts = raw.split(":")
-    try:
-        if len(parts) == 1:
-            return dt_time(int(parts[0]), 0)
-        if len(parts) == 2:
-            return dt_time(int(parts[0]), int(parts[1]))
-        if len(parts) >= 3:
-            return dt_time(int(parts[0]), int(parts[1]), int(parts[2]))
-    except Exception:
-        pass
-    print(f"[WARN] Invalid prn_asof_close_time '{value}', using 16:00.")
-    return dt_time(16, 0)
-
-
 def _is_daily_freq(freq: str) -> bool:
     if not freq:
         return False
     return freq.strip().lower() in {"1d", "1day", "1-day"}
-
-
-def _has_non_midnight(ts: pd.Series) -> bool:
-    if ts.empty:
-        return False
-    ts = pd.to_datetime(ts, utc=True, errors="coerce")
-    if ts.isna().all():
-        return False
-    return bool(
-        ((ts.dt.hour != 0) | (ts.dt.minute != 0) | (ts.dt.second != 0) | (ts.dt.microsecond != 0)).any()
-    )
-
-
-def _asof_time_from_date(
-    dates: pd.Series,
-    *,
-    tz_name: str,
-    close_time: str,
-) -> pd.Series:
-    tz = _safe_zoneinfo(tz_name)
-    close_t = _parse_close_time(close_time)
-    date_vals = pd.to_datetime(dates, errors="coerce").dt.date.astype(str)
-    naive = pd.to_datetime(date_vals + " " + close_t.strftime("%H:%M:%S"), errors="coerce")
-    localized = naive.dt.tz_localize(tz, nonexistent="shift_forward", ambiguous="NaT")
-    return localized.dt.tz_convert("UTC")
 
 
 def _apply_daily_decision_time(
@@ -213,42 +151,13 @@ def _apply_daily_decision_time(
     df = df.copy()
     ts = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
     df["decision_date"] = ts.dt.date
-    decision_ts = _asof_time_from_date(df["decision_date"], tz_name=tz_name, close_time=close_time)
+    decision_ts = asof_time_from_date(df["decision_date"], tz_name=tz_name, close_time=close_time)
     if decision_offset_s:
         decision_ts = decision_ts + pd.to_timedelta(decision_offset_s, unit="s")
     df["timestamp_utc"] = decision_ts
     return df
 
 
-def _derive_prn_asof_time(
-    df: pd.DataFrame,
-    *,
-    tz_name: str,
-    close_time: str,
-) -> pd.Series:
-    # Prefer explicit asof timestamps if they include time-of-day.
-    for col in ("asof_ts", "asof_time", "asof_datetime"):
-        if col in df.columns:
-            ts = pd.to_datetime(df[col], utc=True, errors="coerce")
-            if _has_non_midnight(ts):
-                return ts
-            # If only midnight stamps exist, treat them as date-only snapshots.
-            return _asof_time_from_date(ts.dt.date, tz_name=tz_name, close_time=close_time)
-
-    for col in ("asof_date", "asof_target"):
-        if col in df.columns:
-            return _asof_time_from_date(df[col], tz_name=tz_name, close_time=close_time)
-
-    raise KeyError("pRN dataset missing asof_date/asof_target/asof_ts column.")
-
-
-def _find_latest_prn_dataset() -> Optional[Path]:
-    base = REPO_ROOT / "src" / "data" / "raw" / "option-chain"
-    candidates = list(base.rglob("dataset-n1.csv"))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidates[0]
 
 
 def _load_dim_market(path: Path) -> pd.DataFrame:
@@ -364,283 +273,6 @@ def _load_bars(
     return df
 
 
-def _normalize_threshold(x: Any) -> Optional[float]:
-    try:
-        val = float(x)
-    except Exception:
-        return None
-    if not np.isfinite(val):
-        return None
-    return round(val, 6)
-
-def _normalize_threshold_series(values: pd.Series) -> pd.Series:
-    vals = pd.to_numeric(values, errors="coerce")
-    vals = vals.where(np.isfinite(vals), np.nan)
-    return vals.round(6)
-
-
-def _filter_prn_chunk(
-    df: pd.DataFrame,
-    *,
-    expiry_col: str,
-    tickers: Optional[set[str]],
-    thresholds: Optional[set[float]],
-    expiry_dates: Optional[set[date]],
-    date_start: Optional[date],
-    date_end: Optional[date],
-    prn_asof_tz: str,
-    prn_asof_close_time: str,
-) -> pd.DataFrame:
-    if df.empty:
-        return df
-
-    df["ticker"] = df["ticker"].astype(str).str.upper()
-    if tickers:
-        df = df[df["ticker"].isin(tickers)]
-    if df.empty:
-        return df
-
-    if "K" in df.columns:
-        df["threshold"] = _normalize_threshold_series(df["K"])
-        if thresholds:
-            df = df[df["threshold"].isin(thresholds)]
-    if df.empty:
-        return df
-
-    df["expiry_date"] = pd.to_datetime(df[expiry_col], errors="coerce").dt.date
-    if expiry_dates:
-        df = df[df["expiry_date"].isin(expiry_dates)]
-    if df.empty:
-        return df
-
-    if date_start or date_end:
-        date_series = None
-        if "asof_date" in df.columns:
-            date_series = pd.to_datetime(df["asof_date"], errors="coerce").dt.date
-        elif "asof_target" in df.columns:
-            date_series = pd.to_datetime(df["asof_target"], errors="coerce").dt.date
-        elif "asof_ts" in df.columns:
-            date_series = pd.to_datetime(df["asof_ts"], utc=True, errors="coerce").dt.date
-        elif "asof_time" in df.columns:
-            date_series = pd.to_datetime(df["asof_time"], utc=True, errors="coerce").dt.date
-        elif "asof_datetime" in df.columns:
-            date_series = pd.to_datetime(df["asof_datetime"], utc=True, errors="coerce").dt.date
-
-        if date_series is not None:
-            mask = pd.Series(True, index=df.index)
-            if date_start:
-                mask &= (date_series >= date_start)
-            if date_end:
-                mask &= (date_series <= date_end)
-            df = df[mask]
-            if df.empty:
-                return df
-
-    df["asof_time"] = _derive_prn_asof_time(
-        df,
-        tz_name=prn_asof_tz,
-        close_time=prn_asof_close_time,
-    )
-    df["snapshot_date"] = pd.to_datetime(df["asof_time"], utc=True, errors="coerce").dt.date
-
-    if date_start or date_end:
-        mask = pd.Series(True, index=df.index)
-        if date_start:
-            mask &= (df["snapshot_date"] >= date_start)
-        if date_end:
-            mask &= (df["snapshot_date"] <= date_end)
-        df = df[mask]
-
-    return df
-
-
-def _load_prn_dataset(
-    path: Path,
-    *,
-    prn_asof_tz: str,
-    prn_asof_close_time: str,
-    tickers: Optional[set[str]] = None,
-    thresholds: Optional[set[float]] = None,
-    expiry_dates: Optional[set[date]] = None,
-    date_start: Optional[date] = None,
-    date_end: Optional[date] = None,
-    chunksize: int = 200_000,
-) -> pd.DataFrame:
-    try:
-        header = pd.read_csv(path, nrows=0)
-        cols = list(header.columns)
-    except Exception:
-        cols = []
-
-    if cols:
-        expiry_candidates = ["expiry_close_date_used", "option_expiration_used", "option_expiration_requested"]
-        expiry_col = next((c for c in expiry_candidates if c in cols), None)
-        if not expiry_col:
-            raise KeyError("pRN dataset missing expiry date column.")
-        asof_cols = [c for c in ("asof_ts", "asof_time", "asof_datetime", "asof_date", "asof_target") if c in cols]
-        if not asof_cols:
-            raise KeyError("pRN dataset missing asof_date/asof_target/asof_ts column.")
-        usecols = {"ticker", "K", expiry_col}
-        usecols.update(asof_cols)
-        usecols.update([c for c in PRN_COL_CANDIDATES if c in cols])
-    else:
-        expiry_col = None
-        usecols = None
-
-    tickers = set(tickers) if tickers else None
-    thresholds = set(thresholds) if thresholds else None
-    expiry_dates = set(expiry_dates) if expiry_dates else None
-
-    if not cols:
-        df = pd.read_csv(path)
-        if df.empty:
-            return df
-        expiry_col = None
-        for col in ["expiry_close_date_used", "option_expiration_used", "option_expiration_requested"]:
-            if col in df.columns:
-                expiry_col = col
-                break
-        if not expiry_col:
-            raise KeyError("pRN dataset missing expiry date column.")
-        df = _filter_prn_chunk(
-            df,
-            expiry_col=expiry_col,
-            tickers=tickers,
-            thresholds=thresholds,
-            expiry_dates=expiry_dates,
-            date_start=date_start,
-            date_end=date_end,
-            prn_asof_tz=prn_asof_tz,
-            prn_asof_close_time=prn_asof_close_time,
-        )
-        if df.empty:
-            return df
-    else:
-        if not expiry_col:
-            raise KeyError("pRN dataset missing expiry date column.")
-        used_filters = any([tickers, thresholds, expiry_dates, date_start, date_end])
-        if used_filters:
-            try:
-                import pyarrow.dataset as ds  # type: ignore
-
-                dataset = ds.dataset(str(path), format="csv")
-                columns = sorted(usecols)
-
-                filter_expr = None
-                if tickers:
-                    filter_expr = ds.field("ticker").isin(sorted(tickers))
-                if expiry_dates:
-                    expiry_vals = [d.isoformat() for d in sorted(expiry_dates)]
-                    expr = ds.field(expiry_col).isin(expiry_vals)
-                    filter_expr = expr if filter_expr is None else filter_expr & expr
-                if date_start or date_end:
-                    date_col = None
-                    for candidate in ("asof_date", "asof_target"):
-                        if candidate in columns:
-                            date_col = candidate
-                            break
-                    if date_col and date_start:
-                        expr = ds.field(date_col) >= date_start.isoformat()
-                        filter_expr = expr if filter_expr is None else filter_expr & expr
-                    if date_col and date_end:
-                        expr = ds.field(date_col) <= date_end.isoformat()
-                        filter_expr = expr if filter_expr is None else filter_expr & expr
-
-                print("[features] pRN scan: pyarrow")
-                table = dataset.to_table(columns=columns, filter=filter_expr, use_threads=True)
-                df = table.to_pandas()
-                if not df.empty:
-                    df = _filter_prn_chunk(
-                        df,
-                        expiry_col=expiry_col,
-                        tickers=tickers,
-                        thresholds=thresholds,
-                        expiry_dates=expiry_dates,
-                        date_start=date_start,
-                        date_end=date_end,
-                        prn_asof_tz=prn_asof_tz,
-                        prn_asof_close_time=prn_asof_close_time,
-                    )
-            except Exception as exc:
-                print(f"[features] pRN pyarrow scan failed, falling back to chunked pandas: {exc}")
-                df = pd.DataFrame()
-
-            if df.empty:
-                reader = pd.read_csv(path, usecols=sorted(usecols), chunksize=chunksize)
-                frames: List[pd.DataFrame] = []
-                total_rows = 0
-                kept_rows = 0
-                chunk_idx = 0
-                for chunk in reader:
-                    chunk_idx += 1
-                    total_rows += len(chunk)
-                    filtered = _filter_prn_chunk(
-                        chunk,
-                        expiry_col=expiry_col,
-                        tickers=tickers,
-                        thresholds=thresholds,
-                        expiry_dates=expiry_dates,
-                        date_start=date_start,
-                        date_end=date_end,
-                        prn_asof_tz=prn_asof_tz,
-                        prn_asof_close_time=prn_asof_close_time,
-                    )
-                    if not filtered.empty:
-                        frames.append(filtered)
-                        kept_rows += len(filtered)
-                    if chunk_idx == 1 or chunk_idx % 5 == 0:
-                        print(f"[features] pRN rows kept {kept_rows}/{total_rows} after {chunk_idx} chunks")
-                if not frames:
-                    return pd.DataFrame()
-                df = pd.concat(frames, ignore_index=True)
-        else:
-            reader = pd.read_csv(path, usecols=sorted(usecols), chunksize=chunksize)
-            frames: List[pd.DataFrame] = []
-            total_rows = 0
-            kept_rows = 0
-            chunk_idx = 0
-            for chunk in reader:
-                chunk_idx += 1
-                total_rows += len(chunk)
-                filtered = _filter_prn_chunk(
-                    chunk,
-                    expiry_col=expiry_col,
-                    tickers=tickers,
-                    thresholds=thresholds,
-                    expiry_dates=expiry_dates,
-                    date_start=date_start,
-                    date_end=date_end,
-                    prn_asof_tz=prn_asof_tz,
-                    prn_asof_close_time=prn_asof_close_time,
-                )
-                if not filtered.empty:
-                    frames.append(filtered)
-                    kept_rows += len(filtered)
-                if chunk_idx == 1 or chunk_idx % 5 == 0:
-                    print(f"[features] pRN rows kept {kept_rows}/{total_rows} after {chunk_idx} chunks")
-            if not frames:
-                return pd.DataFrame()
-            df = pd.concat(frames, ignore_index=True)
-
-    if df.empty:
-        return df
-
-    keep_cols = ["ticker", "threshold", "expiry_date", "asof_time", "snapshot_date"]
-    for col in PRN_COL_CANDIDATES:
-        if col in df.columns:
-            keep_cols.append(col)
-
-    df = df[keep_cols]
-    df = df.dropna(subset=["ticker", "threshold", "expiry_date", "asof_time"])
-
-    key_cols = ["ticker", "threshold", "expiry_date", "snapshot_date"]
-    if not df.empty and df.duplicated(subset=key_cols).any():
-        print("[WARN] pRN dataset has duplicate rows for the same (ticker, threshold, expiry_date, snapshot_date).")
-        df = df.sort_values(key_cols + ["asof_time"]).drop_duplicates(subset=key_cols, keep="last")
-
-    return df
-
-
 def _build_base_features(df: pd.DataFrame, spread_bps: float, vol_window: int, vol_min: int) -> pd.DataFrame:
     if df.empty:
         return df
@@ -735,7 +367,7 @@ def _build_momentum_1d(bars_1h: pd.DataFrame) -> pd.DataFrame:
 def _attach_dim_market(base: pd.DataFrame, dim_market: pd.DataFrame) -> pd.DataFrame:
     dim = dim_market.copy()
     dim["ticker"] = dim["ticker"].astype(str).str.upper()
-    dim["threshold"] = dim["threshold"].apply(_normalize_threshold)
+    dim["threshold"] = dim["threshold"].apply(normalize_threshold)
     dim["expiry_date_utc"] = pd.to_datetime(dim["expiry_date_utc"], utc=True, errors="coerce")
     dim["resolution_time_utc"] = pd.to_datetime(dim["resolution_time_utc"], utc=True, errors="coerce")
 
@@ -980,17 +612,7 @@ def _build_label_map(dim_market: pd.DataFrame, pnl: Optional[pd.DataFrame], posi
     return label_map
 
 
-def _write_outputs(df: pd.DataFrame, out_dir: Path) -> Tuple[Path, Path]:
-    ensure_dir(out_dir)
-
-    features_path = out_dir / "decision_features.parquet"
-    if not df.empty:
-        try:
-            df.to_parquet(features_path, index=False)
-        except Exception:
-            features_path = out_dir / "decision_features.csv"
-            df.to_csv(features_path, index=False)
-
+def _write_feature_manifest(df: pd.DataFrame, out_dir: Path) -> Path:
     feature_cols = [c for c in df.columns if c.startswith("pm_") or c in PRN_COL_CANDIDATES]
     manifest = {
         "schema_version": SCHEMA_VERSION,
@@ -1003,7 +625,36 @@ def _write_outputs(df: pd.DataFrame, out_dir: Path) -> Tuple[Path, Path]:
     }
     manifest_path = out_dir / "feature_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2))
+    return manifest_path
 
+
+def _write_features_file(df: pd.DataFrame, out_dir: Path, prefer_path: Optional[Path] = None) -> Path:
+    ensure_dir(out_dir)
+
+    if prefer_path is not None:
+        features_path = prefer_path
+    else:
+        features_path = out_dir / "decision_features.parquet"
+
+    if df.empty:
+        return features_path
+
+    if features_path.suffix.lower() == ".csv":
+        df.to_csv(features_path, index=False)
+        return features_path
+
+    try:
+        df.to_parquet(features_path, index=False)
+        return features_path
+    except Exception:
+        features_path = out_dir / "decision_features.csv"
+        df.to_csv(features_path, index=False)
+        return features_path
+
+
+def _write_outputs(df: pd.DataFrame, out_dir: Path, prefer_path: Optional[Path] = None) -> Tuple[Path, Path]:
+    features_path = _write_features_file(df, out_dir, prefer_path)
+    manifest_path = _write_feature_manifest(df, out_dir)
     return features_path, manifest_path
 
 
@@ -1018,6 +669,77 @@ def _leak_check_allow_na(
         t_feat = pd.to_datetime(df[col], utc=True, errors="coerce")
         mask &= (t_feat < t_decision) | t_feat.isna()
     return mask
+
+
+def _parse_replace_range(value: Optional[str]) -> Tuple[Optional[date], Optional[date]]:
+    if not value:
+        return None, None
+    raw = value.strip()
+    if not raw:
+        return None, None
+    if ":" in raw:
+        parts = [p.strip() for p in raw.split(":", 1)]
+        start_raw, end_raw = (parts + [""])[:2]
+    else:
+        start_raw = raw
+        end_raw = raw
+    start = pd.to_datetime(start_raw, errors="coerce").date() if start_raw else None
+    end = pd.to_datetime(end_raw, errors="coerce").date() if end_raw else None
+    if start is None and end is None:
+        raise ValueError(f"Invalid replace-range '{value}' (expected YYYY-MM-DD or YYYY-MM-DD:YYYY-MM-DD).")
+    if start and end and start > end:
+        raise ValueError(f"Invalid replace-range '{value}' (start after end).")
+    return start, end
+
+
+def _decision_date_series(df: pd.DataFrame) -> Optional[pd.Series]:
+    if "timestamp_utc" in df.columns:
+        ts = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
+        return ts.dt.date
+    if "decision_date" in df.columns:
+        return pd.to_datetime(df["decision_date"], errors="coerce").dt.date
+    return None
+
+
+def _load_existing_features(out_dir: Path) -> Tuple[Optional[pd.DataFrame], Optional[Path]]:
+    parquet_path = out_dir / "decision_features.parquet"
+    csv_path = out_dir / "decision_features.csv"
+    if parquet_path.exists():
+        try:
+            return pd.read_parquet(parquet_path), parquet_path
+        except Exception:
+            pass
+    if csv_path.exists():
+        return pd.read_csv(csv_path), csv_path
+    return None, None
+
+
+def _merge_append_features(
+    existing: pd.DataFrame,
+    new_df: pd.DataFrame,
+    replace_start: Optional[date],
+    replace_end: Optional[date],
+) -> pd.DataFrame:
+    if existing is None or existing.empty:
+        return new_df
+
+    filtered = existing
+    if replace_start or replace_end:
+        decision_dates = _decision_date_series(existing)
+        if decision_dates is not None:
+            mask = pd.Series(True, index=existing.index)
+            if replace_start:
+                mask &= decision_dates >= replace_start
+            if replace_end:
+                mask &= decision_dates <= replace_end
+            filtered = existing[~mask]
+
+    combined = pd.concat([filtered, new_df], ignore_index=True, sort=False)
+    key_cols = [c for c in ("market_id", "timestamp_utc") if c in combined.columns]
+    if len(key_cols) != 2:
+        raise ValueError("Append mode requires market_id and timestamp_utc columns for de-duplication.")
+    combined = combined.sort_values(key_cols).drop_duplicates(subset=key_cols, keep="last")
+    return combined.reset_index(drop=True)
 
 
 # ----------------------------
@@ -1036,6 +758,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vol-min", type=int, default=6, help="Volatility min periods.")
     parser.add_argument("--start-date", type=str, default=None, help="Start date YYYY-MM-DD.")
     parser.add_argument("--end-date", type=str, default=None, help="End date YYYY-MM-DD.")
+    parser.add_argument("--append", action="store_true", help="Append new rows to existing decision_features output.")
+    parser.add_argument(
+        "--replace-range",
+        type=str,
+        default=None,
+        help="Optional date range to replace when appending (YYYY-MM-DD or YYYY-MM-DD:YYYY-MM-DD).",
+    )
     parser.add_argument("--allow-leak", action="store_true", help="Do not fail if leak check fails.")
     parser.add_argument("--pnl-run-dir", type=str, default=None, help="Optional pnlConditions run dir.")
     parser.add_argument("--positions-run-dir", type=str, default=None, help="Optional positions run dir.")
@@ -1104,7 +833,7 @@ def main() -> None:
         stats.increment_count("dim_market_rows", len(dim_market))
     _progress(1, "dim_market_loaded", "dim_market")
 
-    prn_path = cfg.prn_dataset or _find_latest_prn_dataset()
+    prn_path = cfg.prn_dataset or find_latest_prn_dataset()
     if prn_path is None or not prn_path.exists():
         raise ValueError("pRN dataset is required. Provide --prn-dataset.")
 
@@ -1119,7 +848,7 @@ def main() -> None:
 
     filter_thresholds = None
     if "threshold" in dim_market.columns:
-        thresholds = dim_market["threshold"].apply(_normalize_threshold).dropna().tolist()
+        thresholds = dim_market["threshold"].apply(normalize_threshold).dropna().tolist()
         filter_thresholds = set(thresholds) if thresholds else None
 
     filter_expiries = None
@@ -1140,7 +869,7 @@ def main() -> None:
         )
     print(f"[features] Loading pRN dataset: {prn_path}")
     with ProfileContext(stats, "load_prn_dataset"):
-        prn = _load_prn_dataset(
+        prn = load_prn_dataset(
             prn_path,
             prn_asof_tz=cfg.prn_asof_tz,
             prn_asof_close_time=cfg.prn_asof_close_time,
@@ -1325,8 +1054,22 @@ def main() -> None:
 
     _progress(5, "labels_ready", "labels")
 
+    prefer_path: Optional[Path] = None
+    if args.append:
+        existing_df, existing_path = _load_existing_features(cfg.out_dir)
+        replace_start, replace_end = _parse_replace_range(args.replace_range)
+        if existing_df is not None:
+            before = len(existing_df)
+            new_count = len(base)
+            base = _merge_append_features(existing_df, base, replace_start, replace_end)
+            after = len(base)
+            prefer_path = existing_path
+            print(f"[features] append mode: existing={before} new={new_count} combined={after}")
+        else:
+            print("[features] append mode: no existing decision_features found; writing fresh output.")
+
     with ProfileContext(stats, "write_outputs"):
-        features_path, manifest_path = _write_outputs(base, cfg.out_dir)
+        features_path, manifest_path = _write_outputs(base, cfg.out_dir, prefer_path)
     _progress(6, "outputs_written", "write_outputs")
 
     print("[features] rows=", len(base))

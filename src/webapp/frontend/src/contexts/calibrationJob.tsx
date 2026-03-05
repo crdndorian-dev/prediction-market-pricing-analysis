@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -13,6 +14,7 @@ import { getCalibrationJob } from "../api/calibrateModels";
 type CalibrationJobStatus = Awaited<ReturnType<typeof getCalibrationJob>>;
 
 const STORAGE_KEY = "polyedgetool.calibration.job";
+const MAX_POLL_FAILURES = 3;
 
 type CalibrationJobContextValue = {
   jobId: string | null;
@@ -40,6 +42,7 @@ export function CalibrationJobProvider({ children }: { children: ReactNode }) {
   const [jobStatus, setJobStatusState] =
     useState<CalibrationJobStatus | null>(null);
   const [storageReady, setStorageReady] = useState(false);
+  const consecutivePollFailures = useRef(0);
 
   useEffect(() => {
     setStorageReady(true);
@@ -48,6 +51,9 @@ export function CalibrationJobProvider({ children }: { children: ReactNode }) {
   const setJobId = useCallback(
     (value: string | null) => {
       setJobIdState(value);
+      if (!value) {
+        consecutivePollFailures.current = 0;
+      }
       if (!storageReady) return;
       try {
         if (value) {
@@ -62,28 +68,43 @@ export function CalibrationJobProvider({ children }: { children: ReactNode }) {
     [storageReady],
   );
 
+  const clearTrackedJob = useCallback(() => {
+    setJobStatusState(null);
+    setJobId(null);
+    consecutivePollFailures.current = 0;
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      /* ignore */
+    }
+  }, [setJobId]);
+
+  const handlePollFailure = useCallback(() => {
+    consecutivePollFailures.current += 1;
+    if (consecutivePollFailures.current >= MAX_POLL_FAILURES) {
+      clearTrackedJob();
+    }
+  }, [clearTrackedJob]);
+
   const refreshJob = useCallback(async () => {
     if (!jobId) {
       setJobStatusState(null);
+      consecutivePollFailures.current = 0;
       return;
     }
     try {
       const status = await getCalibrationJob(jobId);
       setJobStatusState(status);
+      consecutivePollFailures.current = 0;
     } catch {
-      setJobStatusState(null);
-      setJobId(null);
-      try {
-        localStorage.removeItem(STORAGE_KEY);
-      } catch {
-        /* ignore */
-      }
+      handlePollFailure();
     }
-  }, [jobId, setJobId]);
+  }, [handlePollFailure, jobId]);
 
   useEffect(() => {
     if (!jobId) {
       setJobStatusState(null);
+      consecutivePollFailures.current = 0;
       return undefined;
     }
 
@@ -93,15 +114,10 @@ export function CalibrationJobProvider({ children }: { children: ReactNode }) {
         const status = await getCalibrationJob(jobId);
         if (cancelled) return;
         setJobStatusState(status);
+        consecutivePollFailures.current = 0;
       } catch {
         if (cancelled) return;
-        setJobStatusState(null);
-        setJobId(null);
-        try {
-          localStorage.removeItem(STORAGE_KEY);
-        } catch {
-          /* ignore */
-        }
+        handlePollFailure();
       }
     };
 
@@ -111,7 +127,7 @@ export function CalibrationJobProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       clearInterval(id);
     };
-  }, [jobId, setJobId]);
+  }, [handlePollFailure, jobId]);
 
   const contextValue = useMemo(
     () => ({

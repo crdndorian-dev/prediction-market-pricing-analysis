@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
 import time
@@ -30,6 +29,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_ROOT = REPO_ROOT / "src" / "scripts"
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
+
+from polymarket.weekly_history_io import (
+    append_df_to_csv_with_schema,
+    build_bars_from_prices,
+    clean_price_history,
+    fetch_price_history,
+    write_bars,
+)
 
 # Endpoints
 GAMMA_EVENTS = "https://gamma-api.polymarket.com/events"
@@ -102,14 +109,6 @@ COMPANY_NAME_MAP = {
     "palantir": "PLTR",
 }
 
-FREQ_ALIASES = {
-    "60m": "1h",
-    "1h": "1h",
-    "1d": "1D",
-    "1D": "1D",
-}
-
-
 @dataclass(frozen=True)
 class Config:
     request_timeout_s: int = 30
@@ -124,6 +123,7 @@ class Config:
     despike_enabled: bool = False
     despike_jump: float = 0.25
     despike_revert: float = 0.1
+    clob_price_history_url: str = CLOB_PRICE_HISTORY
 
 
 # ----------------------------
@@ -132,32 +132,6 @@ class Config:
 
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
-
-
-def append_df_to_csv_with_schema(df: pd.DataFrame, path: Path) -> None:
-    ensure_dir(path.parent)
-    file_exists = path.exists() and path.stat().st_size > 0
-    if not file_exists:
-        df.to_csv(path, index=False)
-        return
-
-    existing_cols = list(pd.read_csv(path, nrows=0).columns)
-    new_cols = [c for c in df.columns if c not in existing_cols]
-    if not new_cols:
-        df = df.reindex(columns=existing_cols)
-        df.to_csv(path, mode="a", header=False, index=False)
-        return
-
-    existing = pd.read_csv(path)
-    for col in new_cols:
-        existing[col] = np.nan
-    new_order = existing_cols + new_cols
-    temp_path = path.with_suffix(path.suffix + ".tmp")
-    existing = existing.reindex(columns=new_order)
-    existing.to_csv(temp_path, index=False)
-    df = df.reindex(columns=new_order)
-    df.to_csv(temp_path, mode="a", header=False, index=False)
-    os.replace(temp_path, path)
 
 
 def make_session() -> requests.Session:
@@ -634,176 +608,6 @@ def extract_weekly_markets(
 # Price history + bars
 # ----------------------------
 
-def fetch_price_history(
-    session: requests.Session,
-    token_id: str,
-    cfg: Config,
-    start_dt: Optional[datetime],
-    end_dt: Optional[datetime],
-) -> pd.DataFrame:
-    def _payload_to_df(payload: dict) -> pd.DataFrame:
-        if not isinstance(payload, dict):
-            return pd.DataFrame()
-        history = payload.get("history") or []
-        if not isinstance(history, list) or not history:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(history)
-        if df.empty:
-            return df
-
-        df = df.rename(columns={"t": "timestamp", "p": "price"})
-        df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
-        df["price"] = pd.to_numeric(df["price"], errors="coerce")
-        df = df.dropna(subset=["timestamp", "price"])
-        df = df[(df["price"] >= 0) & (df["price"] <= 1)]
-        if df.empty:
-            return df
-        df["timestamp_utc"] = pd.to_datetime(df["timestamp"], unit="s", utc=True, errors="coerce")
-        df = df.dropna(subset=["timestamp_utc"])
-        df["token_id"] = token_id
-        df["schema_version"] = SCHEMA_VERSION_PRICES
-        return df[["timestamp_utc", "price", "token_id", "schema_version"]]
-
-    base_params: Dict[str, Any] = {
-        "market": token_id,
-        "fidelity": cfg.clob_fidelity_min,
-    }
-
-    if not (start_dt or end_dt):
-        params = dict(base_params)
-        params.update({"interval": "max"})
-        resp = session.get(CLOB_PRICE_HISTORY, params=params, timeout=cfg.request_timeout_s)
-        resp.raise_for_status()
-        return _payload_to_df(resp.json())
-
-    start_ts = int(start_dt.timestamp()) if start_dt else 0
-    end_ts = int(end_dt.timestamp()) if end_dt else int(datetime.now(timezone.utc).timestamp())
-    if end_ts < start_ts:
-        return pd.DataFrame()
-
-    max_days = max(1, int(cfg.clob_max_range_days))
-    max_span = max_days * 86400 - 1
-    if max_span <= 0:
-        max_span = 1
-
-    frames: List[pd.DataFrame] = []
-    cur_start = start_ts
-    while cur_start <= end_ts:
-        cur_end = min(cur_start + max_span, end_ts)
-        params = dict(base_params)
-        params.update({"startTs": int(cur_start), "endTs": int(cur_end)})
-        resp = session.get(CLOB_PRICE_HISTORY, params=params, timeout=cfg.request_timeout_s)
-        resp.raise_for_status()
-        frame = _payload_to_df(resp.json())
-        if not frame.empty:
-            frames.append(frame)
-        if cfg.sleep_between_requests_s > 0:
-            time.sleep(cfg.sleep_between_requests_s)
-        cur_start = cur_end + 1
-
-    if not frames:
-        return pd.DataFrame()
-    out = pd.concat(frames, ignore_index=True)
-    out = out.sort_values("timestamp_utc").reset_index(drop=True)
-    if start_dt:
-        out = out[out["timestamp_utc"] >= start_dt]
-    if end_dt:
-        out = out[out["timestamp_utc"] <= end_dt]
-    return out
-
-
-def clean_price_history(
-    df: pd.DataFrame,
-    despike: bool,
-    jump_threshold: float,
-    revert_threshold: float,
-) -> Tuple[pd.DataFrame, int]:
-    if df.empty:
-        return df, 0
-
-    df = df.sort_values("timestamp_utc").drop_duplicates(subset=["timestamp_utc"], keep="last")
-    df = df.reset_index(drop=True)
-
-    if not despike or len(df) < 3:
-        return df, 0
-
-    prices = df["price"].to_numpy(dtype=float)
-    cleaned = prices.copy()
-    adjusted = 0
-
-    for i in range(1, len(prices) - 1):
-        prev_price = prices[i - 1]
-        curr_price = prices[i]
-        next_price = prices[i + 1]
-        if (
-            abs(curr_price - prev_price) >= jump_threshold
-            and abs(curr_price - next_price) >= jump_threshold
-            and abs(next_price - prev_price) <= revert_threshold
-        ):
-            cleaned[i] = 0.5 * (prev_price + next_price)
-            adjusted += 1
-
-    if adjusted:
-        df["price_raw"] = prices
-        df["price"] = np.clip(cleaned, 0.0, 1.0)
-
-    return df, adjusted
-
-
-def _build_bars_from_prices(df: pd.DataFrame, freq: str) -> pd.DataFrame:
-    if df.empty:
-        return df
-
-    freq_alias = FREQ_ALIASES.get(freq, freq)
-    df = df.sort_values(["market_id", "timestamp_utc"]).copy()
-    df = df.set_index("timestamp_utc")
-
-    ohlc = (
-        df.groupby("market_id")["price"]
-        .resample(freq_alias)
-        .ohlc()
-        .reset_index()
-    )
-
-    if ohlc.empty:
-        return ohlc
-
-    ohlc["volume"] = np.nan
-    ohlc["trade_count"] = np.nan
-    ohlc["schema_version"] = SCHEMA_VERSION_BARS
-    return ohlc
-
-
-def _write_bars(bars: pd.DataFrame, bars_dir: Path, freq: str) -> int:
-    if bars.empty:
-        return 0
-
-    bars = bars.copy()
-    bars["timestamp_utc"] = pd.to_datetime(bars["timestamp_utc"], utc=True, errors="coerce")
-    bars = bars.dropna(subset=["timestamp_utc"])
-    bars["bar_date"] = bars["timestamp_utc"].dt.strftime("%Y-%m-%d")
-    bars["timestamp_utc"] = bars["timestamp_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    cols = [
-        "timestamp_utc",
-        "market_id",
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "trade_count",
-        "schema_version",
-    ]
-
-    count = 0
-    for (market_id, bar_date), part in bars.groupby(["market_id", "bar_date"]):
-        path = bars_dir / freq / f"market_id={market_id}" / f"date={bar_date}" / "bars.csv"
-        part = part.reindex(columns=cols)
-        append_df_to_csv_with_schema(part, path)
-        count += 1
-    return count
 
 
 # ----------------------------
@@ -1033,6 +837,7 @@ def write_dim_market(df: pd.DataFrame, path: Path) -> Path:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Backfill weekly Polymarket events and price history.")
     parser.add_argument("--out-dir", type=str, default=str(DEFAULT_OUT_DIR))
+    parser.add_argument("--run-id", type=str, default=None, help="Optional custom run directory name.")
     parser.add_argument("--bars-dir", type=str, default=str(DEFAULT_BARS_DIR))
     parser.add_argument("--dim-market-out", type=str, default=str(DEFAULT_DIM_MARKET_PATH))
     parser.add_argument("--fact-trade-dir", type=str, default=str(DEFAULT_FACT_TRADE_DIR))
@@ -1109,10 +914,18 @@ def main() -> None:
     bars_dir = Path(args.bars_dir)
     dim_market_out = Path(args.dim_market_out)
     fact_trade_dir = Path(args.fact_trade_dir)
-    run_id = datetime.now(timezone.utc).strftime("weekly-history-%Y%m%dT%H%M%SZ")
+    requested_run_id = (args.run_id or "").strip()
+    if requested_run_id:
+        if requested_run_id in {".", ".."} or "/" in requested_run_id or "\\" in requested_run_id:
+            raise ValueError("run-id must be a single directory name (no path separators).")
+        run_id = requested_run_id
+    else:
+        run_id = datetime.now(timezone.utc).strftime("weekly-history-%Y%m%dT%H%M%SZ")
     run_dir = out_dir / "runs" / run_id
 
     if not args.dry_run:
+        if run_dir.exists():
+            raise FileExistsError(f"Run directory already exists: {run_dir}")
         ensure_dir(run_dir)
         ensure_dir(bars_dir)
 
@@ -1219,7 +1032,14 @@ def main() -> None:
             if not token_id:
                 continue
             try:
-                history = fetch_price_history(session, str(token_id), cfg, start_dt, end_dt)
+                history = fetch_price_history(
+                    session,
+                    str(token_id),
+                    cfg,
+                    start_dt,
+                    end_dt,
+                    schema_version=SCHEMA_VERSION_PRICES,
+                )
                 if history.empty:
                     continue
 
@@ -1248,8 +1068,12 @@ def main() -> None:
                         bars_in = history[["timestamp_utc", "price"]].copy()
                         bars_in["market_id"] = market_id
                         for freq in cfg.bars_freqs:
-                            bars = _build_bars_from_prices(bars_in, freq)
-                            bar_partitions += _write_bars(bars, bars_dir, freq)
+                            bars = build_bars_from_prices(
+                                bars_in,
+                                freq,
+                                schema_version=SCHEMA_VERSION_BARS,
+                            )
+                            bar_partitions += write_bars(bars, bars_dir, freq)
 
             except Exception as exc:
                 market_failed = True

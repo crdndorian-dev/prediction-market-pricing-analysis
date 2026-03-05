@@ -110,10 +110,10 @@
 
 .datasets-page .datasets-doc-subsection-title {
   margin: 0;
-  font-size: clamp(1.7rem, 2.25vw, 2.15rem);
-  line-height: 1.08;
-  letter-spacing: -0.01em;
-  color: var(--ink-900);
+  font-size: var(--text-2xl);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-500);
 }
 
 .datasets-doc-description {
@@ -340,10 +340,10 @@
 
 .datasets-page .dataset-section > h3 {
   margin: 0;
-  font-size: clamp(2rem, 2.1vw, 2.35rem);
-  line-height: 1.05;
-  letter-spacing: -0.01em;
-  color: var(--ink-900);
+  font-size: var(--text-2xl);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-500);
 }
 
 .datasets-page .field {
@@ -1096,13 +1096,15 @@
   color: var(--ink-900);
 }
 
-.datasets-page .dataset-registry-panel .button.ghost.danger {
+.datasets-page .dataset-registry-panel .button.ghost.danger,
+.datasets-page .button.ghost.kill-button {
   background: rgba(127, 41, 41, 0.06);
   border-color: #7f2929;
   color: #7f2929;
 }
 
-.datasets-page .dataset-registry-panel .button.ghost.danger:hover:not(:disabled) {
+.datasets-page .dataset-registry-panel .button.ghost.danger:hover:not(:disabled),
+.datasets-page .button.ghost.kill-button:hover:not(:disabled) {
   background: rgba(127, 41, 41, 0.1);
   border-color: #6d2020;
   color: #6d2020;

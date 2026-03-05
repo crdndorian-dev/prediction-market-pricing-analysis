@@ -43,6 +43,10 @@ class PolymarketHistoryRunRequest(BaseModel):
         default=None,
         description="Output directory for weekly history runs.",
     )
+    run_dir_name: Optional[str] = Field(
+        default=None,
+        description="Optional custom run directory name (sanitized to kebab-case).",
+    )
     bars_dir: Optional[str] = Field(
         default=None,
         description="Bars output directory.",
@@ -94,6 +98,30 @@ class PolymarketHistoryRunResponse(BaseModel):
     features_built: bool = False
     features_path: Optional[str] = None
     features_manifest_path: Optional[str] = None
+
+
+class PolymarketRunFeaturesRequest(BaseModel):
+    prn_dataset: Optional[str] = Field(
+        default=None,
+        description="Path to pRN dataset CSV for decision feature building.",
+    )
+    skip_subgraph_labels: bool = Field(
+        default=False,
+        description="Skip fetching labels from the subgraph during feature build.",
+    )
+
+
+class PolymarketRunFeaturesResponse(BaseModel):
+    ok: bool
+    run_id: str
+    run_dir: str
+    features_built: bool = False
+    features_path: Optional[str] = None
+    features_manifest_path: Optional[str] = None
+    stdout: str
+    stderr: str
+    duration_s: float
+    command: List[str]
 
 
 class PolymarketHistoryProgress(BaseModel):

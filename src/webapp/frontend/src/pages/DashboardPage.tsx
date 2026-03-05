@@ -40,7 +40,7 @@ export default function DashboardPage() {
         <div className="dashboard-banner">Loading run queue...</div>
       ) : null}
 
-      <section className="dashboard-hero reveal delay-1">
+      <section className="dashboard-hero">
         <div className="hero-content">
           <span className="hero-eyebrow">Prediction market pricing pipeline</span>
           <h1>Benchmark Polymarket prices with option-implied probabilities.</h1>
@@ -83,23 +83,6 @@ export default function DashboardPage() {
                 <li className="empty-state">No active jobs.</li>
               )}
             </ul>
-          </div>
-          <div className="panel-card doc-card">
-            <div className="card-header">
-              <div>
-                <h2>Documentation</h2>
-                <p>Setup steps, run order, and output definitions.</p>
-              </div>
-              <span className="status-pill idle">Guides</span>
-            </div>
-            <p className="doc-paragraph">
-              Open the docs for quick setup, pipeline steps, and output notes.
-            </p>
-            <div className="panel-actions">
-              <Link className="button primary" to="/docs">
-                Open Documentation
-              </Link>
-            </div>
           </div>
         </div>
       </section>

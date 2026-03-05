@@ -52,6 +52,8 @@ export type MarketsSummaryResponse = {
   week_monday?: string | null;
   week_sunday?: string | null;
   last_refresh_utc?: string | null;
+  last_snapshot_date?: string | null;
+  snapshot_rows_appended?: number | null;
   trading_universe_tickers?: string[];
   markets: MarketsSummaryItem[];
 };
