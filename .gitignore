@@ -23,7 +23,7 @@ AGENTS.md
 !/tests/backend/services/test_markets_refresh_helpers.py
 /tools/
 /context/
-/docs/
+/documentation/
 
 
 **/.DS_Store
