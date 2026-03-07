@@ -6,7 +6,8 @@ AGENTS.md
 /.vscode/
 !/.vscode/extensions.json
 /deadcode/
-
+/.obsidian/
+/.pytest_cache/
 
 .env
 .env.*
@@ -24,7 +25,8 @@ AGENTS.md
 /tools/
 /context/
 /documentation/
-
+/docs/.obsidian/*
+/docs/.obsidian/
 
 **/.DS_Store
 
