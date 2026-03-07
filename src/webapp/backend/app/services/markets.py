@@ -46,6 +46,7 @@ _CACHE_TTL_SECONDS = 600
 _PROGRESS_RE = re.compile(r"\[Markets\] PROGRESS stage=(?P<stage>\w+) current=(?P<current>\d+) total=(?P<total>\d+)")
 _RUN_ID_RE = re.compile(r"run_id=([0-9A-Za-z_-]+)")
 _WEEK_RE = re.compile(r"week_friday=([0-9]{4}-[0-9]{2}-[0-9]{2})")
+_FATAL_RE = re.compile(r"^\[FATAL\]\s*(?P<message>.*)$")
 
 
 # -----------------------------
@@ -122,6 +123,36 @@ def _cache_get(cache: Dict[str, Tuple[float, object]], key: str):
 
 def _cache_put(cache: Dict[str, Tuple[float, object]], key: str, value: object):
     cache[key] = (time.time(), value)
+
+
+def _extract_last_fatal_message(lines: List[str]) -> Optional[str]:
+    for raw in reversed(lines):
+        line = raw.strip()
+        if not line:
+            continue
+        match = _FATAL_RE.match(line)
+        if match:
+            message = match.group("message").strip()
+            return message or line
+    return None
+
+
+def _extract_last_nonempty_line(lines: List[str]) -> Optional[str]:
+    for raw in reversed(lines):
+        line = raw.strip()
+        if line:
+            return line
+    return None
+
+
+def _summarize_process_failure(stdout_lines: List[str], stderr_lines: List[str]) -> str:
+    fatal = _extract_last_fatal_message(stdout_lines)
+    if fatal:
+        return fatal
+    stderr_tail = _extract_last_nonempty_line(stderr_lines)
+    if stderr_tail:
+        return stderr_tail
+    return "Markets refresh failed."
 
 
 def _infer_last_snapshot_date(run_dir: Path, tz_name: str = "America/New_York") -> Optional[str]:
@@ -290,7 +321,7 @@ class MarketsJob:
         ok = proc.returncode == 0
         self.status = "finished" if ok else "failed"
         if not ok:
-            self.error = "Markets refresh failed."
+            self.error = _summarize_process_failure(self._stdout_lines, self._stderr_lines)
         self._snapshot_result(ok, cmd, start_ts, run_dir)
         self.finished_at = datetime.utcnow()
         if runtime_dir is not None:

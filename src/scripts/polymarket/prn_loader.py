@@ -9,6 +9,9 @@ import pandas as pd
 from zoneinfo import ZoneInfo
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+PRN_ASOF_COLUMNS = ("asof_ts", "asof_time", "asof_datetime", "asof_date", "asof_target")
+PRN_EXPIRY_COLUMNS = ("expiry_close_date_used", "option_expiration_used", "option_expiration_requested", "expiry_date")
+PRN_CORE_PROBABILITY_COLUMNS = ("pRN", "qRN", "pRN_raw", "qRN_raw")
 
 PRN_COL_CANDIDATES = [
     "pRN",
@@ -108,12 +111,36 @@ def derive_prn_asof_time(
     raise KeyError("pRN dataset missing asof_date/asof_target/asof_ts column.")
 
 
+def _read_csv_header(path: Path) -> set[str]:
+    try:
+        return set(pd.read_csv(path, nrows=0).columns.tolist())
+    except Exception:
+        return set()
+
+
+def _is_prn_dataset_candidate(path: Path) -> bool:
+    columns = _read_csv_header(path)
+    if not columns:
+        return False
+    if not {"ticker", "K"}.issubset(columns):
+        return False
+    if not any(col in columns for col in PRN_ASOF_COLUMNS):
+        return False
+    if not any(col in columns for col in PRN_EXPIRY_COLUMNS):
+        return False
+    if not any(col in columns for col in PRN_CORE_PROBABILITY_COLUMNS):
+        return False
+    return True
+
+
 def find_latest_prn_dataset() -> Optional[Path]:
     base = REPO_ROOT / "src" / "data" / "raw" / "option-chain"
-    candidates = list(base.rglob("dataset-n1.csv"))
+    if not base.exists():
+        return None
+    candidates = [path for path in base.rglob("*.csv") if _is_prn_dataset_candidate(path)]
     if not candidates:
         return None
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    candidates.sort(key=lambda p: (p.stat().st_mtime, str(p)), reverse=True)
     return candidates[0]
 
 
@@ -227,11 +254,11 @@ def load_prn_dataset(
         cols = []
 
     if cols:
-        expiry_candidates = ["expiry_close_date_used", "option_expiration_used", "option_expiration_requested", "expiry_date"]
+        expiry_candidates = list(PRN_EXPIRY_COLUMNS)
         expiry_col = next((c for c in expiry_candidates if c in cols), None)
         if not expiry_col:
             raise KeyError("pRN dataset missing expiry date column.")
-        asof_cols = [c for c in ("asof_ts", "asof_time", "asof_datetime", "asof_date", "asof_target") if c in cols]
+        asof_cols = [c for c in PRN_ASOF_COLUMNS if c in cols]
         if not asof_cols:
             raise KeyError("pRN dataset missing asof_date/asof_target/asof_ts column.")
         usecols = {"ticker", "K", expiry_col}
@@ -250,7 +277,7 @@ def load_prn_dataset(
         if df.empty:
             return df
         expiry_col = None
-        for col in ["expiry_close_date_used", "option_expiration_used", "option_expiration_requested", "expiry_date"]:
+        for col in PRN_EXPIRY_COLUMNS:
             if col in df.columns:
                 expiry_col = col
                 break

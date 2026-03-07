@@ -135,6 +135,20 @@ function computeWeekRangeUtcMs(weekFriday?: string | null): { startMs: number; e
   return { startMs: start, endMs: end };
 }
 
+function extractFatalMessage(output?: string | null): string | null {
+  if (!output) return null;
+  const lines = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (!line.startsWith("[FATAL]")) continue;
+    return line.replace(/^\[FATAL\]\s*/, "") || line;
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Chart helpers
 // ---------------------------------------------------------------------------
@@ -431,7 +445,6 @@ export default function MarketsPage() {
     if (selectedStrike === null) return;
     const stillValid = availableStrikes.some((s) => Math.abs(s - selectedStrike) < 0.0001);
     if (!stillValid) setSelectedStrike(null);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [availableStrikes, selectedStrike]);
 
   // -------------------------------------------------------------------------
@@ -488,7 +501,10 @@ export default function MarketsPage() {
     { label: "Last update", value: formatTimestamp(jobStatus?.finished_at ?? jobStatus?.started_at) },
   ];
 
-  const stderr = jobStatus?.result?.stderr || jobStatus?.error || null;
+  const jobErrorText = jobStatus?.result?.stderr?.trim()
+    || jobStatus?.error?.trim()
+    || extractFatalMessage(jobStatus?.result?.stdout)
+    || null;
 
   // -------------------------------------------------------------------------
   // Data loading
@@ -599,7 +615,7 @@ export default function MarketsPage() {
     if (jobStatus?.status === "finished") {
       loadSummary();
     } else if (jobStatus?.status === "failed") {
-      const message = jobStatus.result?.stderr || jobStatus.error || "Markets refresh failed.";
+      const message = jobErrorText || "Markets refresh failed.";
       if (message) setError(message.trim());
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -793,10 +809,10 @@ export default function MarketsPage() {
                   </div>
                 </div>
 
-                {stderr && (
+                {jobErrorText && (
                   <div className="log-block">
                     <span className="meta-label">Errors / Warnings</span>
-                    <pre className="log-content">{stderr}</pre>
+                    <pre className="log-content">{jobErrorText}</pre>
                   </div>
                 )}
               </div>

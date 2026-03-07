@@ -248,6 +248,12 @@ def compute_cutoff_utc(now_utc: datetime, tz_name: str, week_friday: date) -> da
     return round_down_hour(now_utc)
 
 
+def _build_spot_source(spot: pd.Series) -> pd.Series:
+    source = pd.Series(pd.NA, index=spot.index, dtype="string")
+    source.loc[spot.notna()] = "option_chain"
+    return source
+
+
 def make_session() -> requests.Session:
     session = requests.Session()
     retry = Retry(
@@ -1143,7 +1149,7 @@ def main() -> None:
         if "rn_method" not in prn_out.columns:
             prn_out["rn_method"] = "option_chain"
         if "spot_source" not in prn_out.columns:
-            prn_out["spot_source"] = np.where(prn_out["spot"].notna(), "option_chain", np.nan)
+            prn_out["spot_source"] = _build_spot_source(prn_out["spot"])
 
         prn_out["spot_asof_utc"] = prn_out["prn_asof_time"]
         prn_out["rn_asof_utc"] = prn_out["prn_asof_time"]

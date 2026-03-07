@@ -14,10 +14,13 @@ AGENTS.md
 
 
 /ci/
-/tests/
+/tests/*
 !/tests/backend/
+/tests/backend/*
 !/tests/backend/services/
+/tests/backend/services/*
 !/tests/backend/services/test_markets_refresh_run_resolution.py
+!/tests/backend/services/test_markets_refresh_helpers.py
 /tools/
 /context/
 /docs/

@@ -29,6 +29,7 @@ SCRIPTS_ROOT = REPO_ROOT / "src" / "scripts"
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
+from polymarket.prn_loader import find_latest_prn_dataset
 from polymarket.subgraph_client import SubgraphClient
 
 SCRIPT_VERSION = "1.0.0"
@@ -650,16 +651,6 @@ def _write_output(df: pd.DataFrame, out_path: Path) -> Path:
     df.to_csv(out_path, index=False)
     return out_path
 
-
-def _find_latest_prn_dataset() -> Optional[Path]:
-    base = REPO_ROOT / "src" / "data" / "raw" / "option-chain"
-    candidates = list(base.rglob("dataset-n1.csv"))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidates[0]
-
-
 # ----------------------------
 # CLI
 # ----------------------------
@@ -708,7 +699,7 @@ def main() -> None:
     else:
         # Auto-load tickers from pRN dataset (trading universe)
         with ProfileContext(stats, "load_prn_tickers"):
-            prn_path = cfg.prn_dataset or _find_latest_prn_dataset()
+            prn_path = cfg.prn_dataset or find_latest_prn_dataset()
             if prn_path:
                 tickers = _load_prn_tickers(prn_path)
                 if tickers:

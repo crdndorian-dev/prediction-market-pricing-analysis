@@ -254,6 +254,27 @@ const defaultModelName = () => {
   return `calibration-${stamp}`;
 };
 
+const resolveBootstrapGroupValue = (
+  requested: BootstrapGroupMode,
+  availableGroupingKeys?: string[] | null,
+): BootstrapGroupMode => {
+  if (!availableGroupingKeys || availableGroupingKeys.length === 0) return requested;
+  const available = new Set(availableGroupingKeys.map((key) => key.toLowerCase()));
+  if (requested === "contract_id" && !available.has("contract_id")) {
+    return available.has("group_id") ? "group_id" : "auto";
+  }
+  if (requested === "group_id" && !available.has("group_id")) {
+    return "auto";
+  }
+  if (requested === "ticker_day" && !available.has("ticker_day")) {
+    return "auto";
+  }
+  if (requested === "day" && !available.has("day")) {
+    return "auto";
+  }
+  return requested;
+};
+
 const defaultForm = (): CalibrateFormState => ({
   runMode: "manual",
   modelDirName: "",
@@ -2000,7 +2021,10 @@ export default function CalibrateModelsPage() {
       tradingUniverseUpweight: "1.15",
       tickerBalanceMode: "none",
       bootstrapEnabled: false,
-      bootstrapGroup: "contract_id",
+      bootstrapGroup: resolveBootstrapGroupValue(
+        "contract_id",
+        selectedDataset?.available_grouping_keys,
+      ),
       bootstrapDraws: "2000",
       ciLevel: 95,
       splitTimeline: true,
@@ -2178,6 +2202,9 @@ export default function CalibrateModelsPage() {
     const features = joinCsv([BASE_FEATURE, ...normalizedSelectedFeatures]);
     const categoricalFeatures = joinCsv(normalizedCategorical);
     const enableXAbsM = normalizedSelectedFeatures.includes("x_abs_m");
+    const resolvedBootstrapGroup = form.bootstrapEnabled
+      ? resolveBootstrapGroupValue(form.bootstrapGroup, selectedDataset?.available_grouping_keys)
+      : form.bootstrapGroup;
 
     return {
       csv: form.datasetPath,
@@ -2213,7 +2240,7 @@ export default function CalibrateModelsPage() {
       bootstrapCi: form.bootstrapEnabled,
       bootstrapB: form.bootstrapEnabled ? parseOptionalInt(form.bootstrapDraws) : undefined,
       bootstrapSeed: form.bootstrapEnabled ? parseOptionalInt(form.bootstrapSeed) : undefined,
-      bootstrapGroup: form.bootstrapEnabled ? form.bootstrapGroup : undefined,
+      bootstrapGroup: form.bootstrapEnabled ? resolvedBootstrapGroup : undefined,
       split: {
         strategy: form.splitStrategy,
         windowMode: form.windowMode,
@@ -2248,7 +2275,7 @@ export default function CalibrateModelsPage() {
       },
       bootstrap: {
         bootstrapCi: form.bootstrapEnabled,
-        bootstrapGroup: form.bootstrapGroup,
+        bootstrapGroup: resolvedBootstrapGroup,
         bootstrapB: parseOptionalInt(form.bootstrapDraws),
         bootstrapSeed: parseOptionalInt(form.bootstrapSeed),
         ciLevel: form.ciLevel,
@@ -2261,29 +2288,33 @@ export default function CalibrateModelsPage() {
         perGroupDeltaDistribution: form.perGroupDeltaDistribution,
       },
     };
-  }, [availableFeatureColumns, form, selectedTimeRegime.asofDow, selectedTimeRegime.tdays]);
+  }, [
+    availableFeatureColumns,
+    form,
+    selectedDataset?.available_grouping_keys,
+    selectedTimeRegime.asofDow,
+    selectedTimeRegime.tdays,
+  ]);
 
   const selectedGroupingKeys = selectedDataset?.available_grouping_keys ?? [];
-  const resolveAutoBootstrapGroup = useCallback(
-    (requested: BootstrapGroupMode): BootstrapGroupMode => {
-      if (!selectedGroupingKeys.length) return requested;
-      const available = new Set(selectedGroupingKeys.map((key) => key.toLowerCase()));
-      if (requested === "contract_id" && !available.has("contract_id")) {
-        return available.has("group_id") ? "group_id" : "auto";
-      }
-      if (requested === "group_id" && !available.has("group_id")) {
-        return "auto";
-      }
-      return requested;
-    },
+  const resolveBootstrapGroup = useCallback(
+    (requested: BootstrapGroupMode): BootstrapGroupMode =>
+      resolveBootstrapGroupValue(requested, selectedGroupingKeys),
     [selectedGroupingKeys],
   );
+
+  useEffect(() => {
+    const resolved = resolveBootstrapGroup(form.bootstrapGroup);
+    if (resolved !== form.bootstrapGroup) {
+      setForm((prev) => ({ ...prev, bootstrapGroup: resolved }));
+    }
+  }, [form.bootstrapGroup, resolveBootstrapGroup]);
 
   const buildAutoPayload = useCallback((): AutoModelRunRequest => {
     const baseConfig = buildManualPayload();
     const autoBootstrapGroup =
       form.bootstrapEnabled && baseConfig.bootstrapGroup
-        ? resolveAutoBootstrapGroup(baseConfig.bootstrapGroup)
+        ? resolveBootstrapGroup(baseConfig.bootstrapGroup)
         : baseConfig.bootstrapGroup;
     const normalizedBase = {
       ...baseConfig,
@@ -2354,7 +2385,7 @@ export default function CalibrateModelsPage() {
     form.modelDirName,
     form.randomSeed,
     form.bootstrapEnabled,
-    resolveAutoBootstrapGroup,
+    resolveBootstrapGroup,
   ]);
 
   const confirmJobReachable = useCallback(
