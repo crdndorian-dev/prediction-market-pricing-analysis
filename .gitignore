@@ -6,7 +6,8 @@ AGENTS.md
 /.vscode/
 !/.vscode/extensions.json
 /deadcode/
-
+/.obsidian/
+/.pytest_cache/
 
 .env
 .env.*
@@ -23,8 +24,9 @@ AGENTS.md
 !/tests/backend/services/test_markets_refresh_helpers.py
 /tools/
 /context/
-/docs/
-
+/documentation/
+/docs/.obsidian/*
+/docs/.obsidian/
 
 **/.DS_Store
 
