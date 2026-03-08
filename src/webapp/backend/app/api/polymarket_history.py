@@ -95,6 +95,10 @@ def get_csv_preview_endpoint(
 
 class RenameRunRequest(BaseModel):
     label: Optional[str] = Field(default=None, description="User-facing label for the run.")
+    new_dir_name: Optional[str] = Field(
+        default=None,
+        description="New directory name (kebab-cased). Renames the run directory on disk.",
+    )
 
 
 class SetActiveRunRequest(BaseModel):
@@ -164,11 +168,17 @@ def build_run_features(
 
 @router.patch("/runs/{run_id}")
 def rename_run(run_id: str, body: RenameRunRequest) -> Dict[str, Any]:
-    """Update the user-facing label for a run (folder name is unchanged)."""
+    """Update a run's label and optionally rename its directory."""
     try:
-        return rename_pipeline_run(run_id, body.label or "")
+        return rename_pipeline_run(
+            run_id,
+            body.label or "",
+            new_dir_name=body.new_dir_name,
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.put("/runs/active")

@@ -638,9 +638,21 @@ function StrikeCard({
           {isSparseData && (
             <span className="chip chip-warn">Sparse data</span>
           )}
+          {series.quality === "low_volume" && (
+            <span className="chip chip-warn">Low volume — midprice may be unreliable</span>
+          )}
+          {series.quality === "suspect" && (
+            <span className="chip chip-warn">
+              Suspect data — {((series.midprice_cluster_ratio ?? 0) * 100).toFixed(0)}% near midprice, max jump {((series.max_jump ?? 0) * 100).toFixed(0)}%
+            </span>
+          )}
+          {series.quality === "stale" && (
+            <span className="chip chip-warn">Stale prices — {((series.stale_ratio ?? 0) * 100).toFixed(0)}% identical</span>
+          )}
         </div>
         <div className="mdc-footer-meta">
           {pointsCount.toLocaleString()} pts · Market {series.market_id ?? "--"}
+          {series.gamma_volume != null ? ` · Vol: $${series.gamma_volume.toLocaleString()}` : ""}
           {dropped > 0 ? ` · ${dropped} invalid dropped` : ""}
         </div>
       </div>
@@ -722,8 +734,46 @@ export default function BacktestsPage() {
   const strikeCacheRef = useRef<Map<string, StrikeSeries[]>>(new Map());
   const lastAutoRunKeyRef = useRef<string>("");
 
+  // Quality filters
+  const [hideSuspect, setHideSuspect] = useState<boolean>(false);
+  const [minVolumeFilter, setMinVolumeFilter] = useState<number>(0);
+
+  const hasAnyVolume = useMemo(
+    () => availableStrikes.some((s) => s.gamma_volume != null),
+    [availableStrikes],
+  );
+
+  const filteredStrikes = useMemo(() => {
+    if (!hideSuspect && minVolumeFilter <= 0) return availableStrikes;
+    return availableStrikes.filter((s) => {
+      if (hideSuspect && (s.quality === "low_volume" || s.quality === "suspect" || s.quality === "stale")) return false;
+      if (minVolumeFilter > 0 && s.gamma_volume != null && s.gamma_volume < minVolumeFilter) return false;
+      return true;
+    });
+  }, [availableStrikes, hideSuspect, minVolumeFilter]);
+
+  const hiddenStrikesCount = availableStrikes.length - filteredStrikes.length;
+
+  const suspectStrikesCount = useMemo(() => {
+    let count = 0;
+    for (const s of availableStrikes) {
+      if (s.quality === "low_volume" || s.quality === "suspect" || s.quality === "stale") count++;
+    }
+    return count;
+  }, [availableStrikes]);
+
   const hasHistoryRuns = barRunsStatus === "ready" && barRuns.length > 0;
   const noHistoryRuns = barRunsStatus === "ready" && barRuns.length === 0;
+
+  useEffect(() => {
+    if (
+      barRunsStatus === "ready" &&
+      selectedBarRun &&
+      !barRuns.some((r) => r.run_id === selectedBarRun)
+    ) {
+      setSelectedBarRun("");
+    }
+  }, [barRunsStatus, barRuns, selectedBarRun]);
 
   const resetStrikeSelection = useCallback(() => {
     setSelectedStrike(null);
@@ -874,9 +924,13 @@ export default function BacktestsPage() {
         if (cancelled) return;
         setTradingWeeksLoading(false);
         setTradingWeeks([]);
-        setTradingWeeksError(
-          err instanceof Error ? err.message : "Failed to load trading weeks.",
-        );
+        const msg = err instanceof Error ? err.message : "Failed to load trading weeks.";
+        if (selectedBarRun && /404|not found/i.test(msg)) {
+          setSelectedBarRun("");
+          setTradingWeeksError("Selected run no longer exists. Switched to active run.");
+        } else {
+          setTradingWeeksError(msg);
+        }
       });
 
     return () => {
@@ -1044,15 +1098,15 @@ export default function BacktestsPage() {
 
   useEffect(() => {
     if (!selectedStrike || availableStrikesLoading) return;
-    if (availableStrikes.length === 0) {
+    if (filteredStrikes.length === 0) {
       setSelectedStrike(null);
       return;
     }
-    const keys = new Set(availableStrikes.map(buildStrikeKey));
+    const keys = new Set(filteredStrikes.map(buildStrikeKey));
     if (!keys.has(selectedStrike)) {
       setSelectedStrike(null);
     }
-  }, [availableStrikes, availableStrikesLoading, selectedStrike]);
+  }, [filteredStrikes, availableStrikesLoading, selectedStrike]);
 
   // Run handler
   const handleRun = useCallback(async () => {
@@ -1225,11 +1279,59 @@ export default function BacktestsPage() {
                 </div>
                 {availableStrikes.length > 0 && (
                   <span className="meta-pill">
-                    {availableStrikes.length} strike
-                    {availableStrikes.length !== 1 ? "s" : ""}
+                    {filteredStrikes.length}
+                    {hiddenStrikesCount > 0 ? ` / ${availableStrikes.length}` : ""} strike
+                    {(hiddenStrikesCount > 0 ? availableStrikes.length : filteredStrikes.length) !== 1 ? "s" : ""}
                   </span>
                 )}
               </div>
+
+              {/* Quality filter toolbar */}
+              {availableStrikes.length > 0 && (
+                <div className="strike-filter-toolbar">
+                  <div className="strike-filter-toggles">
+                    <label className="strike-filter-toggle" title="Hide strikes with suspect data quality (low volume, empty book midprice, or stale prices)">
+                      <input
+                        type="checkbox"
+                        checked={hideSuspect}
+                        onChange={(e) => setHideSuspect(e.target.checked)}
+                      />
+                      <span>
+                        Hide suspect data
+                        {suspectStrikesCount > 0 && (
+                          <span className="strike-filter-count">{suspectStrikesCount}</span>
+                        )}
+                      </span>
+                    </label>
+                  </div>
+                  <div className="strike-filter-vol">
+                    <label htmlFor="min-vol-select" className="strike-filter-vol-label">
+                      Min volume
+                    </label>
+                    <select
+                      id="min-vol-select"
+                      className="strike-filter-vol-select"
+                      value={minVolumeFilter}
+                      onChange={(e) => setMinVolumeFilter(Number(e.target.value))}
+                      disabled={!hasAnyVolume}
+                      title={hasAnyVolume ? undefined : "Volume data not available for this run — re-run pipeline to capture it"}
+                    >
+                      <option value={0}>{hasAnyVolume ? "Any" : "N/A"}</option>
+                      <option value={1000}>$1K</option>
+                      <option value={5000}>$5K</option>
+                      <option value={10000}>$10K</option>
+                      <option value={50000}>$50K</option>
+                      <option value={100000}>$100K</option>
+                    </select>
+                  </div>
+                  {hiddenStrikesCount > 0 && (
+                    <span className="strike-filter-hidden">
+                      {hiddenStrikesCount} strike{hiddenStrikesCount !== 1 ? "s" : ""} hidden
+                    </span>
+                  )}
+                </div>
+              )}
+
               <div className="panel-body">
                 {availableStrikesLoading && (
                   <div className="empty">Loading strikes…</div>
@@ -1246,18 +1348,46 @@ export default function BacktestsPage() {
                       : "Select a ticker and trading week to see available strikes."}
                   </div>
                 )}
-                {availableStrikes.length > 0 && (
+                {!availableStrikesLoading
+                  && !availableStrikesError
+                  && availableStrikes.length > 0
+                  && filteredStrikes.length === 0 && (
+                  <div className="empty">
+                    All {availableStrikes.length} strike{availableStrikes.length !== 1 ? "s" : ""} hidden by quality filters.
+                    Adjust filters above to see results.
+                  </div>
+                )}
+                {filteredStrikes.length > 0 && (
                   <div className="strike-list" role="group">
-                    {availableStrikes.map((series) => {
+                    {filteredStrikes.map((series) => {
                       const seriesKey = buildStrikeKey(series);
                       const isActive = selectedStrike === seriesKey;
+                      const isSuspect = series.quality !== "good" && series.quality != null;
+                      const qualityLabel =
+                        series.quality === "low_volume" ? "Low Vol"
+                        : series.quality === "suspect" ? "Suspect"
+                        : series.quality === "stale" ? "Stale"
+                        : null;
+                      const qualityHint =
+                        series.quality === "low_volume" ? "Low trading volume"
+                        : series.quality === "suspect" ? "Suspect data — possible empty orderbook"
+                        : series.quality === "stale" ? "Stale / flat price data"
+                        : undefined;
+                      const volLabel = series.gamma_volume != null
+                        ? series.gamma_volume >= 1_000_000
+                          ? `$${(series.gamma_volume / 1_000_000).toFixed(1)}M vol`
+                          : series.gamma_volume >= 1_000
+                            ? `$${(series.gamma_volume / 1_000).toFixed(0)}K vol`
+                            : `$${series.gamma_volume.toFixed(0)} vol`
+                        : null;
                       return (
                         <button
                           key={seriesKey}
                           type="button"
-                          className={`strike-pill ${isActive ? "is-active" : ""}`}
+                          className={`strike-pill ${isActive ? "is-active" : ""}${isSuspect ? " is-low-quality" : ""}`}
                           onClick={() => setSelectedStrike(seriesKey)}
                           aria-pressed={isActive}
+                          title={qualityHint}
                         >
                           ${series.strike_label}
                           {series.market_id && (
@@ -1266,6 +1396,16 @@ export default function BacktestsPage() {
                           <span className="strike-pill-pts">
                             {series.total_points} pts
                           </span>
+                          {volLabel && (
+                            <span className={`strike-pill-vol${isSuspect ? " is-warn" : ""}`}>
+                              {volLabel}
+                            </span>
+                          )}
+                          {qualityLabel && (
+                            <span className="strike-pill-quality-badge">
+                              {qualityLabel}
+                            </span>
+                          )}
                         </button>
                       );
                     })}
@@ -1494,40 +1634,8 @@ export default function BacktestsPage() {
           return "pRN source: Theta";
         })();
 
-        const qualityFlags = (() => {
-          const flags: string[] = [];
-          const meta = result.metadata;
-          if (meta.max_stale_hours != null && meta.max_stale_hours > 8) {
-            flags.push(`Stale price run: ${meta.max_stale_hours.toFixed(1)}h max`);
-          }
-          if (meta.gap_count != null && meta.gap_count > 3) {
-            flags.push(`Data gaps: ${meta.gap_count} (>4h each)`);
-          }
-          if (meta.stale_run_count != null && meta.stale_run_count > 50) {
-            flags.push(`Stale runs: ${meta.stale_run_count}`);
-          }
-          if (meta.nan_dropped != null && meta.nan_dropped > 0) {
-            flags.push(`NaN dropped: ${meta.nan_dropped}`);
-          }
-          return flags;
-        })();
-
-        if (qualityFlags.length > 0) {
-          console.warn(
-            `[BacktestsPage] Data quality flags for ${result.ticker}:`,
-            qualityFlags,
-            result.metadata,
-          );
-        }
-
         return (
         <div className="backtests-results">
-          {qualityFlags.length > 0 && (
-            <div className="quality-warning-banner">
-              <strong>Data quality warnings:</strong>{" "}
-              {qualityFlags.join(" · ")}
-            </div>
-          )}
           <div className="history-meta">
             <span className="meta-pill">Ticker: {result.ticker}</span>
             <span className="meta-pill">Strikes: {result.strikes.length}</span>

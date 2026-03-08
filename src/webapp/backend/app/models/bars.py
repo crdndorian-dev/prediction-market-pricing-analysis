@@ -78,6 +78,11 @@ class StrikeSeries(BaseModel):
     total_points: int
     returned_points: int
     bars: List[BarDataPoint]
+    gamma_volume: Optional[float] = Field(None, description="Gamma API total volume (USD) for this market")
+    stale_ratio: Optional[float] = Field(None, description="Fraction of consecutive bars with identical price (0-1)")
+    midprice_cluster_ratio: Optional[float] = Field(None, description="Fraction of bars with price in [0.40, 0.60] — high values suggest empty orderbook")
+    max_jump: Optional[float] = Field(None, description="Largest single-bar price jump (absolute)")
+    quality: Optional[str] = Field(None, description="Quality tier: good, low_volume, suspect, or stale")
 
 
 class ByStrikeResponse(BaseModel):

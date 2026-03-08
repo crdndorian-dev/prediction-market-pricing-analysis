@@ -943,16 +943,72 @@ def list_pipeline_runs() -> List[Dict[str, Any]]:
     return runs
 
 
-def rename_pipeline_run(run_id: str, label: str) -> Dict[str, Any]:
-    """Set the user-facing label for a run (stored in manifest, folder unchanged)."""
+def rename_pipeline_run(
+    run_id: str,
+    label: str,
+    new_dir_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Rename a pipeline run's label and optionally its directory.
+
+    When *new_dir_name* is provided the function performs a full rename:
+    directory, manifest internals, prefixed CSV files, and latest.json pointer.
+    When omitted, only the manifest label is updated (backward-compatible).
+    """
     run_dir = RUNS_DIR / run_id
     if not run_dir.exists():
         raise FileNotFoundError(f"Run not found: {run_id}")
-    manifest_path = run_dir / "manifest.json"
+
+    effective_run_id = run_id
+    effective_dir = run_dir
+
+    if new_dir_name is not None:
+        new_kebab = _to_kebab_case(new_dir_name)
+        if not new_kebab:
+            raise ValueError("Directory name must contain at least one alphanumeric character.")
+        new_dir = RUNS_DIR / new_kebab
+        if new_dir != run_dir:
+            if new_dir.exists():
+                raise ValueError(f"Target directory already exists: {new_kebab}")
+
+            _rename_prefixed_run_files(run_dir, run_id, new_kebab)
+
+            run_dir.rename(new_dir)
+            effective_dir = new_dir
+            effective_run_id = new_kebab
+
+            latest_id = get_latest_run_id()
+            if latest_id == run_id:
+                _update_latest_pointer(new_kebab)
+
+    manifest_path = effective_dir / "manifest.json"
     manifest = _safe_json_load(manifest_path) or {}
     manifest["label"] = label.strip() if label else None
+    if effective_run_id != run_id:
+        manifest["run_id"] = effective_run_id
+        pipeline_args = manifest.get("pipeline_args")
+        if isinstance(pipeline_args, dict):
+            pipeline_args["run_dir_name"] = effective_run_id
+        manifest["artifacts"] = _build_artifact_inventory(effective_dir)
     _atomic_json_write(manifest_path, manifest)
-    return {"run_id": run_id, "label": manifest["label"]}
+
+    return {
+        "run_id": effective_run_id,
+        "label": manifest["label"],
+        "renamed_dir": effective_run_id != run_id,
+        "run_dir": str(effective_dir.relative_to(BASE_DIR)),
+    }
+
+
+def _rename_prefixed_run_files(run_dir: Path, old_prefix: str, new_prefix: str) -> None:
+    """Rename files inside *run_dir* whose name starts with *old_prefix*."""
+    for item in sorted(run_dir.iterdir()):
+        if not item.is_file():
+            continue
+        if item.name.startswith(old_prefix):
+            new_name = new_prefix + item.name[len(old_prefix):]
+            target = run_dir / new_name
+            if not target.exists():
+                item.rename(target)
 
 
 def set_active_run(run_id: str) -> Dict[str, Any]:

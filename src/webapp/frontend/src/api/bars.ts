@@ -102,6 +102,11 @@ export interface StrikeSeries {
   total_points: number;
   returned_points: number;
   bars: BarDataPoint[];
+  gamma_volume?: number | null;
+  stale_ratio?: number | null;
+  midprice_cluster_ratio?: number | null;
+  max_jump?: number | null;
+  quality?: "good" | "low_volume" | "suspect" | "stale" | null;
 }
 
 export interface ByStrikeResponse {

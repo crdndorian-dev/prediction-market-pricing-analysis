@@ -153,6 +153,7 @@ class MarketsConfig:
     despike_jump: float = 0.25
     despike_revert: float = 0.1
     clob_price_history_url: str = CLOB_PRICE_HISTORY
+    min_gamma_volume: float = 0.0
 
 
 # -----------------------------
@@ -602,6 +603,25 @@ def _ensure_weekly_markets(
             yes_token = str(token_ids[0]) if len(token_ids) >= 1 and token_ids[0] else None
             no_token = str(token_ids[1]) if len(token_ids) >= 2 and token_ids[1] else None
 
+            # Capture Gamma volume metrics for liquidity filtering
+            gamma_volume = None
+            gamma_volume_24hr = None
+            for vol_key in ("volume", "volumeNum"):
+                raw_vol = market.get(vol_key)
+                if raw_vol is not None:
+                    try:
+                        gamma_volume = float(raw_vol)
+                    except (ValueError, TypeError):
+                        pass
+                    if gamma_volume is not None:
+                        break
+            raw_vol_24hr = market.get("volume24hr") or market.get("volume_24hr")
+            if raw_vol_24hr is not None:
+                try:
+                    gamma_volume_24hr = float(raw_vol_24hr)
+                except (ValueError, TypeError):
+                    pass
+
             new_rows.append(
                 {
                     "event_id": event_id,
@@ -625,6 +645,8 @@ def _ensure_weekly_markets(
                     "enable_order_book": market.get("enableOrderBook"),
                     "active": market.get("active"),
                     "closed": market.get("closed"),
+                    "gamma_volume": gamma_volume,
+                    "gamma_volume_24hr": gamma_volume_24hr,
                     "schema_version": SCHEMA_VERSION_MARKETS,
                 }
             )
@@ -910,6 +932,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Replace markets_prn_hourly rows for the selected week without deleting price_history.",
     )
+    parser.add_argument(
+        "--min-gamma-volume",
+        type=float,
+        default=0.0,
+        help="Minimum Gamma volume (USD) to include a market in CLOB price fetch. Markets below are skipped (0 = no filter).",
+    )
     return parser.parse_args()
 
 
@@ -921,6 +949,7 @@ def main() -> None:
         clob_fidelity_min=int(args.fidelity),
         prn_asof_tz=args.prn_asof_tz,
         prn_asof_close_time=args.prn_asof_close_time,
+        min_gamma_volume=float(args.min_gamma_volume),
     )
 
     run_dir, run_resolution_warning = _resolve_run_dir(args.run_id)
@@ -1071,6 +1100,7 @@ def main() -> None:
     total_markets = len(markets_week)
     price_rows: List[pd.DataFrame] = []
     despike_adjusted = 0
+    low_volume_skipped = 0
 
     for idx, row in markets_week.iterrows():
         market_id = str(row.get("market_id"))
@@ -1078,6 +1108,19 @@ def main() -> None:
         threshold = row.get("threshold")
 
         progress("prices", idx + 1, total_markets)
+
+        # Skip markets below the minimum volume threshold
+        if cfg.min_gamma_volume > 0:
+            gamma_vol = row.get("gamma_volume")
+            vol = float(gamma_vol) if gamma_vol is not None and pd.notna(gamma_vol) else 0.0
+            if vol < cfg.min_gamma_volume:
+                low_volume_skipped += 1
+                print(
+                    f"[Markets][SKIP] Low volume: {ticker} @ ${threshold} "
+                    f"(market_id={market_id}) gamma_volume={vol:.0f} < threshold={cfg.min_gamma_volume:.0f}",
+                    flush=True,
+                )
+                continue
 
         for token_role, token_id, last_map in [
             ("yes", row.get("yes_token_id"), last_ts_yes),
@@ -1677,6 +1720,8 @@ def main() -> None:
         "prn_rows_appended": 0 if prn_out is None else len(prn_out),
         "bars_partitions": bar_partitions,
         "despike_adjusted": despike_adjusted,
+        "low_volume_skipped": low_volume_skipped,
+        "min_gamma_volume": cfg.min_gamma_volume,
         "prn_dataset": str(prn_dataset_path) if prn_dataset_path else None,
         "prn_missing": prn_missing,
         "last_snapshot_date": last_snapshot_date,

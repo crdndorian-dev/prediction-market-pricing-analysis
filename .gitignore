@@ -48,5 +48,4 @@ src/webapp/frontend/dist-ssr/
 src/data/analysis/
 src/data/cache/
 src/data/models/
-src/data/raw/polymarket/
-src/data/raw/option-chain/
+src/data/raw/

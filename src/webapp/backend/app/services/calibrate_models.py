@@ -912,7 +912,6 @@ SELECTED_MODEL_IMPORTANT_FILES = [
 AUTO_SEARCH_IMPORTANT_FILES = [
     "auto_search_leaderboard.csv",
     "auto_search_summary.json",
-    "auto_search_no_viable.json",
     "auto_search_progress.json",
     "progress.json",
     "outer_folds.json",

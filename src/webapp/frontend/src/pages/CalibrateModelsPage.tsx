@@ -582,7 +582,6 @@ const ARTIFACT_DESCRIPTIONS: Record<string, string> = {
   "leaderboard.csv": "Auto-search leaderboard ranked by objective (legacy).",
   "auto_search_leaderboard.csv": "Auto-search leaderboard ranked by objective.",
   "auto_search_summary.json": "Auto-search selection summary and chosen configuration.",
-  "auto_search_no_viable.json": "Reasons and baseline snapshot when no candidate is accepted.",
   "auto_search_progress.json": "Auto-search progress state captured during the run.",
   "run_manifest.json": "Run-level manifest linking selected model and auto-search artifacts.",
   "outer_folds.json": "Outer backtest fold definitions and date ranges (auto search).",
@@ -597,12 +596,148 @@ const ARTIFACT_DESCRIPTIONS: Record<string, string> = {
   "two_stage_metadata.json": "Two-stage metadata.",
 };
 
+const ARTIFACT_TITLES: Record<string, string> = {
+  "metrics.csv": "Metrics",
+  "metrics_summary.json": "Metrics Summary",
+  "split_timeline.json": "Split Timeline",
+  "fold_deltas.csv": "Fold Delta",
+  "group_delta_distribution.csv": "Group Delta Distribution",
+  "audit_split_composition.csv": "Split Composition Audit",
+  "audit_overlap.json": "Overlap Audit",
+  "audit_weight_distribution.json": "Weight Distribution Audit",
+  "config.executed.json": "Executed Config",
+  "metadata.json": "Run Metadata",
+  "feature_manifest.json": "Feature Manifest",
+  "best_config.json": "Best Config",
+  "best_model_report.md": "Best Model Report",
+  "leaderboard.csv": "Leaderboard",
+  "auto_search_leaderboard.csv": "Auto Search Leaderboard",
+  "auto_search_summary.json": "Auto Search Summary",
+  "auto_search_progress.json": "Auto Search Progress",
+  "run_manifest.json": "Run Manifest",
+  "outer_folds.json": "Outer Folds",
+  "outer_cv_summary.json": "Outer CV Summary",
+  "outer_fold_results.csv": "Outer Fold Result",
+  "reliability_bins.csv": "Reliability Plot",
+  "rolling_summary.csv": "Rolling Summary",
+  "rolling_windows.csv": "Rolling Window",
+  "metrics_groups.csv": "Metrics by Group",
+  "two_stage_metrics.csv": "Two-Stage Metrics",
+  "two_stage_metrics_summary.json": "Two-Stage Metrics Summary",
+  "two_stage_metadata.json": "Two-Stage Metadata",
+  "progress.json": "Progress",
+  "trial_result.json": "Trial Result",
+};
+
+const HIDDEN_ARTIFACT_NAMES = new Set<string>(["auto_search_no_viable.json"]);
+
+const DEFAULT_ARTIFACT_FILE_NAME = "metrics.csv";
+const DEFAULT_CHART_WIDTH = 960;
+
 const fileBaseName = (path: string | null | undefined): string => {
   if (!path) return "";
   const normalized = path.replace(/\\/g, "/");
   const parts = normalized.split("/");
   return parts[parts.length - 1] || normalized;
 };
+
+const artifactFilePath = (file: ModelFileSummary): string => file.relative_path ?? file.name;
+
+const isDefaultArtifactFile = (file: ModelFileSummary | null | undefined): boolean =>
+  !!file && fileBaseName(artifactFilePath(file)) === DEFAULT_ARTIFACT_FILE_NAME;
+
+const humanizeLabel = (value: string): string =>
+  value
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+
+const isHiddenArtifactPath = (path: string | null | undefined): boolean =>
+  HIDDEN_ARTIFACT_NAMES.has(fileBaseName(path));
+
+const artifactDisplayTitle = (path: string | null | undefined): string => {
+  const base = fileBaseName(path);
+  if (!base) return "Artifact";
+  if (ARTIFACT_TITLES[base]) return ARTIFACT_TITLES[base];
+  return humanizeLabel(base.replace(/\.[^.]+$/, "").replace(/[.]+/g, " "));
+};
+
+const formatFileSizeLabel = (sizeBytes: number): string =>
+  sizeBytes < 1024 ? `${sizeBytes} B` : `${(sizeBytes / 1024).toFixed(1)} KB`;
+
+const isProbablyNumeric = (value: string): boolean => {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  const normalized = trimmed.replace(/,/g, "");
+  if (/^(true|false|null|none|nan)$/i.test(normalized)) return false;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed);
+};
+
+const inferNumericColumns = (parsed: ParsedCsv): Set<string> => {
+  const numericColumns = new Set<string>();
+  parsed.headers.forEach((column) => {
+    const values = parsed.rows
+      .map((row) => String(row[column] ?? "").trim())
+      .filter(Boolean);
+    if (!values.length) return;
+    const numericCount = values.filter(isProbablyNumeric).length;
+    if (numericCount / values.length >= 0.85) {
+      numericColumns.add(column);
+    }
+  });
+  return numericColumns;
+};
+
+const buildLinearTicks = (min: number, max: number, count = 5): number[] => {
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return [];
+  if (Math.abs(max - min) < 1e-9) return [min];
+  return Array.from({ length: Math.max(2, count) }, (_, idx) => (
+    min + ((max - min) * idx) / (Math.max(2, count) - 1)
+  ));
+};
+
+const buildIndexTicks = (size: number, count = 6): number[] => {
+  if (size <= 0) return [];
+  if (size === 1) return [0];
+  const steps = Math.min(size, Math.max(2, count));
+  const ticks = new Set<number>();
+  for (let idx = 0; idx < steps; idx += 1) {
+    ticks.add(Math.round(((size - 1) * idx) / (steps - 1)));
+  }
+  return Array.from(ticks).sort((left, right) => left - right);
+};
+
+const formatChartNumber = (value: number): string => {
+  if (!Number.isFinite(value)) return "--";
+  const abs = Math.abs(value);
+  if (abs >= 1000) return value.toFixed(0);
+  if (abs >= 100) return value.toFixed(1);
+  if (abs >= 1) return value.toFixed(3);
+  if (abs >= 0.01) return value.toFixed(4);
+  return value.toExponential(1);
+};
+
+const formatChartDate = (timestamp: number, rangeMs = 0): string => {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(rangeMs > 330 * 24 * 3600 * 1000 ? { year: "numeric" as const } : {}),
+  });
+};
+
+const parseChartDateLabel = (value: string): number | null => {
+  const trimmed = value.trim();
+  if (!trimmed || !/[-/]|[A-Za-z]/.test(trimmed)) return null;
+  const parsed = Date.parse(trimmed);
+  return Number.isNaN(parsed) ? null : parsed;
+};
+
+const truncateAxisLabel = (value: string, max = 16): string =>
+  value.length > max ? `${value.slice(0, max - 1)}…` : value;
 
 const KeyValueGrid = ({ data }: { data: Record<string, unknown> }) => {
   const entries = Object.entries(data);
@@ -617,7 +752,7 @@ const KeyValueGrid = ({ data }: { data: Record<string, unknown> }) => {
         return (
           <div key={key} className="artifact-kv-item">
             <span className="meta-label">{key}</span>
-            <span>{text}</span>
+            <span className="artifact-kv-value">{text}</span>
           </div>
         );
       })}
@@ -626,17 +761,24 @@ const KeyValueGrid = ({ data }: { data: Record<string, unknown> }) => {
 };
 
 const CsvTableView = ({ parsed, limit = 50 }: { parsed: ParsedCsv; limit?: number }) => {
+  const numericColumns = inferNumericColumns(parsed);
+  const tableMinWidth = Math.max(640, parsed.headers.length * 140);
   if (!parsed.headers.length) {
     return <div className="empty">CSV did not include headers.</div>;
   }
   const rows = parsed.rows.slice(0, limit);
   return (
     <div className="table-container artifact-table">
-      <table className="preview-table">
+      <table className="preview-table artifact-preview-table" style={{ minWidth: `${tableMinWidth}px` }}>
         <thead>
           <tr>
             {parsed.headers.map((column) => (
-              <th key={column}>{column}</th>
+              <th
+                key={column}
+                className={numericColumns.has(column) ? "artifact-table-cell-number" : "artifact-table-cell-text"}
+              >
+                {column}
+              </th>
             ))}
           </tr>
         </thead>
@@ -645,7 +787,12 @@ const CsvTableView = ({ parsed, limit = 50 }: { parsed: ParsedCsv; limit?: numbe
             rows.map((row, idx) => (
               <tr key={idx}>
                 {parsed.headers.map((column) => (
-                  <td key={column}>{row[column] ?? ""}</td>
+                  <td
+                    key={column}
+                    className={numericColumns.has(column) ? "artifact-table-cell-number" : "artifact-table-cell-text"}
+                  >
+                    {row[column] ?? ""}
+                  </td>
                 ))}
               </tr>
             ))
@@ -659,6 +806,33 @@ const CsvTableView = ({ parsed, limit = 50 }: { parsed: ParsedCsv; limit?: numbe
     </div>
   );
 };
+
+const ArtifactFileButton = ({
+  titlePath,
+  displayPath,
+  meta,
+  isActive = false,
+  disabled = false,
+  onClick,
+}: {
+  titlePath: string;
+  displayPath: string;
+  meta: string;
+  isActive?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) => (
+  <button
+    type="button"
+    className={`file-item ${isActive ? "active" : ""}`}
+    onClick={onClick}
+    disabled={disabled}
+  >
+    <span className="file-name">{artifactDisplayTitle(titlePath)}</span>
+    <span className="file-path">{displayPath}</span>
+    <span className="file-size">{meta}</span>
+  </button>
+);
 
 const buildMetricsSummaryFromCsv = (parsed: ParsedCsv) => {
   const rows = parsed.rows;
@@ -958,15 +1132,22 @@ const SplitTimelineView = ({ data }: { data: Record<string, unknown> }) => {
   if (!times.length) return <div className="empty">Timeline dates missing.</div>;
   const minTime = Math.min(...times);
   const maxTime = Math.max(...times);
-  const width = 640;
-  const rowHeight = 18;
-  const topPad = 24;
+  const width = DEFAULT_CHART_WIDTH;
+  const leftPad = 110;
+  const rightPad = 28;
+  const topPad = 28;
+  const bottomPad = 72;
+  const rowHeight = 26;
+  const barHeight = 14;
   const totalRows = entries.length + globalRows.length;
-  const height = topPad + totalRows * rowHeight + 24;
+  const plotHeight = Math.max(120, totalRows * rowHeight);
+  const height = topPad + plotHeight + bottomPad;
+  const xAxisY = topPad + plotHeight + 8;
   const scaleX = (time: number) => {
     const ratio = (time - minTime) / Math.max(1, maxTime - minTime);
-    return 40 + ratio * (width - 80);
+    return leftPad + ratio * (width - leftPad - rightPad);
   };
+  const xTicks = buildLinearTicks(minTime, maxTime, 5);
   const summaryData = {
     split_strategy: data.split_strategy,
     window_mode: data.window_mode,
@@ -1004,28 +1185,55 @@ const SplitTimelineView = ({ data }: { data: Record<string, unknown> }) => {
       </div>
       <KeyValueGrid data={summaryData} />
       <KeyValueGrid data={rangeData} />
-      <svg viewBox={`0 0 ${width} ${height}`} className="artifact-chart">
-        <rect x={0} y={0} width={width} height={height} className="chart-frame" />
+      <div className="artifact-chart-panel">
+        <svg viewBox={`0 0 ${width} ${height}`} className="artifact-chart artifact-chart-tall">
+          <rect x={0} y={0} width={width} height={height} className="chart-frame" />
+          {xTicks.map((tick) => {
+            const x = scaleX(tick);
+            return (
+              <g key={`timeline-tick-${tick}`}>
+                <line x1={x} x2={x} y1={topPad} y2={topPad + plotHeight} className="artifact-grid-line" />
+                <text x={x} y={xAxisY + 18} textAnchor="middle" className="artifact-tick-label">
+                  {formatChartDate(tick, maxTime - minTime)}
+                </text>
+              </g>
+            );
+          })}
+          <line x1={leftPad} x2={width - rightPad} y1={xAxisY} y2={xAxisY} className="artifact-axis-line" />
+          <text x={(leftPad + width - rightPad) / 2} y={height - 16} textAnchor="middle" className="artifact-axis-title">
+            Calendar date
+          </text>
+          <text
+            x={26}
+            y={topPad + plotHeight / 2}
+            transform={`rotate(-90 26 ${topPad + plotHeight / 2})`}
+            textAnchor="middle"
+            className="artifact-axis-title"
+          >
+            Fold / split
+          </text>
         {entries.map((entry, idx) => {
-          const y = topPad + idx * rowHeight;
+          const y = topPad + idx * rowHeight + (rowHeight - barHeight) / 2;
           const trainStart = entry.trainStart != null ? scaleX(entry.trainStart) : null;
           const trainEnd = entry.trainEnd != null ? scaleX(entry.trainEnd) : null;
           const valStart = entry.valStart != null ? scaleX(entry.valStart) : null;
           const valEnd = entry.valEnd != null ? scaleX(entry.valEnd) : null;
           return (
             <g key={`fold-${idx}`}>
-              <text x={8} y={y + 12} className="artifact-axis-label">F{entry.fold || idx + 1}</text>
+              <text x={leftPad - 10} y={y + 11} textAnchor="end" className="artifact-axis-label">
+                F{entry.fold || idx + 1}
+              </text>
               {trainStart != null && trainEnd != null ? (
-                <rect x={trainStart} y={y} width={Math.max(1, trainEnd - trainStart)} height={10} className="artifact-bar-train" />
+                <rect x={trainStart} y={y} width={Math.max(1, trainEnd - trainStart)} height={barHeight} className="artifact-bar-train" />
               ) : null}
               {valStart != null && valEnd != null ? (
-                <rect x={valStart} y={y} width={Math.max(1, valEnd - valStart)} height={10} className="artifact-bar-val" />
+                <rect x={valStart} y={y} width={Math.max(1, valEnd - valStart)} height={barHeight} className="artifact-bar-val" />
               ) : null}
             </g>
           );
         })}
         {globalRows.map((row, idx) => {
-          const y = topPad + (entries.length + idx) * rowHeight;
+          const y = topPad + (entries.length + idx) * rowHeight + (rowHeight - barHeight) / 2;
           const start = scaleX(row.start);
           const end = scaleX(row.end);
           const barClass =
@@ -1036,12 +1244,13 @@ const SplitTimelineView = ({ data }: { data: Record<string, unknown> }) => {
                 : "artifact-bar-train";
           return (
             <g key={`global-${row.label}`}>
-              <text x={8} y={y + 12} className="artifact-axis-label">{row.label}</text>
-              <rect x={start} y={y} width={Math.max(1, end - start)} height={10} className={barClass} />
+              <text x={leftPad - 10} y={y + 11} textAnchor="end" className="artifact-axis-label">{row.label}</text>
+              <rect x={start} y={y} width={Math.max(1, end - start)} height={barHeight} className={barClass} />
             </g>
           );
         })}
-      </svg>
+        </svg>
+      </div>
       <CsvTableView
         parsed={{
           headers: [
@@ -1081,7 +1290,7 @@ const AuditOverlapView = ({ data }: { data: Record<string, unknown> }) => {
         {entries.map(([key, value]) => (
           <div key={key} className="artifact-kv-item">
             <span className="meta-label">{key}</span>
-            <span className={toNumber(value) && Number(value) > 0 ? "artifact-warn" : ""}>
+            <span className={`artifact-kv-value ${toNumber(value) && Number(value) > 0 ? "artifact-warn" : ""}`.trim()}>
               {formatMaybe(value)}
             </span>
           </div>
@@ -1116,25 +1325,83 @@ const SplitCompositionView = ({ parsed }: { parsed: ParsedCsv }) => (
 
 const RollingSummaryView = ({ parsed }: { parsed: ParsedCsv }) => {
   const metricColumn = parsed.headers.find((h) => h.toLowerCase().includes("logloss")) ?? parsed.headers[0];
-  const values = parsed.rows.map((row, idx) => ({ x: idx, y: toNumber(row[metricColumn]) ?? 0 }));
-  if (!values.length) return <div className="empty">No rolling data.</div>;
-  const min = Math.min(...values.map((p) => p.y));
-  const max = Math.max(...values.map((p) => p.y));
-  const width = 520;
-  const height = 160;
-  const pad = 20;
-  const scaleX = (x: number) => pad + (x / Math.max(1, values.length - 1)) * (width - pad * 2);
-  const scaleY = (y: number) => pad + (1 - (y - min) / Math.max(1e-9, max - min)) * (height - pad * 2);
-  const path = values
+  const xColumn = parsed.headers.find(
+    (header) => header !== metricColumn && /(date|week|window|end|start|split|fold|time)/i.test(header),
+  );
+  const points = parsed.rows
+    .map((row, idx) => ({
+      x: idx,
+      y: toNumber(row[metricColumn]),
+      label: xColumn ? String(row[xColumn] ?? "") : String(idx + 1),
+    }))
+    .filter((point): point is { x: number; y: number; label: string } => point.y != null);
+  if (!points.length) return <div className="empty">No rolling data.</div>;
+  const min = Math.min(...points.map((point) => point.y));
+  const max = Math.max(...points.map((point) => point.y));
+  const yMin = min === max ? min - 0.01 : min;
+  const yMax = min === max ? max + 0.01 : max;
+  const width = DEFAULT_CHART_WIDTH;
+  const height = 320;
+  const leftPad = 76;
+  const rightPad = 28;
+  const topPad = 24;
+  const bottomPad = 68;
+  const plotWidth = width - leftPad - rightPad;
+  const plotHeight = height - topPad - bottomPad;
+  const scaleX = (x: number) => leftPad + (x / Math.max(1, points.length - 1)) * plotWidth;
+  const scaleY = (y: number) => topPad + (1 - (y - yMin) / Math.max(1e-9, yMax - yMin)) * plotHeight;
+  const yTicks = buildLinearTicks(yMin, yMax, 5);
+  const xTickIndexes = buildIndexTicks(points.length, 6);
+  const path = points
     .map((point, idx) => `${idx === 0 ? "M" : "L"} ${scaleX(point.x)} ${scaleY(point.y)}`)
     .join(" ");
   return (
     <div className="artifact-stack">
       <span className="meta-label">Rolling summary ({metricColumn})</span>
-      <svg viewBox={`0 0 ${width} ${height}`} className="artifact-chart">
-        <rect x={0} y={0} width={width} height={height} className="chart-frame" />
-        <path d={path} className="chart-line chart-line-prn" />
-      </svg>
+      <div className="artifact-chart-panel">
+        <svg viewBox={`0 0 ${width} ${height}`} className="artifact-chart">
+          <rect x={0} y={0} width={width} height={height} className="chart-frame" />
+          {yTicks.map((tick) => {
+            const y = scaleY(tick);
+            return (
+              <g key={`rolling-y-${tick}`}>
+                <line x1={leftPad} x2={width - rightPad} y1={y} y2={y} className="artifact-grid-line" />
+                <text x={leftPad - 10} y={y + 4} textAnchor="end" className="artifact-tick-label">
+                  {formatChartNumber(tick)}
+                </text>
+              </g>
+            );
+          })}
+          {xTickIndexes.map((tickIndex) => {
+            const point = points[tickIndex];
+            const x = scaleX(point.x);
+            const maybeTime = parseChartDateLabel(point.label);
+            return (
+              <g key={`rolling-x-${tickIndex}`}>
+                <line x1={x} x2={x} y1={topPad} y2={height - bottomPad} className="artifact-grid-line" />
+                <text x={x} y={height - bottomPad + 22} textAnchor="middle" className="artifact-tick-label">
+                  {maybeTime == null ? truncateAxisLabel(point.label) : formatChartDate(maybeTime)}
+                </text>
+              </g>
+            );
+          })}
+          <line x1={leftPad} x2={width - rightPad} y1={height - bottomPad} y2={height - bottomPad} className="artifact-axis-line" />
+          <line x1={leftPad} x2={leftPad} y1={topPad} y2={height - bottomPad} className="artifact-axis-line" />
+          <path d={path} className="chart-line chart-line-prn" />
+          <text x={(leftPad + width - rightPad) / 2} y={height - 14} textAnchor="middle" className="artifact-axis-title">
+            {xColumn ? humanizeLabel(xColumn) : "Window index"}
+          </text>
+          <text
+            x={22}
+            y={topPad + plotHeight / 2}
+            transform={`rotate(-90 22 ${topPad + plotHeight / 2})`}
+            textAnchor="middle"
+            className="artifact-axis-title"
+          >
+            {humanizeLabel(metricColumn)}
+          </text>
+        </svg>
+      </div>
       <CsvTableView parsed={parsed} limit={50} />
     </div>
   );
@@ -1150,15 +1417,20 @@ const FoldDeltaView = ({ parsed }: { parsed: ParsedCsv }) => {
   if (!rows.length) return <div className="empty">No fold deltas available.</div>;
   const min = Math.min(...values, 0);
   const max = Math.max(...values, 0);
-  const width = 520;
-  const height = 180;
-  const pad = 24;
-  const innerWidth = width - pad * 2;
-  const innerHeight = height - pad * 2;
-  const scaleY = (y: number) => pad + (1 - (y - min) / Math.max(1e-9, max - min)) * innerHeight;
+  const width = DEFAULT_CHART_WIDTH;
+  const height = 340;
+  const leftPad = 76;
+  const rightPad = 28;
+  const topPad = 24;
+  const bottomPad = 74;
+  const innerWidth = width - leftPad - rightPad;
+  const innerHeight = height - topPad - bottomPad;
+  const scaleY = (y: number) => topPad + (1 - (y - min) / Math.max(1e-9, max - min)) * innerHeight;
   const zeroY = scaleY(0);
   const step = innerWidth / Math.max(1, rows.length);
   const barWidth = Math.max(8, step * 0.6);
+  const yTicks = buildLinearTicks(min, max, 5);
+  const xTickIndexes = buildIndexTicks(rows.length, 8);
   return (
     <div className="artifact-stack">
       <div className="artifact-header-row">
@@ -1169,26 +1441,62 @@ const FoldDeltaView = ({ parsed }: { parsed: ParsedCsv }) => {
           <option value="delta_ece_q">delta_ece_q</option>
         </select>
       </div>
-      <svg viewBox={`0 0 ${width} ${height}`} className="artifact-chart">
-        <rect x={0} y={0} width={width} height={height} className="chart-frame" />
-        <line x1={pad} x2={width - pad} y1={zeroY} y2={zeroY} className="chart-midline" />
-        {rows.map((row, idx) => {
-          const x = pad + idx * step + (step - barWidth) / 2;
-          const y = row.value >= 0 ? scaleY(row.value) : zeroY;
-          const barHeight = Math.max(1, Math.abs(scaleY(row.value) - zeroY));
-          const barClass = row.value >= 0 ? "artifact-bar-positive" : "artifact-bar-negative";
-          return (
-            <rect
-              key={`fold-${idx}`}
-              x={x}
-              y={y}
-              width={barWidth}
-              height={barHeight}
-              className={barClass}
-            />
-          );
-        })}
-      </svg>
+      <div className="artifact-chart-panel">
+        <svg viewBox={`0 0 ${width} ${height}`} className="artifact-chart">
+          <rect x={0} y={0} width={width} height={height} className="chart-frame" />
+          {yTicks.map((tick) => {
+            const y = scaleY(tick);
+            return (
+              <g key={`fold-y-${tick}`}>
+                <line x1={leftPad} x2={width - rightPad} y1={y} y2={y} className="artifact-grid-line" />
+                <text x={leftPad - 10} y={y + 4} textAnchor="end" className="artifact-tick-label">
+                  {formatChartNumber(tick)}
+                </text>
+              </g>
+            );
+          })}
+          {xTickIndexes.map((tickIndex) => {
+            const row = rows[tickIndex];
+            const x = leftPad + tickIndex * step + step / 2;
+            return (
+              <text key={`fold-x-${tickIndex}`} x={x} y={height - bottomPad + 22} textAnchor="middle" className="artifact-tick-label">
+                F{row.fold || tickIndex + 1}
+              </text>
+            );
+          })}
+          <line x1={leftPad} x2={width - rightPad} y1={height - bottomPad} y2={height - bottomPad} className="artifact-axis-line" />
+          <line x1={leftPad} x2={leftPad} y1={topPad} y2={height - bottomPad} className="artifact-axis-line" />
+          <line x1={leftPad} x2={width - rightPad} y1={zeroY} y2={zeroY} className="chart-midline" />
+          {rows.map((row, idx) => {
+            const x = leftPad + idx * step + (step - barWidth) / 2;
+            const y = row.value >= 0 ? scaleY(row.value) : zeroY;
+            const barHeight = Math.max(1, Math.abs(scaleY(row.value) - zeroY));
+            const barClass = row.value >= 0 ? "artifact-bar-positive" : "artifact-bar-negative";
+            return (
+              <rect
+                key={`fold-${idx}`}
+                x={x}
+                y={y}
+                width={barWidth}
+                height={barHeight}
+                className={barClass}
+              />
+            );
+          })}
+          <text x={(leftPad + width - rightPad) / 2} y={height - 14} textAnchor="middle" className="artifact-axis-title">
+            Fold
+          </text>
+          <text
+            x={22}
+            y={topPad + innerHeight / 2}
+            transform={`rotate(-90 22 ${topPad + innerHeight / 2})`}
+            textAnchor="middle"
+            className="artifact-axis-title"
+          >
+            {humanizeLabel(metric)}
+          </text>
+        </svg>
+      </div>
       <CsvTableView parsed={parsed} limit={50} />
     </div>
   );
@@ -1207,18 +1515,74 @@ const GroupDeltaDistributionView = ({ parsed }: { parsed: ParsedCsv }) => {
     counts[idx] += 1;
   });
   const maxCount = Math.max(...counts);
+  const width = DEFAULT_CHART_WIDTH;
+  const height = 340;
+  const leftPad = 76;
+  const rightPad = 28;
+  const topPad = 24;
+  const bottomPad = 72;
+  const plotWidth = width - leftPad - rightPad;
+  const plotHeight = height - topPad - bottomPad;
+  const barGap = Math.max(2, plotWidth / bins * 0.08);
+  const barWidth = (plotWidth - barGap * (bins - 1)) / bins;
+  const yScale = (count: number) => topPad + (1 - count / Math.max(1, maxCount)) * plotHeight;
+  const yTicks = buildLinearTicks(0, maxCount, 5);
+  const xTicks = buildLinearTicks(min, max, 5);
+  const xRange = Math.max(max - min, 1e-9);
   return (
     <div className="artifact-stack">
       <span className="meta-label">Group delta distribution</span>
-      <div className="artifact-bar-chart">
-        {counts.map((count, idx) => (
-          <div key={idx} className="artifact-bar">
-            <div
-              className="artifact-bar-fill"
-              style={{ height: `${(count / Math.max(1, maxCount)) * 100}%` }}
-            />
-          </div>
-        ))}
+      <div className="artifact-chart-panel">
+        <svg viewBox={`0 0 ${width} ${height}`} className="artifact-chart">
+          <rect x={0} y={0} width={width} height={height} className="chart-frame" />
+          {yTicks.map((tick) => {
+            const y = yScale(tick);
+            return (
+              <g key={`group-y-${tick}`}>
+                <line x1={leftPad} x2={width - rightPad} y1={y} y2={y} className="artifact-grid-line" />
+                <text x={leftPad - 10} y={y + 4} textAnchor="end" className="artifact-tick-label">
+                  {Math.round(tick)}
+                </text>
+              </g>
+            );
+          })}
+          {xTicks.map((tick) => {
+            const x = leftPad + ((tick - min) / xRange) * plotWidth;
+            return (
+              <text key={`group-x-${tick}`} x={x} y={height - bottomPad + 22} textAnchor="middle" className="artifact-tick-label">
+                {formatChartNumber(tick)}
+              </text>
+            );
+          })}
+          <line x1={leftPad} x2={width - rightPad} y1={height - bottomPad} y2={height - bottomPad} className="artifact-axis-line" />
+          <line x1={leftPad} x2={leftPad} y1={topPad} y2={height - bottomPad} className="artifact-axis-line" />
+          {counts.map((count, idx) => {
+            const x = leftPad + idx * (barWidth + barGap);
+            const y = yScale(count);
+            return (
+              <rect
+                key={`group-bar-${idx}`}
+                x={x}
+                y={y}
+                width={Math.max(1, barWidth)}
+                height={Math.max(1, height - bottomPad - y)}
+                className="artifact-bar-neutral"
+              />
+            );
+          })}
+          <text x={(leftPad + width - rightPad) / 2} y={height - 14} textAnchor="middle" className="artifact-axis-title">
+            Delta logloss
+          </text>
+          <text
+            x={22}
+            y={topPad + plotHeight / 2}
+            transform={`rotate(-90 22 ${topPad + plotHeight / 2})`}
+            textAnchor="middle"
+            className="artifact-axis-title"
+          >
+            Group count
+          </text>
+        </svg>
       </div>
       <CsvTableView parsed={parsed} limit={50} />
     </div>
@@ -1235,20 +1599,61 @@ const ReliabilityView = ({ parsed }: { parsed: ParsedCsv }) => {
     }))
     .filter((p): p is { x: number; y: number } => p.x != null && p.y != null);
   if (!points.length) return <div className="empty">No reliability bins.</div>;
-  const width = 520;
-  const height = 180;
-  const pad = 20;
-  const scale = (v: number) => pad + v * (width - pad * 2);
-  const scaleY = (v: number) => height - pad - v * (height - pad * 2);
-  const path = points.map((p, idx) => `${idx === 0 ? "M" : "L"} ${scale(p.x)} ${scaleY(p.y)}`).join(" ");
+  const width = DEFAULT_CHART_WIDTH;
+  const height = 340;
+  const leftPad = 76;
+  const rightPad = 28;
+  const topPad = 24;
+  const bottomPad = 68;
+  const plotWidth = width - leftPad - rightPad;
+  const plotHeight = height - topPad - bottomPad;
+  const xTicks = buildLinearTicks(0, 1, 5);
+  const scaleX = (v: number) => leftPad + v * plotWidth;
+  const scaleY = (v: number) => topPad + (1 - v) * plotHeight;
+  const path = points.map((p, idx) => `${idx === 0 ? "M" : "L"} ${scaleX(p.x)} ${scaleY(p.y)}`).join(" ");
   return (
     <div className="artifact-stack">
       <span className="meta-label">Reliability plot</span>
-      <svg viewBox={`0 0 ${width} ${height}`} className="artifact-chart">
-        <rect x={0} y={0} width={width} height={height} className="chart-frame" />
-        <line x1={pad} y1={height - pad} x2={width - pad} y2={pad} className="chart-midline" />
-        <path d={path} className="chart-line chart-line-prn" />
-      </svg>
+      <div className="artifact-chart-panel">
+        <svg viewBox={`0 0 ${width} ${height}`} className="artifact-chart">
+          <rect x={0} y={0} width={width} height={height} className="chart-frame" />
+          {xTicks.map((tick) => {
+            const x = scaleX(tick);
+            const y = scaleY(tick);
+            return (
+              <g key={`reliability-tick-${tick}`}>
+                <line x1={x} x2={x} y1={topPad} y2={height - bottomPad} className="artifact-grid-line" />
+                <line x1={leftPad} x2={width - rightPad} y1={y} y2={y} className="artifact-grid-line" />
+                <text x={x} y={height - bottomPad + 22} textAnchor="middle" className="artifact-tick-label">
+                  {tick.toFixed(2)}
+                </text>
+                <text x={leftPad - 10} y={y + 4} textAnchor="end" className="artifact-tick-label">
+                  {tick.toFixed(2)}
+                </text>
+              </g>
+            );
+          })}
+          <line x1={leftPad} x2={width - rightPad} y1={height - bottomPad} y2={height - bottomPad} className="artifact-axis-line" />
+          <line x1={leftPad} x2={leftPad} y1={topPad} y2={height - bottomPad} className="artifact-axis-line" />
+          <line x1={leftPad} y1={height - bottomPad} x2={width - rightPad} y2={topPad} className="chart-midline" />
+          <path d={path} className="chart-line chart-line-prn" />
+          {points.map((point, idx) => (
+            <circle key={`reliability-point-${idx}`} cx={scaleX(point.x)} cy={scaleY(point.y)} r={4} className="artifact-chart-point" />
+          ))}
+          <text x={(leftPad + width - rightPad) / 2} y={height - 14} textAnchor="middle" className="artifact-axis-title">
+            {humanizeLabel(predKey)}
+          </text>
+          <text
+            x={22}
+            y={topPad + plotHeight / 2}
+            transform={`rotate(-90 22 ${topPad + plotHeight / 2})`}
+            textAnchor="middle"
+            className="artifact-axis-title"
+          >
+            {humanizeLabel(obsKey)}
+          </text>
+        </svg>
+      </div>
       <CsvTableView parsed={parsed} limit={50} />
     </div>
   );
@@ -1553,7 +1958,7 @@ export default function CalibrateModelsPage() {
     const total = progress.trials_total ?? 0;
     const completed = progress.trials_done ?? 0;
     const failed = progress.trials_failed ?? 0;
-    const status =
+    const status: "running" | "failed" | "completed" =
       jobStatus?.status === "failed"
         ? "failed"
         : jobStatus?.status === "finished"
@@ -1626,7 +2031,27 @@ export default function CalibrateModelsPage() {
     }
     return groups;
   }, [modelFiles]);
-  const selectedArtifactName = fileBaseName(selectedFilePath);
+  const defaultArtifactFile = useMemo(
+    () => (modelFiles?.files ?? []).find((file) => isDefaultArtifactFile(file) && file.is_viewable) ?? null,
+    [modelFiles],
+  );
+  const defaultArtifactPath = defaultArtifactFile ? artifactFilePath(defaultArtifactFile) : null;
+  const visibleGroupedModelFiles = useMemo(
+    () => ({
+      selected_model: groupedModelFiles.selected_model.filter(
+        (file) => !isDefaultArtifactFile(file) && !isHiddenArtifactPath(artifactFilePath(file)),
+      ),
+      auto_search: groupedModelFiles.auto_search.filter(
+        (file) => !isDefaultArtifactFile(file) && !isHiddenArtifactPath(artifactFilePath(file)),
+      ),
+      legacy_root: groupedModelFiles.legacy_root.filter(
+        (file) => !isDefaultArtifactFile(file) && !isHiddenArtifactPath(artifactFilePath(file)),
+      ),
+    }),
+    [groupedModelFiles],
+  );
+  const selectedArtifactName = fileBaseName(selectedFilePath ?? defaultArtifactPath);
+  const isShowingDefaultArtifact = Boolean(defaultArtifactPath && selectedFilePath === defaultArtifactPath);
 
   const renderArtifactView = () => {
     if (!selectedFilePath || !fileContent) return null;
@@ -1676,8 +2101,6 @@ export default function CalibrateModelsPage() {
         return parsedJson ? <KeyValueGrid data={parsedJson} /> : <div className="empty">No summary data.</div>;
       case "auto_search_summary.json":
         return parsedJson ? <KeyValueGrid data={parsedJson} /> : <div className="empty">No summary data.</div>;
-      case "auto_search_no_viable.json":
-        return parsedJson ? <KeyValueGrid data={parsedJson} /> : <div className="empty">No no-viable data.</div>;
       case "auto_search_progress.json":
         return parsedJson ? <KeyValueGrid data={parsedJson} /> : <div className="empty">No progress data.</div>;
       case "best_model_report.md":
@@ -1783,7 +2206,9 @@ export default function CalibrateModelsPage() {
       .then((response) => {
         setDatasets(response.datasets);
         setDatasetError(null);
-        if (!form.datasetPath && response.datasets.length) {
+        const paths = new Set(response.datasets.map((d) => d.path));
+        const stale = form.datasetPath && !paths.has(form.datasetPath);
+        if ((!form.datasetPath || stale) && response.datasets.length) {
           setForm((prev) => ({ ...prev, datasetPath: response.datasets[0].path }));
         }
       })
@@ -2557,6 +2982,37 @@ export default function CalibrateModelsPage() {
     }
   }, [jobId, jobStatus?.job_id, setJobStatus]);
 
+  const openModelFile = useCallback(async (
+    modelId: string,
+    file: ModelFileSummary,
+    options?: { allowToggle?: boolean },
+  ) => {
+    const targetPath = artifactFilePath(file);
+    if (!targetPath) return;
+    const allowToggle = options?.allowToggle ?? true;
+    if (allowToggle && selectedFilePath === targetPath) {
+      setSelectedFilePath(null);
+      setFileContent(null);
+      setFileError(null);
+      return;
+    }
+    setSelectedFilePath(targetPath);
+    setFileLoading(true);
+    setFileError(null);
+    try {
+      const content = file.relative_path
+        ? await fetchModelFileContentByPath(modelId, file.relative_path)
+        : await fetchModelFileContent(modelId, file.name);
+      setFileContent(content);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to read file.";
+      setFileError(message);
+      setFileContent(null);
+    } finally {
+      setFileLoading(false);
+    }
+  }, [selectedFilePath]);
+
   const handleSelectModel = useCallback(async (modelId: string) => {
     if (selectedModelId === modelId) {
       setSelectedModelId(null);
@@ -2583,46 +3039,28 @@ export default function CalibrateModelsPage() {
       ]);
       setModelDetail(detail);
       setModelFiles(files);
+      const defaultArtifact = files.files.find(
+        (file) => isDefaultArtifactFile(file) && file.is_viewable,
+      );
+      if (defaultArtifact) {
+        await openModelFile(modelId, defaultArtifact, { allowToggle: false });
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to load model detail.";
       setModelDetailError(message);
       setModelDetail(null);
       setModelFiles(null);
       setSelectedFilePath(null);
+      setFileContent(null);
     } finally {
       setIsModelDetailLoading(false);
     }
-  }, [selectedModelId]);
+  }, [openModelFile, selectedModelId]);
 
   const handleOpenFile = useCallback(async (file: ModelFileSummary) => {
     if (!selectedModelId) return;
-    const targetPath = file.relative_path ?? file.name;
-    if (!targetPath) return;
-    if (selectedFilePath === targetPath) {
-      setSelectedFilePath(null);
-      setFileContent(null);
-      setFileError(null);
-      return;
-    }
-    setSelectedFilePath(targetPath);
-    setFileLoading(true);
-    setFileError(null);
-    try {
-      let content: ModelFileContentResponse;
-      if (file.relative_path) {
-        content = await fetchModelFileContentByPath(selectedModelId, file.relative_path);
-      } else {
-        content = await fetchModelFileContent(selectedModelId, file.name);
-      }
-      setFileContent(content);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to read file.";
-      setFileError(message);
-      setFileContent(null);
-    } finally {
-      setFileLoading(false);
-    }
-  }, [selectedFilePath, selectedModelId]);
+    await openModelFile(selectedModelId, file);
+  }, [openModelFile, selectedModelId]);
 
   const handleRenameModel = useCallback(async (modelId: string) => {
     const next = window.prompt("New model name", modelId);
@@ -4351,28 +4789,33 @@ export default function CalibrateModelsPage() {
                           </div>
                         ) : null}
 
-                        {isJobComplete && activeResult?.artifact_manifest?.length ? (
+                        {isJobComplete && activeResult?.artifact_manifest?.some(
+                          (artifact) => !isHiddenArtifactPath(artifact.relative_path ?? artifact.path ?? artifact.name),
+                        ) ? (
                           <div className="model-detail-section file-viewer-section">
                             <span className="meta-label">Artifacts</span>
                             <div className="file-list">
-                              {activeResult.artifact_manifest.map((artifact) => (
-                                <button
-                                  key={artifact.name}
-                                  type="button"
-                                  className="file-item"
-                                  onClick={() => {
-                                    if (!activeResult.out_dir) return;
-                                    const modelId = activeResult.out_dir.split("/").pop() || "";
-                                    if (modelId) {
-                                      void handleSelectModel(modelId);
-                                      setWorkspaceTab("models");
-                                    }
-                                  }}
-                                >
-                                  <span className="file-name">{artifact.name}</span>
-                                  <span className="file-size">{artifact.type}</span>
-                                </button>
-                              ))}
+                              {activeResult.artifact_manifest
+                                .filter((artifact) => !isHiddenArtifactPath(artifact.relative_path ?? artifact.path ?? artifact.name))
+                                .map((artifact) => {
+                                  const artifactPath = artifact.relative_path ?? artifact.path ?? artifact.name;
+                                  return (
+                                    <ArtifactFileButton
+                                      key={artifactPath}
+                                      titlePath={artifactPath}
+                                      displayPath={artifactPath}
+                                      meta={artifact.type}
+                                      onClick={() => {
+                                        if (!activeResult.out_dir) return;
+                                        const modelId = activeResult.out_dir.split("/").pop() || "";
+                                        if (modelId) {
+                                          void handleSelectModel(modelId);
+                                          setWorkspaceTab("models");
+                                        }
+                                      }}
+                                    />
+                                  );
+                                })}
                             </div>
                           </div>
                         ) : null}
@@ -4695,63 +5138,52 @@ export default function CalibrateModelsPage() {
                                   {modelFiles?.files?.length ? (
                                     <div className="model-detail-section file-viewer-section">
                                       <span className="meta-label">Artifacts</span>
+                                      {defaultArtifactPath ? (
+                                        <div className="artifact-selection-note">
+                                          <code>{DEFAULT_ARTIFACT_FILE_NAME}</code> opens automatically when you select a model.
+                                        </div>
+                                      ) : null}
                                       {isAutoRun ? (
                                         <div className="artifact-section-stack">
                                           <div className="artifact-section-block">
                                             <span className="meta-label">Selected Model</span>
-                                            {groupedModelFiles.selected_model.length ? (
+                                            {visibleGroupedModelFiles.selected_model.length ? (
                                               <div className="file-list">
-                                                {groupedModelFiles.selected_model.map((file) => {
-                                                  const filePath = file.relative_path ?? file.name;
+                                                {visibleGroupedModelFiles.selected_model.map((file) => {
+                                                  const filePath = artifactFilePath(file);
                                                   return (
-                                                    <button
+                                                    <ArtifactFileButton
                                                       key={`${model.id}-${filePath}`}
-                                                      type="button"
-                                                      className={`file-item ${selectedFilePath === filePath ? "active" : ""}`}
+                                                      titlePath={filePath}
+                                                      displayPath={filePath}
+                                                      meta={formatFileSizeLabel(file.size_bytes)}
+                                                      isActive={selectedFilePath === filePath}
                                                       onClick={() => file.is_viewable && void handleOpenFile(file)}
                                                       disabled={!file.is_viewable}
-                                                    >
-                                                      <span className="file-name">{file.name}</span>
-                                                      {file.relative_path && file.relative_path !== file.name ? (
-                                                        <span className="file-path">{file.relative_path}</span>
-                                                      ) : null}
-                                                      <span className="file-size">
-                                                        {file.size_bytes < 1024
-                                                          ? `${file.size_bytes} B`
-                                                          : `${(file.size_bytes / 1024).toFixed(1)} KB`}
-                                                      </span>
-                                                    </button>
+                                                    />
                                                   );
                                                 })}
                                               </div>
                                             ) : (
-                                              <div className="empty">No selected-model artifacts.</div>
+                                              <div className="empty">No additional selected-model artifacts.</div>
                                             )}
                                           </div>
                                           <div className="artifact-section-block">
                                             <span className="meta-label">Auto Search</span>
-                                            {groupedModelFiles.auto_search.length ? (
+                                            {visibleGroupedModelFiles.auto_search.length ? (
                                               <div className="file-list">
-                                                {groupedModelFiles.auto_search.map((file) => {
-                                                  const filePath = file.relative_path ?? file.name;
+                                                {visibleGroupedModelFiles.auto_search.map((file) => {
+                                                  const filePath = artifactFilePath(file);
                                                   return (
-                                                    <button
+                                                    <ArtifactFileButton
                                                       key={`${model.id}-${filePath}`}
-                                                      type="button"
-                                                      className={`file-item ${selectedFilePath === filePath ? "active" : ""}`}
+                                                      titlePath={filePath}
+                                                      displayPath={filePath}
+                                                      meta={formatFileSizeLabel(file.size_bytes)}
+                                                      isActive={selectedFilePath === filePath}
                                                       onClick={() => file.is_viewable && void handleOpenFile(file)}
                                                       disabled={!file.is_viewable}
-                                                    >
-                                                      <span className="file-name">{file.name}</span>
-                                                      {file.relative_path && file.relative_path !== file.name ? (
-                                                        <span className="file-path">{file.relative_path}</span>
-                                                      ) : null}
-                                                      <span className="file-size">
-                                                        {file.size_bytes < 1024
-                                                          ? `${file.size_bytes} B`
-                                                          : `${(file.size_bytes / 1024).toFixed(1)} KB`}
-                                                      </span>
-                                                    </button>
+                                                    />
                                                   );
                                                 })}
                                               </div>
@@ -4759,30 +5191,22 @@ export default function CalibrateModelsPage() {
                                               <div className="empty">No auto-search artifacts.</div>
                                             )}
                                           </div>
-                                          {groupedModelFiles.legacy_root.length ? (
+                                          {visibleGroupedModelFiles.legacy_root.length ? (
                                             <div className="artifact-section-block">
                                               <span className="meta-label">Legacy Root</span>
                                               <div className="file-list">
-                                                {groupedModelFiles.legacy_root.map((file) => {
-                                                  const filePath = file.relative_path ?? file.name;
+                                                {visibleGroupedModelFiles.legacy_root.map((file) => {
+                                                  const filePath = artifactFilePath(file);
                                                   return (
-                                                    <button
+                                                    <ArtifactFileButton
                                                       key={`${model.id}-${filePath}`}
-                                                      type="button"
-                                                      className={`file-item ${selectedFilePath === filePath ? "active" : ""}`}
+                                                      titlePath={filePath}
+                                                      displayPath={filePath}
+                                                      meta={formatFileSizeLabel(file.size_bytes)}
+                                                      isActive={selectedFilePath === filePath}
                                                       onClick={() => file.is_viewable && void handleOpenFile(file)}
                                                       disabled={!file.is_viewable}
-                                                    >
-                                                      <span className="file-name">{file.name}</span>
-                                                      {file.relative_path && file.relative_path !== file.name ? (
-                                                        <span className="file-path">{file.relative_path}</span>
-                                                      ) : null}
-                                                      <span className="file-size">
-                                                        {file.size_bytes < 1024
-                                                          ? `${file.size_bytes} B`
-                                                          : `${(file.size_bytes / 1024).toFixed(1)} KB`}
-                                                      </span>
-                                                    </button>
+                                                    />
                                                   );
                                                 })}
                                               </div>
@@ -4790,36 +5214,33 @@ export default function CalibrateModelsPage() {
                                           ) : null}
                                         </div>
                                       ) : (
-                                        <div className="file-list">
-                                          {groupedModelFiles.legacy_root.map((file) => {
-                                            const filePath = file.relative_path ?? file.name;
-                                            return (
-                                              <button
-                                                key={`${model.id}-${filePath}`}
-                                                type="button"
-                                                className={`file-item ${selectedFilePath === filePath ? "active" : ""}`}
-                                                onClick={() => file.is_viewable && void handleOpenFile(file)}
-                                                disabled={!file.is_viewable}
-                                              >
-                                                <span className="file-name">{file.name}</span>
-                                                {file.relative_path && file.relative_path !== file.name ? (
-                                                  <span className="file-path">{file.relative_path}</span>
-                                                ) : null}
-                                                <span className="file-size">
-                                                  {file.size_bytes < 1024
-                                                    ? `${file.size_bytes} B`
-                                                    : `${(file.size_bytes / 1024).toFixed(1)} KB`}
-                                                </span>
-                                              </button>
-                                            );
-                                          })}
-                                        </div>
+                                        visibleGroupedModelFiles.legacy_root.length ? (
+                                          <div className="file-list">
+                                            {visibleGroupedModelFiles.legacy_root.map((file) => {
+                                              const filePath = artifactFilePath(file);
+                                              return (
+                                                <ArtifactFileButton
+                                                  key={`${model.id}-${filePath}`}
+                                                  titlePath={filePath}
+                                                  displayPath={filePath}
+                                                  meta={formatFileSizeLabel(file.size_bytes)}
+                                                  isActive={selectedFilePath === filePath}
+                                                  onClick={() => file.is_viewable && void handleOpenFile(file)}
+                                                  disabled={!file.is_viewable}
+                                                />
+                                              );
+                                            })}
+                                          </div>
+                                        ) : (
+                                          <div className="empty">No additional artifacts beyond the default metrics view.</div>
+                                        )
                                       )}
                                       {selectedFilePath ? (
                                         <div className="file-content-panel">
                                           <div className="file-content-header">
                                             <div className="file-content-title">
-                                              {selectedFilePath}
+                                              <span className="file-name">{artifactDisplayTitle(selectedFilePath)}</span>
+                                              <span className="file-content-path">{selectedFilePath}</span>
                                               {ARTIFACT_DESCRIPTIONS[selectedArtifactName] ? (
                                                 <span className="file-content-subtitle">
                                                   {ARTIFACT_DESCRIPTIONS[selectedArtifactName]}
@@ -4834,17 +5255,23 @@ export default function CalibrateModelsPage() {
                                               >
                                                 {showRawFile ? "View visual" : "View raw"}
                                               </button>
-                                              <button
-                                                className="button small"
-                                                type="button"
-                                                onClick={() => {
-                                                  setSelectedFilePath(null);
-                                                  setFileContent(null);
-                                                  setFileError(null);
-                                                }}
-                                              >
-                                                Close
-                                              </button>
+                                              {!isShowingDefaultArtifact || !defaultArtifactFile ? (
+                                                <button
+                                                  className="button small"
+                                                  type="button"
+                                                  onClick={() => {
+                                                    if (defaultArtifactFile && selectedFilePath !== defaultArtifactPath) {
+                                                      void openModelFile(model.id, defaultArtifactFile, { allowToggle: false });
+                                                      return;
+                                                    }
+                                                    setSelectedFilePath(null);
+                                                    setFileContent(null);
+                                                    setFileError(null);
+                                                  }}
+                                                >
+                                                  {defaultArtifactFile ? "Back to metrics" : "Close"}
+                                                </button>
+                                              ) : null}
                                             </div>
                                           </div>
                                           {fileLoading ? <div className="empty">Loading file…</div> : null}

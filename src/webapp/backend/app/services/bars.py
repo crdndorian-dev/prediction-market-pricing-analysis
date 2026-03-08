@@ -332,6 +332,42 @@ def _load_event_slugs(run_dir: Path) -> Dict[str, str]:
     return mapping
 
 
+def _load_gamma_volumes(run_dir: Path) -> Dict[str, Optional[float]]:
+    """Load market_id -> gamma_volume mapping from weekly_markets sources."""
+    weekly_markets_paths = get_run_csv_paths(run_dir, "weekly_markets.csv")
+    mapping: Dict[str, Optional[float]] = {}
+    if not weekly_markets_paths:
+        return mapping
+    try:
+        for row in iter_deduped_csv_rows(weekly_markets_paths, "weekly_markets.csv"):
+            mid = row.get("market_id", "").strip()
+            if not mid or mid in mapping:
+                continue
+            vol_str = row.get("gamma_volume", "")
+            if vol_str:
+                try:
+                    vol = float(vol_str)
+                    if math.isfinite(vol):
+                        mapping[mid] = vol
+                        continue
+                except (ValueError, TypeError):
+                    pass
+            mapping[mid] = None
+    except Exception:
+        pass
+    return mapping
+
+
+# Quality tier thresholds
+LOW_VOLUME_THRESHOLD = 5000.0   # USD — markets below this are flagged as low_volume
+# "Suspect midprice" heuristic: detects empty-book pattern (flat ~0.50 with spikes)
+MIDPRICE_CLUSTER_BAND = (0.40, 0.60)  # price band considered "near midprice"
+SUSPECT_CLUSTER_RATIO = 0.25          # flag if >=25% of bars sit in the midprice band
+SUSPECT_JUMP_THRESHOLD = 0.25         # AND at least one jump >= 0.25 in a single bar
+# Relative point density: strikes with far fewer points than the median are likely illiquid
+POINT_DENSITY_SUSPECT_RATIO = 0.20    # flag if total_points < 20% of median across strikes
+
+
 def get_bars_by_strike(request: ByStrikeRequest) -> ByStrikeResponse:
     """Load bars from price_history.csv grouped by strike for a single ticker.
 
@@ -343,6 +379,7 @@ def get_bars_by_strike(request: ByStrikeRequest) -> ByStrikeResponse:
     csv_paths = get_run_csv_paths(run_dir, "price_history.csv")
     run_id = run_dir.name
     event_slug_map = _load_event_slugs(run_dir)
+    gamma_volume_map = _load_gamma_volumes(run_dir)
 
     time_min_ms = _parse_timestamp(request.time_min) if request.time_min else None
     time_max_ms = _parse_timestamp(request.time_max) if request.time_max else None
@@ -404,47 +441,99 @@ def get_bars_by_strike(request: ByStrikeRequest) -> ByStrikeResponse:
         groups.setdefault((strike, market_id), []).append(bar)
         rows_matched += 1
 
-    # Build per-strike series, sorted by strike ascending
+    # Build per-strike series, sorted by strike ascending.
+    # Two-pass: first compute metrics, then classify quality using relative point density.
     strikes_list: List[StrikeSeries] = []
     total_stale_runs = 0
     max_stale_hours_all = 0.0
     total_gaps = 0
 
-    for strike, market_id in sorted(groups.keys(), key=lambda k: (k[0], k[1] or "")):
+    # --- Pass 1: compute per-strike metrics ---
+    strike_metrics: List[dict] = []
+    sorted_keys = sorted(groups.keys(), key=lambda k: (k[0], k[1] or ""))
+
+    for strike, market_id in sorted_keys:
         all_bars = groups[(strike, market_id)]
-        # Sort bars by timestamp
         all_bars.sort(key=lambda x: x.timestamp_ms)
         total = len(all_bars)
 
-        # Compute quality metrics before downsampling
         stale_runs = 0
         max_stale_ms = 0
         gap_count = 0
         gap_threshold_ms = 4 * 3600_000  # 4 hours
+        mid_cluster_count = 0
+        max_jump = 0.0
 
-        for idx in range(1, len(all_bars)):
-            dt = all_bars[idx].timestamp_ms - all_bars[idx - 1].timestamp_ms
-            if dt > gap_threshold_ms:
-                gap_count += 1
-            if all_bars[idx].price == all_bars[idx - 1].price:
-                stale_runs += 1
-                max_stale_ms = max(max_stale_ms, dt)
+        for idx in range(len(all_bars)):
+            p = all_bars[idx].price
+            if MIDPRICE_CLUSTER_BAND[0] <= p <= MIDPRICE_CLUSTER_BAND[1]:
+                mid_cluster_count += 1
+            if idx > 0:
+                dt = all_bars[idx].timestamp_ms - all_bars[idx - 1].timestamp_ms
+                if dt > gap_threshold_ms:
+                    gap_count += 1
+                if all_bars[idx].price == all_bars[idx - 1].price:
+                    stale_runs += 1
+                    max_stale_ms = max(max_stale_ms, dt)
+                jump = abs(all_bars[idx].price - all_bars[idx - 1].price)
+                if jump > max_jump:
+                    max_jump = jump
 
         total_stale_runs += stale_runs
         max_stale_hours_all = max(max_stale_hours_all, max_stale_ms / 3600_000)
         total_gaps += gap_count
 
-        # Downsample per strike
+        stale_ratio = stale_runs / max(1, total - 1) if total > 1 else 0.0
+        mid_cluster_ratio = mid_cluster_count / max(1, total) if total > 0 else 0.0
+        vol = gamma_volume_map.get(market_id) if market_id else None
+
+        strike_metrics.append({
+            "strike": strike,
+            "market_id": market_id,
+            "all_bars": all_bars,
+            "total": total,
+            "stale_ratio": stale_ratio,
+            "mid_cluster_ratio": mid_cluster_ratio,
+            "max_jump": max_jump,
+            "vol": vol,
+        })
+
+    # --- Pass 2: classify quality using relative point density ---
+    point_counts = sorted(m["total"] for m in strike_metrics)
+    median_points = point_counts[len(point_counts) // 2] if point_counts else 1
+    density_threshold = median_points * POINT_DENSITY_SUSPECT_RATIO
+
+    for m in strike_metrics:
+        vol = m["vol"]
+        mid_cluster_ratio = m["mid_cluster_ratio"]
+        max_jump = m["max_jump"]
+        stale_ratio = m["stale_ratio"]
+        total = m["total"]
+
+        quality = "good"
+        if vol is not None and vol < LOW_VOLUME_THRESHOLD:
+            quality = "low_volume"
+        elif mid_cluster_ratio >= SUSPECT_CLUSTER_RATIO and max_jump >= SUSPECT_JUMP_THRESHOLD:
+            quality = "suspect"
+        elif total < density_threshold and max_jump >= SUSPECT_JUMP_THRESHOLD:
+            quality = "suspect"
+
+        all_bars = m["all_bars"]
         if total > request.max_points_per_strike:
             all_bars = _downsample_bars(all_bars, request.max_points_per_strike)
         strikes_list.append(StrikeSeries(
-            strike=strike,
-            strike_label=str(int(strike)) if strike == int(strike) else f"{strike:.2f}",
-            market_id=market_id,
-            event_slug=event_slug_map.get(market_id) if market_id else None,
+            strike=m["strike"],
+            strike_label=str(int(m["strike"])) if m["strike"] == int(m["strike"]) else f"{m['strike']:.2f}",
+            market_id=m["market_id"],
+            event_slug=event_slug_map.get(m["market_id"]) if m["market_id"] else None,
             total_points=total,
             returned_points=len(all_bars),
             bars=all_bars,
+            gamma_volume=vol,
+            stale_ratio=round(stale_ratio, 3),
+            midprice_cluster_ratio=round(mid_cluster_ratio, 3),
+            max_jump=round(max_jump, 4),
+            quality=quality,
         ))
 
     log.info(
