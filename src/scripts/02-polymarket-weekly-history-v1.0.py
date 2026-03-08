@@ -120,7 +120,7 @@ class Config:
     bars_freqs: Tuple[str, ...] = ("1h", "1d")
     include_subgraph: bool = False
     max_subgraph_entities: int = 1_000_000
-    despike_enabled: bool = False
+    despike_enabled: bool = True
     despike_jump: float = 0.25
     despike_revert: float = 0.1
     clob_price_history_url: str = CLOB_PRICE_HISTORY
@@ -570,6 +570,34 @@ def extract_weekly_markets(
                 yes_token = str(token_ids[0]) if len(token_ids) >= 1 and token_ids[0] else None
                 no_token = str(token_ids[1]) if len(token_ids) >= 2 and token_ids[1] else None
 
+                # Validate YES/NO ordering against Gamma outcomes field
+                outcomes = normalize_list_field(market.get("outcomes"))
+                if outcomes and len(outcomes) >= 2:
+                    first_outcome = str(outcomes[0]).strip().lower()
+                    if first_outcome == "no":
+                        yes_token, no_token = no_token, yes_token
+                        print(
+                            f"[Weekly History][WARN] Swapped YES/NO tokens for market "
+                            f"{market.get('id')} (outcomes={outcomes})",
+                            flush=True,
+                        )
+                    elif first_outcome != "yes":
+                        print(
+                            f"[Weekly History][WARN] Unexpected outcomes for market "
+                            f"{market.get('id')}: {outcomes} -- skipping",
+                            flush=True,
+                        )
+                        continue
+
+                # Capture Gamma outcomePrices for post-fetch sanity check
+                gamma_outcome_prices = normalize_list_field(market.get("outcomePrices"))
+                gamma_yes_price = None
+                if gamma_outcome_prices and len(gamma_outcome_prices) >= 1:
+                    try:
+                        gamma_yes_price = float(gamma_outcome_prices[0])
+                    except (ValueError, TypeError):
+                        pass
+
                 rows.append(
                     {
                         "event_id": event_id,
@@ -593,6 +621,7 @@ def extract_weekly_markets(
                         "enable_order_book": market.get("enableOrderBook"),
                         "active": market.get("active"),
                         "closed": market.get("closed"),
+                        "gamma_yes_price": gamma_yes_price,
                         "schema_version": SCHEMA_VERSION_MARKETS,
                     }
                 )
@@ -858,7 +887,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-date", type=str, default=None, help="Start date YYYY-MM-DD (UTC)")
     parser.add_argument("--end-date", type=str, default=None, help="End date YYYY-MM-DD (UTC)")
     parser.add_argument("--fidelity-min", type=int, default=Config().clob_fidelity_min, help="CLOB history fidelity (minutes)")
-    parser.add_argument("--despike", action="store_true", help="Remove single-point price spikes that immediately revert")
+    parser.add_argument("--despike", action=argparse.BooleanOptionalAction, default=True, help="Remove single-point price spikes that immediately revert (enabled by default; use --no-despike to disable)")
     parser.add_argument("--despike-jump", type=float, default=Config().despike_jump, help="Min jump size to treat as spike")
     parser.add_argument("--despike-revert", type=float, default=Config().despike_revert, help="Max revert distance to treat as spike")
     parser.add_argument("--bars-freqs", type=str, default="1h,1d", help="Comma-separated bar freqs (e.g. 1h,1d)")
@@ -997,6 +1026,15 @@ def main() -> None:
     despike_adjusted = 0
     bar_partitions = 0
 
+    # Validation counters
+    COMPLEMENT_TOLERANCE = 0.20
+    GAMMA_PRICE_TOLERANCE = 0.15
+    MIN_POINTS_THRESHOLD = 20
+    validation_complement_violations = 0
+    validation_gamma_mismatches = 0
+    validation_sparse_markets = 0
+    validation_outcomes_swapped = 0
+
     start_dt = date_to_utc_start(start_date) if start_date else None
     end_dt = date_to_utc_end(end_date) if end_date else None
 
@@ -1014,6 +1052,7 @@ def main() -> None:
         no_token = row.get("no_token_id")
         ticker = row.get("ticker")
         threshold = row.get("threshold")
+        gamma_yes_price = row.get("gamma_yes_price")
 
         job_id = _safe_job_id(f"{ticker}:{threshold}:{market_id}")
         print(
@@ -1028,6 +1067,7 @@ def main() -> None:
         )
         market_failed = False
 
+        token_histories: Dict[str, pd.DataFrame] = {}
         for token_role, token_id in [("yes", yes_token), ("no", no_token)]:
             if not token_id:
                 continue
@@ -1057,23 +1097,7 @@ def main() -> None:
                     cfg.despike_revert,
                 )
                 despike_adjusted += adjusted
-
-                if not args.dry_run:
-                    history_out = history.copy()
-                    history_out["timestamp_utc"] = history_out["timestamp_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-                    append_df_to_csv_with_schema(history_out, prices_path)
-                    price_rows += len(history_out)
-
-                    if token_role == "yes":
-                        bars_in = history[["timestamp_utc", "price"]].copy()
-                        bars_in["market_id"] = market_id
-                        for freq in cfg.bars_freqs:
-                            bars = build_bars_from_prices(
-                                bars_in,
-                                freq,
-                                schema_version=SCHEMA_VERSION_BARS,
-                            )
-                            bar_partitions += write_bars(bars, bars_dir, freq)
+                token_histories[token_role] = history
 
             except Exception as exc:
                 market_failed = True
@@ -1083,6 +1107,80 @@ def main() -> None:
                 continue
 
             time.sleep(cfg.sleep_between_requests_s)
+
+        # --- Validation checks ---
+        yes_hist = token_histories.get("yes")
+        no_hist = token_histories.get("no")
+
+        # Fix 4: sparse market check
+        if yes_hist is not None and len(yes_hist) < MIN_POINTS_THRESHOLD:
+            validation_sparse_markets += 1
+            print(
+                f"[Weekly History][WARN] Sparse data: {ticker} @ ${threshold} "
+                f"(market_id={market_id}) has only {len(yes_hist)} YES points "
+                f"(min={MIN_POINTS_THRESHOLD})",
+                flush=True,
+            )
+
+        # Fix 2: cross-validate YES + NO complement (relaxed tolerance)
+        if yes_hist is not None and no_hist is not None and not yes_hist.empty and not no_hist.empty:
+            merged_check = pd.merge(
+                yes_hist[["timestamp_utc", "price"]].rename(columns={"price": "yes_price"}),
+                no_hist[["timestamp_utc", "price"]].rename(columns={"price": "no_price"}),
+                on="timestamp_utc",
+                how="inner",
+            )
+            if not merged_check.empty:
+                merged_check["complement_err"] = (
+                    merged_check["yes_price"] + merged_check["no_price"] - 1.0
+                ).abs()
+                violation_rate = (merged_check["complement_err"] > COMPLEMENT_TOLERANCE).mean()
+                max_err = merged_check["complement_err"].max()
+                if violation_rate > 0.1:
+                    validation_complement_violations += 1
+                    print(
+                        f"[Weekly History][WARN] YES+NO complement violation: {ticker} @ ${threshold} "
+                        f"(market_id={market_id}) violation_rate={violation_rate:.1%} "
+                        f"max_err={max_err:.3f} (tolerance={COMPLEMENT_TOLERANCE})",
+                        flush=True,
+                    )
+
+        # Fix 3: compare last CLOB price against Gamma outcomePrices
+        if (
+            yes_hist is not None
+            and not yes_hist.empty
+            and gamma_yes_price is not None
+            and np.isfinite(gamma_yes_price)
+        ):
+            last_clob_price = yes_hist.iloc[-1]["price"]
+            gamma_diff = abs(last_clob_price - gamma_yes_price)
+            if gamma_diff > GAMMA_PRICE_TOLERANCE:
+                validation_gamma_mismatches += 1
+                print(
+                    f"[Weekly History][WARN] Gamma price mismatch: {ticker} @ ${threshold} "
+                    f"(market_id={market_id}) last_clob={last_clob_price:.4f} "
+                    f"gamma_yes={gamma_yes_price:.4f} diff={gamma_diff:.4f}",
+                    flush=True,
+                )
+
+        # Write validated histories
+        for token_role, history in token_histories.items():
+            if not args.dry_run:
+                history_out = history.copy()
+                history_out["timestamp_utc"] = history_out["timestamp_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                append_df_to_csv_with_schema(history_out, prices_path)
+                price_rows += len(history_out)
+
+                if token_role == "yes":
+                    bars_in = history[["timestamp_utc", "price"]].copy()
+                    bars_in["market_id"] = market_id
+                    for freq in cfg.bars_freqs:
+                        bars = build_bars_from_prices(
+                            bars_in,
+                            freq,
+                            schema_version=SCHEMA_VERSION_BARS,
+                        )
+                        bar_partitions += write_bars(bars, bars_dir, freq)
 
         print(
             f"[Weekly History] Market complete {idx + 1}/{markets_total} "
@@ -1118,6 +1216,15 @@ def main() -> None:
             "jump": cfg.despike_jump,
             "revert": cfg.despike_revert,
             "adjusted_points": despike_adjusted,
+        },
+        "validation": {
+            "complement_tolerance": COMPLEMENT_TOLERANCE,
+            "gamma_price_tolerance": GAMMA_PRICE_TOLERANCE,
+            "min_points_threshold": MIN_POINTS_THRESHOLD,
+            "outcomes_swapped": validation_outcomes_swapped,
+            "complement_violations": validation_complement_violations,
+            "gamma_price_mismatches": validation_gamma_mismatches,
+            "sparse_markets": validation_sparse_markets,
         },
         "bars_dir": str(bars_dir),
         "fact_trade_dir": str(fact_trade_dir),

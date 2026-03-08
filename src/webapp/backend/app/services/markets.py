@@ -31,6 +31,7 @@ from app.services.process_runtime import (
     clear_runtime_file,
     spawn_managed_process,
 )
+from app.services.run_csv_files import dedupe_merged_dataframe, get_run_csv_paths
 
 BASE_DIR = Path(__file__).resolve().parents[5]
 SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "07-polymarket-markets-refresh-v1.0.py"
@@ -171,6 +172,16 @@ def _infer_last_snapshot_date(run_dir: Path, tz_name: str = "America/New_York") 
         return None
     local_date = last_ts.tz_convert(ZoneInfo(tz_name)).date()
     return local_date.isoformat()
+
+
+def _load_merged_run_csv(run_dir: Path, filename: str, **read_csv_kwargs) -> Tuple[pd.DataFrame, List[Path]]:
+    paths = get_run_csv_paths(run_dir, filename)
+    if not paths:
+        return pd.DataFrame(), []
+    frames = [pd.read_csv(path, **read_csv_kwargs) for path in paths]
+    if not frames:
+        return pd.DataFrame(), paths
+    return dedupe_merged_dataframe(pd.concat(frames, ignore_index=True, sort=False), filename), paths
 
 
 # -----------------------------
@@ -385,12 +396,16 @@ def get_markets_summary(
     monday, friday, sunday = _week_bounds(week_date)
     run_dir = _resolve_run_dir(run_id)
     trading_universe_tickers: List[str] = []
-    weekly_markets_path = run_dir / "weekly_markets.csv"
-    if weekly_markets_path.exists():
+    weekly_markets_paths = get_run_csv_paths(run_dir, "weekly_markets.csv")
+    if weekly_markets_paths:
         try:
-            weekly_df = pd.read_csv(weekly_markets_path, usecols=["ticker", "week_friday"])
+            weekly_df, _ = _load_merged_run_csv(
+                run_dir,
+                "weekly_markets.csv",
+                usecols=["ticker", "week_friday"],
+            )
         except ValueError:
-            weekly_df = pd.read_csv(weekly_markets_path)
+            weekly_df, _ = _load_merged_run_csv(run_dir, "weekly_markets.csv")
         if "ticker" in weekly_df.columns:
             weekly_df["ticker"] = weekly_df["ticker"].astype(str).str.upper()
             if "week_friday" in weekly_df.columns:
@@ -400,8 +415,8 @@ def get_markets_summary(
             trading_universe_tickers = sorted(
                 set(weekly_df["ticker"].dropna().tolist())
             )
-    prn_path = run_dir / "markets_prn_hourly.csv"
-    if not prn_path.exists():
+    prn_paths = get_run_csv_paths(run_dir, "markets_prn_hourly.csv")
+    if not prn_paths:
         last_refresh = None
         last_snapshot_date = None
         snapshot_rows_appended = None
@@ -433,7 +448,7 @@ def get_markets_summary(
     if cached:
         return cached
 
-    df = pd.read_csv(prn_path)
+    df, _ = _load_merged_run_csv(run_dir, "markets_prn_hourly.csv")
     if "week_friday" in df.columns:
         df = df[df["week_friday"] == friday]
     if df.empty:
@@ -556,31 +571,35 @@ def _col_flags(df: pd.DataFrame) -> Dict[str, bool]:
 
 
 def _load_series_rows(
-    prn_path: Path,
+    prn_paths: List[Path],
     ticker: str,
     threshold: float,
     week_friday: str,
 ) -> pd.DataFrame:
     rows: List[pd.DataFrame] = []
-    for chunk in pd.read_csv(prn_path, chunksize=100_000):
-        if "ticker" not in chunk.columns or "threshold" not in chunk.columns:
-            continue
-        chunk["ticker"] = chunk["ticker"].astype(str).str.upper()
-        chunk = chunk[chunk["ticker"] == ticker]
-        if chunk.empty:
-            continue
-        chunk["threshold"] = pd.to_numeric(chunk["threshold"], errors="coerce")
-        chunk = chunk[np.isclose(chunk["threshold"], threshold)]
-        if chunk.empty:
-            continue
-        if "week_friday" in chunk.columns:
-            chunk = chunk[chunk["week_friday"] == week_friday]
-        if chunk.empty:
-            continue
-        rows.append(chunk)
+    for prn_path in prn_paths:
+        for chunk in pd.read_csv(prn_path, chunksize=100_000):
+            if "ticker" not in chunk.columns or "threshold" not in chunk.columns:
+                continue
+            chunk["ticker"] = chunk["ticker"].astype(str).str.upper()
+            chunk = chunk[chunk["ticker"] == ticker]
+            if chunk.empty:
+                continue
+            chunk["threshold"] = pd.to_numeric(chunk["threshold"], errors="coerce")
+            chunk = chunk[np.isclose(chunk["threshold"], threshold)]
+            if chunk.empty:
+                continue
+            if "week_friday" in chunk.columns:
+                chunk = chunk[chunk["week_friday"] == week_friday]
+            if chunk.empty:
+                continue
+            rows.append(chunk)
     if not rows:
         return pd.DataFrame()
-    df = pd.concat(rows, ignore_index=True)
+    df = dedupe_merged_dataframe(
+        pd.concat(rows, ignore_index=True, sort=False),
+        "markets_prn_hourly.csv",
+    )
     df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
     df = df.dropna(subset=["timestamp_utc"])
     df = df.sort_values("timestamp_utc")
@@ -594,8 +613,8 @@ def get_markets_series(
     run_id: Optional[str] = None,
 ) -> MarketsSeriesResponse:
     run_dir = _resolve_run_dir(run_id)
-    prn_path = run_dir / "markets_prn_hourly.csv"
-    if not prn_path.exists():
+    prn_paths = get_run_csv_paths(run_dir, "markets_prn_hourly.csv")
+    if not prn_paths:
         raise FileNotFoundError("markets_prn_hourly.csv not found")
 
     week_date = _resolve_week_friday(week_friday)
@@ -608,7 +627,7 @@ def get_markets_series(
     if cached:
         return cached
 
-    df = _load_series_rows(prn_path, ticker, threshold, week_key)
+    df = _load_series_rows(prn_paths, ticker, threshold, week_key)
     if df.empty:
         raise FileNotFoundError("No series rows for the requested ticker/threshold/week")
 
@@ -634,8 +653,8 @@ def get_markets_series_by_ticker(
     run_id: Optional[str] = None,
 ) -> MarketsSeriesByTickerResponse:
     run_dir = _resolve_run_dir(run_id)
-    prn_path = run_dir / "markets_prn_hourly.csv"
-    if not prn_path.exists():
+    prn_paths = get_run_csv_paths(run_dir, "markets_prn_hourly.csv")
+    if not prn_paths:
         raise FileNotFoundError("markets_prn_hourly.csv not found")
 
     week_date = _resolve_week_friday(week_friday)
@@ -648,23 +667,27 @@ def get_markets_series_by_ticker(
         return cached
 
     frames: List[pd.DataFrame] = []
-    for chunk in pd.read_csv(prn_path, chunksize=100_000):
-        if "ticker" not in chunk.columns:
-            continue
-        chunk["ticker"] = chunk["ticker"].astype(str).str.upper()
-        chunk = chunk[chunk["ticker"] == ticker]
-        if chunk.empty:
-            continue
-        if "week_friday" in chunk.columns:
-            chunk = chunk[chunk["week_friday"] == week_key]
-        if chunk.empty:
-            continue
-        frames.append(chunk)
+    for prn_path in prn_paths:
+        for chunk in pd.read_csv(prn_path, chunksize=100_000):
+            if "ticker" not in chunk.columns:
+                continue
+            chunk["ticker"] = chunk["ticker"].astype(str).str.upper()
+            chunk = chunk[chunk["ticker"] == ticker]
+            if chunk.empty:
+                continue
+            if "week_friday" in chunk.columns:
+                chunk = chunk[chunk["week_friday"] == week_key]
+            if chunk.empty:
+                continue
+            frames.append(chunk)
 
     if not frames:
         raise FileNotFoundError("No series rows for the requested ticker/week")
 
-    df = pd.concat(frames, ignore_index=True)
+    df = dedupe_merged_dataframe(
+        pd.concat(frames, ignore_index=True, sort=False),
+        "markets_prn_hourly.csv",
+    )
     df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
     df = df.dropna(subset=["timestamp_utc"])
 

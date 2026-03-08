@@ -45,6 +45,8 @@ const MAX_RANGE_DAYS = 5;
 const DEFAULT_TIMEZONE = "America/New_York";
 const SYNTH_BIDASK_SPREAD = 0.02;
 const REQUIRED_PRN_DTES = [1, 2, 3, 4];
+const GAP_BREAK_MS = 4 * 3600_000; // break chart line when gap > 4 hours
+const SPARSE_DATA_THRESHOLD = 0.3; // warn if points < 30% of expected hourly count
 
 // SVG chart geometry (viewBox units) — matching MarketsPage
 const W = 800;
@@ -339,9 +341,29 @@ function buildPath(
   });
   if (filtered.length < 2) return "";
   return filtered
+    .map((p, i) => {
+      const cmd =
+        i === 0
+          ? "M"
+          : p.timeMs - filtered[i - 1].timeMs > GAP_BREAK_MS
+            ? "M"
+            : "L";
+      return `${cmd}${scaleX(p.timeMs).toFixed(1)},${scaleY(accessor(p) as number).toFixed(1)}`;
+    })
+    .join(" ");
+}
+
+function buildPrnDotsPath(
+  dots: PrnChartPoint[],
+  scaleX: (t: number) => number,
+  scaleY: (v: number) => number,
+): string {
+  if (dots.length < 2) return "";
+  const sorted = [...dots].sort((a, b) => a.timeMs - b.timeMs);
+  return sorted
     .map(
       (p, i) =>
-        `${i === 0 ? "M" : "L"}${scaleX(p.timeMs).toFixed(1)},${scaleY(accessor(p) as number).toFixed(1)}`,
+        `${i === 0 ? "M" : "L"}${scaleX(p.timeMs).toFixed(1)},${scaleY(p.price).toFixed(1)}`,
     )
     .join(" ");
 }
@@ -427,6 +449,7 @@ function BacktestChart({
   const bidPath = hasTime ? buildPath(filteredPoints, (p) => p.polymarketBid, xScale, yScale) : "";
   const askPath = hasTime ? buildPath(filteredPoints, (p) => p.polymarketAsk, xScale, yScale) : "";
   const prnPath = hasTime ? buildPath(filteredPoints, (p) => p.prn, xScale, yScale) : "";
+  const prnDotsPath = hasTime ? buildPrnDotsPath(filteredDots, xScale, yScale) : "";
 
   const xTicks = useMemo(() => {
     if (!hasTime) return [];
@@ -503,13 +526,14 @@ function BacktestChart({
         {bidPath && <path d={bidPath} className="chart-line chart-line-bid" />}
         {askPath && <path d={askPath} className="chart-line chart-line-ask" />}
         {prnPath && <path d={prnPath} className="chart-line chart-line-prn" />}
+        {prnDotsPath && <path d={prnDotsPath} className="chart-line chart-line-prn-dots" />}
 
         {filteredDots.map((p, i) => (
           <g key={`prn-dot-${i}`}>
             <circle
               cx={xScale(p.timeMs)}
               cy={yScale(p.price)}
-              r={5}
+              r={3}
               className="chart-prn-dot"
             />
             <title>
@@ -589,6 +613,14 @@ function StrikeCard({
   const hasPrnLine = chartPoints.some((p) => p.prn !== null && p.prn !== undefined);
   const hasPrnDots = (prnPoints?.length ?? 0) > 0;
   const pointsCount = marketsSeries ? marketsSeries.points.length : fallbackPoints.length;
+
+  const isSparseData = useMemo(() => {
+    if (!xRange) return false;
+    const rangeDays = (xRange.max - xRange.min) / (1000 * 60 * 60 * 24);
+    const expectedHourly = Math.max(1, Math.floor(rangeDays * 24));
+    return pointsCount < expectedHourly * SPARSE_DATA_THRESHOLD;
+  }, [xRange, pointsCount]);
+
   const overlaySource = prnSourceLabel
     ? prnSourceLabel.replace(/^pRN source:\s*/i, "")
     : "overlay";
@@ -640,6 +672,9 @@ function StrikeCard({
           )}
           {prnSourceChip && (
             <span className="chip">{prnSourceChip}</span>
+          )}
+          {isSparseData && (
+            <span className="chip chip-warn">Sparse data</span>
           )}
         </div>
         <div className="mdc-footer-meta">
@@ -708,6 +743,7 @@ export default function BacktestsPage() {
   // Run selection
   const [barRuns, setBarRuns] = useState<BarRun[]>([]);
   const [barRunsStatus, setBarRunsStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [barRunsError, setBarRunsError] = useState<string | null>(null);
   const [selectedBarRun, setSelectedBarRun] = useState<string>("");
 
   // Result
@@ -778,10 +814,12 @@ export default function BacktestsPage() {
     };
 
     setBarRunsStatus("loading");
+    setBarRunsError(null);
     listBarRuns()
       .then((payload) => {
         setBarRuns(payload.runs);
         setBarRunsStatus("ready");
+        setBarRunsError(null);
 
         if (payload.runs.length === 0) {
           resetStrikeSelection();
@@ -813,6 +851,11 @@ export default function BacktestsPage() {
         console.error("Failed to load bar runs:", err);
         setBarRuns([]);
         setBarRunsStatus("error");
+        setBarRunsError(
+          err instanceof Error
+            ? `Failed to load bar runs. ${err.message}`
+            : "Failed to load bar runs. Check the backend connection.",
+        );
         setFallbackDates();
       });
   }, [resetStrikeSelection]);
@@ -1082,7 +1125,12 @@ export default function BacktestsPage() {
           maxPointsPerStrike: 500,
           viewMode: "full_history",
         }),
-        getPrnOverlay({ ticker: selectedTicker, timeMin, timeMax }).catch((err) => {
+        getPrnOverlay({
+          ticker: selectedTicker,
+          runId: selectedBarRun || undefined,
+          timeMin,
+          timeMax,
+        }).catch((err) => {
           console.warn("[BacktestsPage] pRN overlay fetch failed (non-fatal):", err);
           return null;
         }),
@@ -1401,6 +1449,9 @@ export default function BacktestsPage() {
                 ))}
               </select>
             </div>
+            {barRunsError && (
+              <div className="error-banner">{barRunsError}</div>
+            )}
             {tradingWeeksError && (
               <div className="error-banner">{tradingWeeksError}</div>
             )}
@@ -1500,8 +1551,40 @@ export default function BacktestsPage() {
           return "pRN source: overlay";
         })();
 
+        const qualityFlags = (() => {
+          const flags: string[] = [];
+          const meta = result.metadata;
+          if (meta.max_stale_hours != null && meta.max_stale_hours > 8) {
+            flags.push(`Stale price run: ${meta.max_stale_hours.toFixed(1)}h max`);
+          }
+          if (meta.gap_count != null && meta.gap_count > 3) {
+            flags.push(`Data gaps: ${meta.gap_count} (>4h each)`);
+          }
+          if (meta.stale_run_count != null && meta.stale_run_count > 50) {
+            flags.push(`Stale runs: ${meta.stale_run_count}`);
+          }
+          if (meta.nan_dropped != null && meta.nan_dropped > 0) {
+            flags.push(`NaN dropped: ${meta.nan_dropped}`);
+          }
+          return flags;
+        })();
+
+        if (qualityFlags.length > 0) {
+          console.warn(
+            `[BacktestsPage] Data quality flags for ${result.ticker}:`,
+            qualityFlags,
+            result.metadata,
+          );
+        }
+
         return (
         <div className="backtests-results">
+          {qualityFlags.length > 0 && (
+            <div className="quality-warning-banner">
+              <strong>Data quality warnings:</strong>{" "}
+              {qualityFlags.join(" · ")}
+            </div>
+          )}
           <div className="history-meta">
             <span className="meta-pill">Ticker: {result.ticker}</span>
             <span className="meta-pill">Strikes: {result.strikes.length}</span>

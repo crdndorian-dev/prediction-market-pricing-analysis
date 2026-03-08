@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+import { apiFetch } from "./http";
 
 export type MarketsProgress = {
   stage?: string | null;
@@ -104,7 +104,7 @@ async function handleResponse(response: Response) {
 export async function startMarketsRefresh(
   payload: MarketsRefreshRequest,
 ): Promise<MarketsJobStatus> {
-  const response = await fetch(`${API_BASE}/markets/refresh`, {
+  const response = await apiFetch("/markets/refresh", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -113,7 +113,7 @@ export async function startMarketsRefresh(
 }
 
 export async function getMarketsJob(jobId: string): Promise<MarketsJobStatus> {
-  const response = await fetch(`${API_BASE}/markets/jobs/${jobId}`);
+  const response = await apiFetch(`/markets/jobs/${jobId}`);
   return handleResponse(response);
 }
 
@@ -124,7 +124,7 @@ export async function getMarketsSummary(params: {
   const sp = new URLSearchParams();
   if (params.weekFriday) sp.set("week_friday", params.weekFriday);
   if (params.runId) sp.set("run_id", params.runId);
-  const response = await fetch(`${API_BASE}/markets/summary?${sp.toString()}`);
+  const response = await apiFetch(`/markets/summary?${sp.toString()}`);
   return handleResponse(response);
 }
 
@@ -139,7 +139,7 @@ export async function getMarketsSeries(params: {
   sp.set("threshold", params.threshold.toString());
   if (params.weekFriday) sp.set("week_friday", params.weekFriday);
   if (params.runId) sp.set("run_id", params.runId);
-  const response = await fetch(`${API_BASE}/markets/series?${sp.toString()}`);
+  const response = await apiFetch(`/markets/series?${sp.toString()}`);
   return handleResponse(response);
 }
 
@@ -152,6 +152,6 @@ export async function getMarketsSeriesByTicker(params: {
   sp.set("ticker", params.ticker);
   if (params.weekFriday) sp.set("week_friday", params.weekFriday);
   if (params.runId) sp.set("run_id", params.runId);
-  const response = await fetch(`${API_BASE}/markets/series/by-ticker?${sp.toString()}`);
+  const response = await apiFetch(`/markets/series/by-ticker?${sp.toString()}`);
   return handleResponse(response);
 }

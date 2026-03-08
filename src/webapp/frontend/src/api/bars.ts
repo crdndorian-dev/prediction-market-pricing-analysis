@@ -2,7 +2,7 @@
  * API client for bar history data
  */
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+import { apiFetch } from "./http";
 
 export type ViewMode = "decision_time" | "full_history";
 
@@ -80,7 +80,7 @@ export async function getBars(params: GetBarsParams): Promise<BarsResponse> {
   if (params.maxPoints) searchParams.set("max_points", params.maxPoints.toString());
   if (params.viewMode) searchParams.set("view_mode", params.viewMode);
 
-  const response = await fetch(`${API_BASE}/bars?${searchParams.toString()}`);
+  const response = await apiFetch(`/bars?${searchParams.toString()}`);
 
   if (!response.ok) {
     const error = await response.text();
@@ -141,7 +141,7 @@ export async function getBarsByStrike(
     sp.set("max_points_per_strike", params.maxPointsPerStrike.toString());
   if (params.viewMode) sp.set("view_mode", params.viewMode);
 
-  const response = await fetch(`${API_BASE}/bars/by-strike?${sp.toString()}`);
+  const response = await apiFetch(`/bars/by-strike?${sp.toString()}`);
   if (!response.ok) {
     const text = await response.text();
     let detail = text;
@@ -160,7 +160,7 @@ export async function getBarsByStrike(
  * List available pipeline runs with bar history data
  */
 export async function listBarRuns(): Promise<BarsRunListResponse> {
-  const response = await fetch(`${API_BASE}/bars/runs`);
+  const response = await apiFetch("/bars/runs");
 
   if (!response.ok) {
     const error = await response.text();
@@ -180,7 +180,7 @@ export async function listTradingWeeks(
   sp.set("ticker", params.ticker);
   if (params.runId) sp.set("run_id", params.runId);
 
-  const response = await fetch(`${API_BASE}/bars/trading-weeks?${sp.toString()}`);
+  const response = await apiFetch(`/bars/trading-weeks?${sp.toString()}`);
   if (!response.ok) {
     const text = await response.text();
     let detail = text;
@@ -222,6 +222,7 @@ export interface PrnOverlayResponse {
 
 export interface GetPrnOverlayParams {
   ticker: string;
+  runId?: string;
   timeMin?: string;
   timeMax?: string;
 }
@@ -242,10 +243,11 @@ export async function getPrnOverlay(
 ): Promise<PrnOverlayResponse> {
   const sp = new URLSearchParams();
   sp.set("ticker", params.ticker);
+  if (params.runId) sp.set("run_id", params.runId);
   if (params.timeMin) sp.set("time_min", params.timeMin);
   if (params.timeMax) sp.set("time_max", params.timeMax);
 
-  const response = await fetch(`${API_BASE}/bars/prn-overlay?${sp.toString()}`);
+  const response = await apiFetch(`/bars/prn-overlay?${sp.toString()}`);
   if (!response.ok) {
     const text = await response.text();
     let detail = text;
@@ -276,9 +278,7 @@ export async function getPrnOverlayTheta(
   if (params.strikes && params.strikes.length > 0)
     sp.set("strikes", params.strikes.join(","));
 
-  const response = await fetch(
-    `${API_BASE}/bars/prn-overlay/theta?${sp.toString()}`,
-  );
+  const response = await apiFetch(`/bars/prn-overlay/theta?${sp.toString()}`);
   if (!response.ok) {
     const text = await response.text();
     let detail = text;
