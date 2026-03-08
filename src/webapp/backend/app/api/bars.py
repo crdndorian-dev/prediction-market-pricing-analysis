@@ -97,12 +97,13 @@ def get_bars_by_strike_endpoint(
 @router.get("/prn-overlay", response_model=PrnOverlayResponse)
 def get_prn_overlay_endpoint(
     ticker: str = Query(..., description="Ticker symbol (required)"),
+    run_id: Optional[str] = Query(None, description="Pipeline run ID"),
     time_min: Optional[str] = Query(None, description="Min timestamp (ISO 8601)"),
     time_max: Optional[str] = Query(None, description="Max timestamp (ISO 8601)"),
 ) -> PrnOverlayResponse:
     """Get pRN overlay data for charting alongside Polymarket price series."""
     try:
-        return get_prn_overlay(ticker=ticker, time_min=time_min, time_max=time_max)
+        return get_prn_overlay(ticker=ticker, run_id=run_id, time_min=time_min, time_max=time_max)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:

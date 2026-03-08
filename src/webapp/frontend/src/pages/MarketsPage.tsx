@@ -20,6 +20,7 @@ import "./MarketsPage.css";
 
 type ChartPoint = {
   timeMs: number;
+  polymarketMid?: number | null;
   polymarketBid?: number | null;
   polymarketAsk?: number | null;
   prn?: number | null;
@@ -157,8 +158,9 @@ function buildChartPoints(series: MarketsSeriesResponse): ChartPoint[] {
   return series.points
     .map((p) => ({
       timeMs: new Date(p.timestamp_utc).getTime(),
-      polymarketAsk: p.polymarket_ask ?? p.polymarket_buy ?? null,
+      polymarketMid: p.polymarket_mid ?? p.polymarket_buy ?? null,
       polymarketBid: p.polymarket_bid ?? null,
+      polymarketAsk: p.polymarket_ask ?? null,
       prn: p.pRN ?? null,
     }))
     .filter((p) => Number.isFinite(p.timeMs));
@@ -238,10 +240,12 @@ function MarketDetailChart({ series }: { series: MarketsSeriesResponse }) {
   );
   const yScale = useCallback((v: number) => PT + PLOT_H * (1 - v), []);
 
+  const midPath = hasTime ? buildPath(points, (p) => p.polymarketMid, xScale, yScale) : "";
   const bidPath = hasTime ? buildPath(points, (p) => p.polymarketBid, xScale, yScale) : "";
   const askPath = hasTime ? buildPath(points, (p) => p.polymarketAsk, xScale, yScale) : "";
   const prnPath = hasTime ? buildPath(points, (p) => p.prn, xScale, yScale) : "";
 
+  const hasMid = points.some((p) => p.polymarketMid !== null && p.polymarketMid !== undefined);
   const hasBid = points.some((p) => p.polymarketBid !== null && p.polymarketBid !== undefined);
   const hasAsk = points.some((p) => p.polymarketAsk !== null && p.polymarketAsk !== undefined);
   const hasPrn = points.some((p) => p.prn !== null && p.prn !== undefined);
@@ -280,16 +284,22 @@ function MarketDetailChart({ series }: { series: MarketsSeriesResponse }) {
           <span className="mdc-strike">${series.threshold.toFixed(2)}</span>
         </div>
         <div className="mdc-legend">
+          {hasMid && (
+            <span className="mdc-legend-item">
+              <span className="mdc-swatch mdc-swatch-mid" />
+              PM Mid
+            </span>
+          )}
           {hasBid && (
             <span className="mdc-legend-item">
               <span className="mdc-swatch mdc-swatch-bid" />
-              Polymarket Bid
+              PM Bid
             </span>
           )}
           {hasAsk && (
             <span className="mdc-legend-item">
               <span className="mdc-swatch mdc-swatch-ask" />
-              Polymarket Ask
+              PM Ask
             </span>
           )}
           {hasPrn && (
@@ -343,6 +353,7 @@ function MarketDetailChart({ series }: { series: MarketsSeriesResponse }) {
             </g>
           ))}
 
+          {midPath && <path d={midPath} className="chart-line chart-line-mid" />}
           {bidPath && <path d={bidPath} className="chart-line chart-line-bid" />}
           {askPath && <path d={askPath} className="chart-line chart-line-ask" />}
           {prnPath && <path d={prnPath} className="chart-line chart-line-prn" />}
@@ -360,6 +371,12 @@ function MarketDetailChart({ series }: { series: MarketsSeriesResponse }) {
           <div className="chart-tooltip">
             <div className="chart-tooltip-time">{formatUtcLabel(hovered.timeMs)}</div>
             <div className="chart-tooltip-sub">{formatLocalLabel(hovered.timeMs)} ET</div>
+            {hasMid && (
+              <div className="chart-tooltip-row">
+                <span className="tt-label tt-mid">PM Mid</span>
+                <span>{formatPrice(hovered.polymarketMid)}</span>
+              </div>
+            )}
             {hasBid && (
               <div className="chart-tooltip-row">
                 <span className="tt-label tt-bid">PM Bid</span>
@@ -382,7 +399,7 @@ function MarketDetailChart({ series }: { series: MarketsSeriesResponse }) {
 
       <div className="mdc-footer">
         <div className="mdc-footer-chips">
-          {!hasBid && !hasAsk && (
+          {!hasMid && !hasBid && !hasAsk && (
             <span className="chip chip-warn">No Polymarket data</span>
           )}
           {!hasPrn && <span className="chip chip-warn">No pRN data</span>}

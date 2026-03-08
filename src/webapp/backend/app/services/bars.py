@@ -1,11 +1,9 @@
 """Service layer for bar history data loading, caching, and processing."""
 
-import csv
 import hashlib
 import json
 import logging
 import math
-import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -17,6 +15,12 @@ from app.models.bars import (
     ByStrikeRequest,
     ByStrikeResponse,
     StrikeSeries,
+)
+from app.services.run_csv_files import (
+    combined_run_csv_size,
+    get_run_csv_paths,
+    has_run_csv,
+    iter_deduped_csv_rows,
 )
 
 
@@ -78,8 +82,8 @@ def _read_latest_run_id() -> Optional[str]:
         return None
 
 
-def _find_price_history_csv(run_id: Optional[str]) -> Path:
-    """Find price_history.csv file for the given run_id or the active/latest run."""
+def _resolve_run_dir(run_id: Optional[str]) -> Path:
+    """Resolve a weekly-history run directory with accessible price history."""
     base_dir = WEEKLY_HISTORY_RUNS_DIR
 
     if not base_dir.exists():
@@ -94,7 +98,7 @@ def _find_price_history_csv(run_id: Optional[str]) -> Path:
         latest_id = _read_latest_run_id()
         if latest_id:
             candidate = base_dir / latest_id
-            if candidate.exists() and (candidate / "price_history.csv").exists():
+            if candidate.exists() and has_run_csv(candidate, "price_history.csv"):
                 run_dir = candidate
             else:
                 # Pointer is stale; fall back
@@ -102,16 +106,18 @@ def _find_price_history_csv(run_id: Optional[str]) -> Path:
         else:
             run_dir = _fallback_latest_run_dir(base_dir)
 
-    csv_path = run_dir / "price_history.csv"
-    if not csv_path.exists():
+    if not has_run_csv(run_dir, "price_history.csv"):
         raise FileNotFoundError(f"price_history.csv not found in {run_dir.name}")
 
-    return csv_path
+    return run_dir
 
 
 def _fallback_latest_run_dir(base_dir: Path) -> Path:
     """Find the most recent run directory by name (backward-compat fallback)."""
-    run_dirs = sorted([d for d in base_dir.iterdir() if d.is_dir()], reverse=True)
+    run_dirs = sorted(
+        [d for d in base_dir.iterdir() if d.is_dir() and has_run_csv(d, "price_history.csv")],
+        reverse=True,
+    )
     if not run_dirs:
         raise FileNotFoundError("No pipeline runs found")
     return run_dirs[0]
@@ -127,7 +133,7 @@ def _parse_timestamp(ts_str: str) -> int:
 
 
 def _load_and_filter_bars(
-    csv_path: Path,
+    csv_paths: List[Path],
     market_id: Optional[str],
     ticker: Optional[str],
     time_min: Optional[str],
@@ -143,64 +149,62 @@ def _load_and_filter_bars(
 
     bars: List[BarDataPoint] = []
     metadata = {
-        "csv_path": str(csv_path),
+        "csv_path": str(csv_paths[0]),
+        "csv_paths": [str(path) for path in csv_paths],
         "rows_scanned": 0,
         "rows_filtered": 0,
     }
 
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
+    for row in iter_deduped_csv_rows(csv_paths, "price_history.csv"):
+        metadata["rows_scanned"] += 1
 
-        for row in reader:
-            metadata["rows_scanned"] += 1
+        # Filter by market_id if specified
+        if market_id and row.get("market_id") != market_id:
+            continue
 
-            # Filter by market_id if specified
-            if market_id and row.get("market_id") != market_id:
-                continue
+        # Filter by ticker if specified
+        if ticker and row.get("ticker") != ticker:
+            continue
 
-            # Filter by ticker if specified
-            if ticker and row.get("ticker") != ticker:
-                continue
+        # Parse timestamp
+        ts_str = row.get("timestamp_utc", "")
+        if not ts_str:
+            continue
 
-            # Parse timestamp
-            ts_str = row.get("timestamp_utc", "")
-            if not ts_str:
-                continue
+        try:
+            ts_ms = _parse_timestamp(ts_str)
+        except ValueError:
+            continue
 
-            try:
-                ts_ms = _parse_timestamp(ts_str)
-            except ValueError:
-                continue
+        # Filter by time range
+        if time_min_ms and ts_ms < time_min_ms:
+            continue
 
-            # Filter by time range
-            if time_min_ms and ts_ms < time_min_ms:
-                continue
+        # TIME-SAFETY: In decision_time mode, exclude all bars after time_max
+        if view_mode == "decision_time" and time_max_ms and ts_ms > time_max_ms:
+            continue
 
-            # TIME-SAFETY: In decision_time mode, exclude all bars after time_max
-            if view_mode == "decision_time" and time_max_ms and ts_ms > time_max_ms:
-                continue
+        # In full_history mode, time_max is just a display hint (not enforced)
 
-            # In full_history mode, time_max is just a display hint (not enforced)
+        # Extract price (use 'price' column if available, else 'close')
+        price_str = row.get("price") or row.get("close", "")
+        try:
+            price = float(price_str)
+        except (ValueError, TypeError):
+            continue
 
-            # Extract price (use 'price' column if available, else 'close')
-            price_str = row.get("price") or row.get("close", "")
-            try:
-                price = float(price_str)
-            except (ValueError, TypeError):
-                continue
-
-            # Build bar data point
-            bar = BarDataPoint(
-                timestamp=ts_str,
-                timestamp_ms=ts_ms,
-                price=price,
-                open=float(row["open"]) if row.get("open") else None,
-                high=float(row["high"]) if row.get("high") else None,
-                low=float(row["low"]) if row.get("low") else None,
-                close=float(row["close"]) if row.get("close") else None,
-                volume=float(row["volume"]) if row.get("volume") else None,
-            )
-            bars.append(bar)
+        # Build bar data point
+        bar = BarDataPoint(
+            timestamp=ts_str,
+            timestamp_ms=ts_ms,
+            price=price,
+            open=float(row["open"]) if row.get("open") else None,
+            high=float(row["high"]) if row.get("high") else None,
+            low=float(row["low"]) if row.get("low") else None,
+            close=float(row["close"]) if row.get("close") else None,
+            volume=float(row["volume"]) if row.get("volume") else None,
+        )
+        bars.append(bar)
 
     metadata["rows_filtered"] = len(bars)
 
@@ -269,12 +273,13 @@ def get_bars(request: BarsRequest) -> BarsResponse:
         return cached
 
     # Find CSV file
-    csv_path = _find_price_history_csv(request.run_id)
-    run_id = csv_path.parent.name
+    run_dir = _resolve_run_dir(request.run_id)
+    csv_paths = get_run_csv_paths(run_dir, "price_history.csv")
+    run_id = run_dir.name
 
     # Load and filter bars
     bars, metadata = _load_and_filter_bars(
-        csv_path,
+        csv_paths,
         request.market_id,
         request.ticker,
         request.time_min,
@@ -310,20 +315,18 @@ def get_bars(request: BarsRequest) -> BarsResponse:
     return response
 
 
-def _load_event_slugs(csv_path: Path) -> Dict[str, str]:
-    """Load market_id -> event_slug mapping from weekly_markets.csv in the same run dir."""
-    weekly_markets_path = csv_path.parent / "weekly_markets.csv"
+def _load_event_slugs(run_dir: Path) -> Dict[str, str]:
+    """Load market_id -> event_slug mapping from weekly_markets sources in the run dir."""
+    weekly_markets_paths = get_run_csv_paths(run_dir, "weekly_markets.csv")
     mapping: Dict[str, str] = {}
-    if not weekly_markets_path.exists():
+    if not weekly_markets_paths:
         return mapping
     try:
-        with open(weekly_markets_path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                mid = row.get("market_id", "").strip()
-                slug = row.get("event_slug", "").strip()
-                if mid and slug:
-                    mapping[mid] = slug
+        for row in iter_deduped_csv_rows(weekly_markets_paths, "weekly_markets.csv"):
+            mid = row.get("market_id", "").strip()
+            slug = row.get("event_slug", "").strip()
+            if mid and slug and mid not in mapping:
+                mapping[mid] = slug
     except Exception:
         pass
     return mapping
@@ -336,9 +339,10 @@ def get_bars_by_strike(request: ByStrikeRequest) -> ByStrikeResponse:
     """
     log = logging.getLogger("bars.by_strike")
 
-    csv_path = _find_price_history_csv(request.run_id)
-    run_id = csv_path.parent.name
-    event_slug_map = _load_event_slugs(csv_path)
+    run_dir = _resolve_run_dir(request.run_id)
+    csv_paths = get_run_csv_paths(run_dir, "price_history.csv")
+    run_id = run_dir.name
+    event_slug_map = _load_event_slugs(run_dir)
 
     time_min_ms = _parse_timestamp(request.time_min) if request.time_min else None
     time_max_ms = _parse_timestamp(request.time_max) if request.time_max else None
@@ -349,66 +353,87 @@ def get_bars_by_strike(request: ByStrikeRequest) -> ByStrikeResponse:
     rows_matched = 0
     nan_dropped = 0
 
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            rows_scanned += 1
+    for row in iter_deduped_csv_rows(csv_paths, "price_history.csv"):
+        rows_scanned += 1
 
-            if row.get("ticker") != request.ticker:
-                continue
-            if row.get("token_role", "yes") != request.token_role:
-                continue
+        if row.get("ticker") != request.ticker:
+            continue
+        if row.get("token_role", "yes") != request.token_role:
+            continue
 
-            ts_str = row.get("timestamp_utc", "")
-            if not ts_str:
-                continue
-            try:
-                ts_ms = _parse_timestamp(ts_str)
-            except ValueError:
-                continue
+        ts_str = row.get("timestamp_utc", "")
+        if not ts_str:
+            continue
+        try:
+            ts_ms = _parse_timestamp(ts_str)
+        except ValueError:
+            continue
 
-            if time_min_ms and ts_ms < time_min_ms:
-                continue
-            if time_max_ms and ts_ms > time_max_ms:
-                continue
+        if time_min_ms and ts_ms < time_min_ms:
+            continue
+        if time_max_ms and ts_ms > time_max_ms:
+            continue
 
-            price_str = row.get("price") or row.get("close", "")
-            try:
-                price = float(price_str)
-            except (ValueError, TypeError):
-                nan_dropped += 1
-                continue
+        price_str = row.get("price") or row.get("close", "")
+        try:
+            price = float(price_str)
+        except (ValueError, TypeError):
+            nan_dropped += 1
+            continue
 
-            if not math.isfinite(price):
-                nan_dropped += 1
-                continue
+        if not math.isfinite(price):
+            nan_dropped += 1
+            continue
 
-            strike_str = row.get("threshold", "")
-            try:
-                strike = float(strike_str)
-            except (ValueError, TypeError):
-                nan_dropped += 1
-                continue
-            if not math.isfinite(strike):
-                nan_dropped += 1
-                continue
+        strike_str = row.get("threshold", "")
+        try:
+            strike = float(strike_str)
+        except (ValueError, TypeError):
+            nan_dropped += 1
+            continue
+        if not math.isfinite(strike):
+            nan_dropped += 1
+            continue
 
-            bar = BarDataPoint(
-                timestamp=ts_str,
-                timestamp_ms=ts_ms,
-                price=price,
-            )
-            market_id = row.get("market_id")
-            groups.setdefault((strike, market_id), []).append(bar)
-            rows_matched += 1
+        bar = BarDataPoint(
+            timestamp=ts_str,
+            timestamp_ms=ts_ms,
+            price=price,
+        )
+        market_id = row.get("market_id")
+        groups.setdefault((strike, market_id), []).append(bar)
+        rows_matched += 1
 
     # Build per-strike series, sorted by strike ascending
     strikes_list: List[StrikeSeries] = []
+    total_stale_runs = 0
+    max_stale_hours_all = 0.0
+    total_gaps = 0
+
     for strike, market_id in sorted(groups.keys(), key=lambda k: (k[0], k[1] or "")):
         all_bars = groups[(strike, market_id)]
         # Sort bars by timestamp
         all_bars.sort(key=lambda x: x.timestamp_ms)
         total = len(all_bars)
+
+        # Compute quality metrics before downsampling
+        stale_runs = 0
+        max_stale_ms = 0
+        gap_count = 0
+        gap_threshold_ms = 4 * 3600_000  # 4 hours
+
+        for idx in range(1, len(all_bars)):
+            dt = all_bars[idx].timestamp_ms - all_bars[idx - 1].timestamp_ms
+            if dt > gap_threshold_ms:
+                gap_count += 1
+            if all_bars[idx].price == all_bars[idx - 1].price:
+                stale_runs += 1
+                max_stale_ms = max(max_stale_ms, dt)
+
+        total_stale_runs += stale_runs
+        max_stale_hours_all = max(max_stale_hours_all, max_stale_ms / 3600_000)
+        total_gaps += gap_count
+
         # Downsample per strike
         if total > request.max_points_per_strike:
             all_bars = _downsample_bars(all_bars, request.max_points_per_strike)
@@ -436,11 +461,15 @@ def get_bars_by_strike(request: ByStrikeRequest) -> ByStrikeResponse:
         view_mode=request.view_mode,
         strikes=strikes_list,
         metadata={
-            "csv_path": str(csv_path),
+            "csv_path": str(csv_paths[0]),
+            "csv_paths": [str(path) for path in csv_paths],
             "rows_scanned": rows_scanned,
             "rows_matched": rows_matched,
             "nan_dropped": nan_dropped,
             "strikes_count": len(strikes_list),
+            "stale_run_count": total_stale_runs,
+            "max_stale_hours": round(max_stale_hours_all, 2),
+            "gap_count": total_gaps,
         },
     )
 
@@ -458,16 +487,16 @@ def list_bar_runs() -> dict:
         if not run_dir.is_dir():
             continue
 
-        price_csv = run_dir / "price_history.csv"
+        price_csv_paths = get_run_csv_paths(run_dir, "price_history.csv")
         manifest_json = run_dir / "manifest.json"
 
-        if not price_csv.exists():
+        if not price_csv_paths:
             continue
 
         run_info = {
             "run_id": run_dir.name,
-            "has_price_history": price_csv.exists(),
-            "price_history_size": price_csv.stat().st_size if price_csv.exists() else 0,
+            "has_price_history": True,
+            "price_history_size": combined_run_csv_size(run_dir, "price_history.csv"),
             "has_manifest": manifest_json.exists(),
             "is_active": run_dir.name == active_run_id,
         }
@@ -488,8 +517,9 @@ def list_bar_runs() -> dict:
 
 def list_trading_weeks(ticker: str, run_id: Optional[str]) -> dict:
     """List available trading weeks (Mon-Fri) for a ticker."""
-    csv_path = _find_price_history_csv(run_id)
-    resolved_run_id = csv_path.parent.name
+    run_dir = _resolve_run_dir(run_id)
+    csv_paths = get_run_csv_paths(run_dir, "price_history.csv")
+    resolved_run_id = run_dir.name
 
     cache_key = f"{resolved_run_id}|{ticker}"
     cached = _TRADING_WEEKS_CACHE.get(cache_key)
@@ -504,24 +534,22 @@ def list_trading_weeks(ticker: str, run_id: Optional[str]) -> dict:
     rows_scanned = 0
     rows_matched = 0
 
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            rows_scanned += 1
-            if row.get("ticker") != ticker:
-                continue
+    for row in iter_deduped_csv_rows(csv_paths, "price_history.csv"):
+        rows_scanned += 1
+        if row.get("ticker") != ticker:
+            continue
 
-            ts_str = row.get("timestamp_utc", "")
-            if not ts_str:
-                continue
-            try:
-                dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-            except Exception:
-                continue
+        ts_str = row.get("timestamp_utc", "")
+        if not ts_str:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        except Exception:
+            continue
 
-            week_start = (dt.date() - timedelta(days=dt.weekday()))
-            weeks.add(week_start)
-            rows_matched += 1
+        week_start = (dt.date() - timedelta(days=dt.weekday()))
+        weeks.add(week_start)
+        rows_matched += 1
 
     weeks_sorted = sorted(weeks)
     payload = {
@@ -535,7 +563,8 @@ def list_trading_weeks(ticker: str, run_id: Optional[str]) -> dict:
             for week in weeks_sorted
         ],
         "metadata": {
-            "csv_path": str(csv_path),
+            "csv_path": str(csv_paths[0]),
+            "csv_paths": [str(path) for path in csv_paths],
             "rows_scanned": rows_scanned,
             "rows_matched": rows_matched,
             "weeks_count": len(weeks_sorted),

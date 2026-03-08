@@ -82,8 +82,9 @@ class MarketsSummaryResponse(BaseModel):
 class MarketsSeriesPoint(BaseModel):
     timestamp_utc: str
     polymarket_buy: Optional[float] = None   # kept for backward compat
-    polymarket_bid: Optional[float] = None   # best bid (sell YES)
-    polymarket_ask: Optional[float] = None   # best ask (buy YES); falls back to polymarket_buy
+    polymarket_mid: Optional[float] = None   # CLOB price (historical) or real (bid+ask)/2
+    polymarket_bid: Optional[float] = None   # real best bid when available
+    polymarket_ask: Optional[float] = None   # real best ask when available
     pRN: Optional[float] = None
     spot: Optional[float] = None
 

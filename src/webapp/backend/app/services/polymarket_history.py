@@ -28,10 +28,13 @@ from app.services.process_runtime import (
     spawn_managed_process,
     terminate_managed_process,
 )
+from app.services.polymarket_run_prn import find_run_local_prn_training_file
+from app.services.run_csv_files import PRESERVED_RUNTIME_CSVS
 
 BASE_DIR = Path(__file__).resolve().parents[5]
 SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "02-polymarket-weekly-history-v1.0.py"
 FEATURES_SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "02-polymarket-build-features-v1.0.py"
+RUN_LOCAL_PRN_REFRESH_SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "08-polymarket-run-prn-refresh-v1.0.py"
 DEFAULT_OUT_DIR = BASE_DIR / "src" / "data" / "raw" / "polymarket" / "weekly_history"
 RUNS_DIR = DEFAULT_OUT_DIR / "runs"
 DEFAULT_EVENT_URLS_FILE = BASE_DIR / "config" / "polymarket_event_urls.csv"
@@ -598,6 +601,8 @@ def _rename_run_csv_files(run_dir: Path) -> None:
     for item in sorted(run_dir.iterdir(), key=lambda path: path.name):
         if not item.is_file() or item.suffix.lower() != ".csv":
             continue
+        if item.name in PRESERVED_RUNTIME_CSVS:
+            continue
         if item.name.startswith(prefix):
             continue
 
@@ -1020,8 +1025,15 @@ def _build_features_command(
     cmd.extend(["--dim-market", str(dim_market_path)])
     cmd.extend(["--out-dir", str(out_dir)])
 
+    prn_path: Optional[Path] = None
     if payload.prn_dataset:
         prn_path = _resolve_project_path(payload.prn_dataset)
+    else:
+        local_prn = find_run_local_prn_training_file(out_dir)
+        if local_prn and local_prn.exists():
+            prn_path = local_prn
+
+    if prn_path is not None and prn_path.exists():
         cmd.extend(["--prn-dataset", str(prn_path)])
 
     if payload.start_date:
@@ -1039,6 +1051,28 @@ def _build_features_command(
     else:
         env["PYTHONPATH"] = root
 
+    return cmd, env
+
+
+def _build_run_prn_refresh_command(
+    payload: PolymarketHistoryRunRequest,
+    run_dir: Path,
+) -> tuple[List[str], Dict[str, str]]:
+    if not RUN_LOCAL_PRN_REFRESH_SCRIPT_PATH.exists():
+        raise RuntimeError(f"Run-local pRN refresh script not found: {RUN_LOCAL_PRN_REFRESH_SCRIPT_PATH}")
+
+    cmd: List[str] = [sys.executable, str(RUN_LOCAL_PRN_REFRESH_SCRIPT_PATH), "--run-id", run_dir.name]
+    if payload.prn_dataset:
+        prn_path = _resolve_project_path(payload.prn_dataset)
+        cmd.extend(["--prn-dataset", str(prn_path)])
+
+    env = {**os.environ}
+    existing = env.get("PYTHONPATH")
+    root = str(BASE_DIR)
+    if existing:
+        env["PYTHONPATH"] = os.pathsep.join([existing, root])
+    else:
+        env["PYTHONPATH"] = root
     return cmd, env
 
 
@@ -1087,13 +1121,26 @@ def run_polymarket_history(
     result = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
     duration_s = round(time.monotonic() - start, 3)
 
+    ok = result.returncode == 0
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
     run_id = _parse_run_id(result.stdout)
     run_dir, files = _collect_run_files(out_dir, run_id)
-    if result.returncode == 0 and run_dir and run_dir.exists():
+    if ok and run_dir and run_dir.exists():
         try:
             _copy_dim_market_to_run(run_dir)
         except Exception:
             pass
+        try:
+            prn_cmd, prn_env = _build_run_prn_refresh_command(payload, run_dir)
+            prn_result = subprocess.run(prn_cmd, capture_output=True, text=True, check=False, env=prn_env)
+            stdout = f"{stdout}\n{prn_result.stdout or ''}".strip()
+            stderr = f"{stderr}\n{prn_result.stderr or ''}".strip()
+            if prn_result.returncode != 0:
+                ok = False
+        except Exception as exc:
+            ok = False
+            stderr = f"{stderr}\n[Run pRN] {exc}".strip()
         try:
             _rename_run_csv_files(run_dir)
         except Exception:
@@ -1101,13 +1148,13 @@ def run_polymarket_history(
         files = _list_run_file_names(run_dir)
 
     return PolymarketHistoryRunResponse(
-        ok=result.returncode == 0,
+        ok=ok,
         run_id=run_id,
         out_dir=str(out_dir.relative_to(BASE_DIR)),
         run_dir=str(run_dir.relative_to(BASE_DIR)) if run_dir else None,
         files=files,
-        stdout=result.stdout,
-        stderr=result.stderr,
+        stdout=stdout,
+        stderr=stderr,
         duration_s=duration_s,
         command=cmd,
     )
@@ -1125,8 +1172,10 @@ class PolymarketHistoryJob:
         self.finished_at: Optional[datetime] = None
         self._thread: Optional[threading.Thread] = None
         self._process: Optional[subprocess.Popen[str]] = None
+        self._prn_process: Optional[subprocess.Popen[str]] = None
         self._features_process: Optional[subprocess.Popen[str]] = None
         self._process_handle: Optional[ManagedProcessHandle] = None
+        self._prn_process_handle: Optional[ManagedProcessHandle] = None
         self._features_process_handle: Optional[ManagedProcessHandle] = None
         self._cancel_requested = False
         self._history_progress = JobProgressTracker()
@@ -1142,6 +1191,7 @@ class PolymarketHistoryJob:
         self._cancel_requested = True
         for proc, handle in (
             (self._process, self._process_handle),
+            (self._prn_process, self._prn_process_handle),
             (self._features_process, self._features_process_handle),
         ):
             if proc and proc.poll() is None and handle is not None:
@@ -1284,6 +1334,70 @@ class PolymarketHistoryJob:
             run_id = _parse_run_id(stdout) or run_id
             run_dir, files = _collect_run_files(out_dir, run_id)
             ok = proc.returncode == 0 and not self._cancel_requested
+
+            if ok and run_dir:
+                self.phase = "prn"
+                stdout_lines.append("\n[pRN] Refreshing exact run-local pRN...\n")
+                snapshot_result(ok=False)
+
+                if self._cancel_requested:
+                    stdout_lines.append("[pRN] Cancel requested before run-local pRN refresh.\n")
+                    ok = False
+                else:
+                    prn_cmd, prn_env = _build_run_prn_refresh_command(self.payload, run_dir)
+                    prn_handle = spawn_managed_process(
+                        prn_cmd,
+                        job_id=self.job_id,
+                        service="polymarket_run_prn",
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        bufsize=1,
+                        env=prn_env,
+                    )
+                    prn_proc = prn_handle.process
+                    if prn_proc is None:
+                        raise RuntimeError("Failed to start run-local pRN refresh process.")
+                    self._prn_process = prn_proc
+                    self._prn_process_handle = prn_handle
+
+                    def read_prn_stdout():
+                        if prn_proc.stdout:
+                            for line in iter(prn_proc.stdout.readline, ''):
+                                if line:
+                                    stdout_lines.append(line)
+                                    snapshot_result(ok=False)
+                            prn_proc.stdout.close()
+
+                    def read_prn_stderr():
+                        if prn_proc.stderr:
+                            for line in iter(prn_proc.stderr.readline, ''):
+                                if line:
+                                    stderr_lines.append(line)
+                                    snapshot_result(ok=False)
+                            prn_proc.stderr.close()
+
+                    prn_stdout_thread = threading.Thread(target=read_prn_stdout, daemon=True)
+                    prn_stderr_thread = threading.Thread(target=read_prn_stderr, daemon=True)
+                    prn_stdout_thread.start()
+                    prn_stderr_thread.start()
+
+                    prn_proc.wait()
+                    prn_stdout_thread.join(timeout=1)
+                    prn_stderr_thread.join(timeout=1)
+
+                    if self._cancel_requested:
+                        stdout_lines.append("\n[pRN] Run-local pRN refresh cancelled.\n")
+                        ok = False
+                    elif prn_proc.returncode != 0:
+                        stdout_lines.append("\n[pRN] Exact run-local pRN refresh failed.\n")
+                        ok = False
+                    else:
+                        stdout_lines.append("\n[pRN] Exact run-local pRN refresh complete.\n")
+                        files = _list_run_file_names(run_dir)
+
+                    self._prn_process = None
+                    self._prn_process_handle = None
 
             if ok and self.payload.build_features and run_dir:
                 self.phase = "features"
@@ -1478,8 +1592,10 @@ class PolymarketHistoryJob:
             self.error = str(exc)
         finally:
             self._process = None
+            self._prn_process = None
             self._features_process = None
             self._process_handle = None
+            self._prn_process_handle = None
             self._features_process_handle = None
             self.finished_at = datetime.utcnow()
 

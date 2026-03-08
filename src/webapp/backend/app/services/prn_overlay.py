@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from app.models.bars import PrnOverlayResponse, PrnPoint, PrnStrikeSeries
+from app.services.polymarket_run_prn import (
+    resolve_polymarket_run_dir,
+    resolve_preferred_prn_dataset_path,
+)
 
 log = logging.getLogger("prn_overlay")
 
@@ -30,6 +34,16 @@ def _find_training_csvs() -> List[Path]:
             if f.name.startswith("training-") and f.name.endswith(".csv"):
                 results.append(f)
     return results
+
+
+def _select_training_csvs(run_id: Optional[str]) -> List[Path]:
+    if not run_id:
+        return _find_training_csvs()
+    run_dir = resolve_polymarket_run_dir(run_id)
+    dataset_path = resolve_preferred_prn_dataset_path(run_dir)
+    if dataset_path and dataset_path.exists():
+        return [dataset_path]
+    return []
 
 
 def _asof_date_to_eod_ms(date_str: str) -> Optional[int]:
@@ -56,6 +70,7 @@ def get_prn_overlay(
     ticker: str,
     time_min: Optional[str] = None,
     time_max: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> PrnOverlayResponse:
     """Load pRN data for a ticker within a date range.
 
@@ -70,10 +85,14 @@ def get_prn_overlay(
     if time_max:
         date_max = time_max[:10]
 
-    csv_files = _find_training_csvs()
+    csv_files = _select_training_csvs(run_id)
     if not csv_files:
-        log.warning("No training CSVs found in %s", OPTION_CHAIN_DIR)
-        return PrnOverlayResponse(ticker=ticker, strikes=[], metadata={"error": "no_training_csvs"})
+        log.warning("No training CSVs found for run_id=%s in %s", run_id, OPTION_CHAIN_DIR)
+        return PrnOverlayResponse(
+            ticker=ticker,
+            strikes=[],
+            metadata={"error": "no_training_csvs", "run_id": run_id},
+        )
 
     # strike -> list of PrnPoint
     groups: Dict[float, List[PrnPoint]] = {}
@@ -156,8 +175,14 @@ def get_prn_overlay(
         ))
 
     log.info(
-        "prn_overlay: ticker=%s date_range=%s..%s scanned=%d matched=%d strikes=%d",
-        ticker, date_min, date_max, rows_scanned, rows_matched, len(strikes_list),
+        "prn_overlay: ticker=%s run_id=%s date_range=%s..%s scanned=%d matched=%d strikes=%d",
+        ticker,
+        run_id,
+        date_min,
+        date_max,
+        rows_scanned,
+        rows_matched,
+        len(strikes_list),
     )
 
     return PrnOverlayResponse(
@@ -168,5 +193,6 @@ def get_prn_overlay(
             "rows_scanned": rows_scanned,
             "rows_matched": rows_matched,
             "strikes_count": len(strikes_list),
+            "run_id": run_id,
         },
     )

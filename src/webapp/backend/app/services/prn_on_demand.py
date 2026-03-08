@@ -1,8 +1,9 @@
 """On-demand pRN computation via Theta Terminal.
 
 Fetches option chains from Theta, computes risk-neutral probabilities using
-Breeden-Litzenberger with relaxed thresholds (suitable for backtest overlay,
-not model training), and returns results in the same format as prn_overlay.py.
+Breeden-Litzenberger with parameters aligned to the option chain training
+dataset (01-option-chain-build-historic-dataset), ensuring consistency for
+calibrated model application.
 
 Disk-cached per (ticker, expiry, asof_date) to avoid redundant Theta calls.
 """
@@ -16,7 +17,7 @@ import socket
 import threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import numpy as np
@@ -29,6 +30,7 @@ log = logging.getLogger("prn_on_demand")
 
 BASE_DIR = Path(__file__).resolve().parents[5]
 CACHE_DIR = BASE_DIR / "src" / "data" / "cache" / "prn_theta"
+DIV_CACHE_DIR = BASE_DIR / "src" / "data" / "cache" / "dividend_yield"
 DEFAULT_THETA_URL = "http://127.0.0.1:25503/v3"
 
 # DTE values we serve (weekly options: Mon=4, Tue=3, Wed=2, Thu=1 for Fri expiry)
@@ -38,19 +40,128 @@ ALLOWED_DTES = {1, 2, 3, 4}
 _theta_semaphore = threading.Semaphore(3)
 
 # ---------------------------------------------------------------------------
-# Relaxed config for overlay quality (vs. training quality)
+# Parameters aligned with option chain training dataset (01-option-chain-*)
 # ---------------------------------------------------------------------------
 RISK_FREE_RATE = 0.03
-MIN_STRIKES_FOR_CURVE = 5       # pipeline uses 10
-MAX_ABS_LOGM = 0.10             # pipeline uses 0.06
-MAX_ABS_LOGM_CAP = 0.15         # pipeline uses 0.10
+MIN_STRIKES_FOR_CURVE = 10
+MAX_ABS_LOGM = 0.06
+MAX_ABS_LOGM_CAP = 0.10
 BAND_WIDEN_STEP = 0.01
-PREFER_BIDASK_MIN = 5           # pipeline uses 10
+PREFER_BIDASK_MIN = 10
 REL_SPREAD_MAX = 2.0
 INTRINSIC_TOL = 0.98
 INSANE_PRICE_MULT = 1.5
+DIVIDEND_YIELD_DEFAULT = 0.0
+DIVIDEND_CACHE_TTL_DAYS = 7
 TIMEOUT_S = 30
 CACHE_TTL_RECENT_HOURS = 6
+
+
+# ---------------------------------------------------------------------------
+# Dividend yield (yfinance with disk cache, mirroring option chain pipeline)
+# ---------------------------------------------------------------------------
+
+_div_yield_mem_cache: Dict[str, Tuple[float, datetime]] = {}
+_div_yield_lock = threading.Lock()
+
+
+def _fetch_dividend_yield(ticker: str, asof: date, lookback_days: int = 365) -> float:
+    """Return annualised dividend yield for *ticker* as of *asof*.
+
+    Tries yfinance trailing dividends over the lookback window, falling back to
+    DIVIDEND_YIELD_DEFAULT.  Results are cached on disk (refreshed every
+    DIVIDEND_CACHE_TTL_DAYS) and in-process memory.
+    """
+    cache_key = f"{ticker.upper()}_{asof.year}"
+
+    with _div_yield_lock:
+        if cache_key in _div_yield_mem_cache:
+            val, ts = _div_yield_mem_cache[cache_key]
+            if (datetime.now(timezone.utc) - ts).total_seconds() < DIVIDEND_CACHE_TTL_DAYS * 86400:
+                return val
+
+    disk_path = DIV_CACHE_DIR / f"{ticker.upper()}_{asof.year}.json"
+    if disk_path.exists():
+        try:
+            blob = json.loads(disk_path.read_text(encoding="utf-8"))
+            cached_at = datetime.fromisoformat(blob["cached_at"])
+            if (datetime.now(timezone.utc) - cached_at).days < DIVIDEND_CACHE_TTL_DAYS:
+                val = float(blob.get("yield", DIVIDEND_YIELD_DEFAULT))
+                with _div_yield_lock:
+                    _div_yield_mem_cache[cache_key] = (val, datetime.now(timezone.utc))
+                return val
+        except Exception:
+            pass
+
+    q = DIVIDEND_YIELD_DEFAULT
+    try:
+        import yfinance as yf  # noqa: delay import – heavy
+
+        tk = yf.Ticker(ticker)
+        divs = tk.dividends
+        if divs is not None and not divs.empty:
+            divs.index = pd.to_datetime(divs.index, utc=True)
+            start_lb = pd.Timestamp(asof - timedelta(days=lookback_days), tz="UTC")
+            end_lb = pd.Timestamp(asof, tz="UTC")
+            window = divs[(divs.index >= start_lb) & (divs.index <= end_lb)]
+            div_sum = float(window.sum()) if not window.empty else 0.0
+            div_annual = div_sum * (365.25 / lookback_days) if lookback_days > 0 else 0.0
+            info = tk.info or {}
+            price = info.get("previousClose") or info.get("regularMarketPrice")
+            if price and float(price) > 0 and div_annual >= 0:
+                q = div_annual / float(price)
+    except Exception as exc:
+        log.debug("yfinance dividend fetch failed for %s: %s", ticker, exc)
+
+    disk_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        disk_path.write_text(json.dumps({
+            "ticker": ticker.upper(),
+            "year": asof.year,
+            "yield": round(q, 8),
+            "cached_at": datetime.now(timezone.utc).isoformat(),
+        }), encoding="utf-8")
+    except Exception:
+        pass
+
+    with _div_yield_lock:
+        _div_yield_mem_cache[cache_key] = (q, datetime.now(timezone.utc))
+    return q
+
+
+# ---------------------------------------------------------------------------
+# Exchange calendar (market holidays)
+# ---------------------------------------------------------------------------
+
+_exchange_cal: Any = None
+_exchange_cal_lock = threading.Lock()
+
+
+def _get_exchange_calendar() -> Any:
+    """Load NYSE exchange calendar (once). Returns None if unavailable."""
+    global _exchange_cal
+    with _exchange_cal_lock:
+        if _exchange_cal is not None:
+            return _exchange_cal
+        try:
+            import exchange_calendars as xcals  # noqa
+            _exchange_cal = xcals.get_calendar("XNYS")
+        except Exception as exc:
+            log.debug("exchange_calendars unavailable, weekday fallback: %s", exc)
+            _exchange_cal = False  # sentinel: attempted but failed
+        return _exchange_cal
+
+
+def _is_trading_day(d: date) -> bool:
+    """Check whether *d* is a valid NYSE trading session."""
+    cal = _get_exchange_calendar()
+    if cal is False or cal is None:
+        return d.weekday() < 5
+    try:
+        ts = pd.Timestamp(d)
+        return cal.is_session(ts)
+    except Exception:
+        return d.weekday() < 5
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +288,7 @@ def _build_call_curve(
     chain: pd.DataFrame,
     spot: float,
     T_years: float,
+    q: float = 0.0,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """Build clean (strike, call_mid) arrays from raw chain. Returns None on failure."""
     if chain is None or chain.empty:
@@ -221,7 +333,7 @@ def _build_call_curve(
     # Intrinsic floor
     T_ref = max(float(T_years), 1e-8)
     discK = use["strike"].astype(float) * np.exp(-RISK_FREE_RATE * T_ref)
-    fwd_disc = float(spot) * np.exp(0.0)  # q=0 simplification for overlay
+    fwd_disc = float(spot) * np.exp(-q * T_ref)
     intrinsic = np.maximum(fwd_disc - discK, 0.0)
     use = use[use["mid"].astype(float) >= INTRINSIC_TOL * intrinsic].copy()
 
@@ -371,11 +483,21 @@ def _cache_write(ticker: str, expiry: date, asof: date, prn_rows: list) -> None:
 # ---------------------------------------------------------------------------
 
 def _trading_dates_in_range(start: date, end: date) -> List[date]:
-    """Generate weekday dates in [start, end]."""
-    dates = []
+    """Generate NYSE trading dates in [start, end], skipping holidays."""
+    cal = _get_exchange_calendar()
+    if cal and cal is not False:
+        try:
+            sessions = cal.sessions_in_range(
+                pd.Timestamp(start), pd.Timestamp(end)
+            )
+            return [s.date() for s in sessions]
+        except Exception:
+            pass
+    # Fallback: weekdays only
+    dates: List[date] = []
     d = start
     while d <= end:
-        if d.weekday() < 5:  # Mon-Fri
+        if d.weekday() < 5:
             dates.append(d)
         d += timedelta(days=1)
     return dates
@@ -487,6 +609,19 @@ def get_prn_on_demand(
             metadata={"error": "no_trading_days", "source": "theta_on_demand"},
         )
 
+    # Detect holidays: weekdays in range that are not trading sessions
+    trading_set = set(trading_days)
+    holidays_in_range: List[str] = []
+    d = date_start
+    while d <= date_end:
+        if d.weekday() < 5 and d not in trading_set:
+            holidays_in_range.append(d.isoformat())
+        d += timedelta(days=1)
+
+    # Dividend yield (cached)
+    q = _fetch_dividend_yield(ticker, date_end)
+    log.debug("Dividend yield for %s: q=%.6f", ticker, q)
+
     session = requests.Session()
 
     # Group trading days by (expiry_friday, dte) and process
@@ -542,7 +677,7 @@ def get_prn_on_demand(
         T_years = max(dte / 365.0, 1e-8)
 
         # Build call curve from full chain
-        k_arr, c_arr = _build_call_curve(chain, spot, T_years)
+        k_arr, c_arr = _build_call_curve(chain, spot, T_years, q=q)
         if k_arr is None or c_arr is None:
             prn_failures += 1
             _cache_write(ticker, expiry, asof, [])
@@ -627,5 +762,7 @@ def get_prn_on_demand(
             "prn_failures": prn_failures,
             "strikes_count": len(strikes_list),
             "date_range": f"{date_start}..{date_end}",
+            "dividend_yield": round(q, 8),
+            "holidays_in_range": holidays_in_range,
         },
     )

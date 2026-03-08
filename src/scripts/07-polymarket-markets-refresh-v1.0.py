@@ -29,6 +29,9 @@ if str(REPO_ROOT / "src") not in sys.path:
 SCRIPTS_ROOT = REPO_ROOT / "src" / "scripts"
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
+BACKEND_ROOT = REPO_ROOT / "src" / "webapp" / "backend"
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
 
 from polymarket.prn_loader import (
     PRN_COL_CANDIDATES,
@@ -43,6 +46,11 @@ from polymarket.weekly_history_io import (
     clean_price_history,
     fetch_price_history,
 )
+from app.services.polymarket_run_prn import (
+    find_run_local_prn_training_file,
+    refresh_run_local_prn_dataset,
+)
+from app.services.run_csv_files import dedupe_merged_dataframe, get_run_csv_paths
 
 SCRIPT_VERSION = "1.0.0"
 SCHEMA_VERSION_PRICES = "pm_weekly_prices_v1.0"
@@ -55,6 +63,7 @@ BAR_FREQS = ("1h", "1d")
 
 # Column names (keep in one place to avoid drift).
 COL_PM_BUY = "polymarket_buy"
+COL_PM_MID = "polymarket_mid"
 COL_PM_BID = "polymarket_bid"
 COL_PM_ASK = "polymarket_ask"
 
@@ -70,6 +79,7 @@ PRN_COLUMNS = [
     "event_id",
     "event_endDate",
     COL_PM_BUY,
+    COL_PM_MID,
     COL_PM_BID,
     COL_PM_ASK,
     "spot",
@@ -119,6 +129,7 @@ market_tradeable = SNAPSHOT.market_tradeable
 discover_finishweek_event_slug = SNAPSHOT.discover_finishweek_event_slug
 extract_strike_K_from_question = SNAPSHOT.extract_strike_K_from_question
 _local_date = SNAPSHOT._local_date
+get_prices_bulk = SNAPSHOT.get_prices_bulk
 
 
 # -----------------------------
@@ -138,7 +149,6 @@ class MarketsConfig:
     request_timeout_s: int = 30
     sleep_between_requests_s: float = 0.15
     clob_max_workers: int = 4
-    bidask_spread_bps: float = 200.0
     despike_enabled: bool = False
     despike_jump: float = 0.25
     despike_revert: float = 0.1
@@ -260,10 +270,54 @@ def make_session() -> requests.Session:
         total=5,
         backoff_factor=0.5,
         status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"],
+        allowed_methods=["GET", "POST"],
     )
     session.mount("https://", HTTPAdapter(max_retries=retry))
     return session
+
+
+def fetch_live_bidask(
+    markets_week: pd.DataFrame,
+    session: requests.Session,
+    cfg: "MarketsConfig",
+) -> Dict[str, Dict[str, Optional[float]]]:
+    """Fetch live bid/ask for all YES tokens via CLOB POST /prices.
+
+    Returns {market_id: {"bid": float|None, "ask": float|None, "mid": float|None}}.
+    Gracefully returns empty dict on failure.
+    """
+    snapshot_cfg = SnapshotConfig(request_timeout_s=cfg.request_timeout_s)
+    token_map: Dict[str, str] = {}
+    for _, row in markets_week.iterrows():
+        mid = str(row.get("market_id", ""))
+        tid = str(row.get("yes_token_id", ""))
+        if mid and tid:
+            token_map[tid] = mid
+
+    if not token_map:
+        return {}
+
+    token_ids = list(token_map.keys())
+    try:
+        buy_prices = get_prices_bulk(token_ids, snapshot_cfg, side="BUY", session=session)
+        sell_prices = get_prices_bulk(token_ids, snapshot_cfg, side="SELL", session=session)
+    except Exception as exc:
+        print(f"[Markets] Live bid/ask fetch failed (non-fatal): {exc}", flush=True)
+        return {}
+
+    result: Dict[str, Dict[str, Optional[float]]] = {}
+    for tid, mid in token_map.items():
+        b = buy_prices.get(tid)
+        s = sell_prices.get(tid)
+        vals = [v for v in (b, s) if v is not None]
+        if not vals:
+            continue
+        bid = min(vals) if len(vals) == 2 else None
+        ask = max(vals) if len(vals) == 2 else None
+        mid_price = (bid + ask) / 2.0 if bid is not None and ask is not None else None
+        result[mid] = {"bid": bid, "ask": ask, "mid": mid_price}
+
+    return result
 
 
 def atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -374,16 +428,26 @@ def _resolve_run_dir(run_id: Optional[str]) -> Tuple[Path, Optional[str]]:
     return fallback, warning
 
 
-def _read_weekly_markets(path: Path) -> pd.DataFrame:
-    if not path.exists():
+def _coerce_csv_paths(path_or_paths: Path | Iterable[Path]) -> List[Path]:
+    if isinstance(path_or_paths, Path):
+        return [path_or_paths] if path_or_paths.exists() else []
+    return [Path(path) for path in path_or_paths if Path(path).exists()]
+
+
+def _read_weekly_markets(run_dir: Path) -> pd.DataFrame:
+    paths = get_run_csv_paths(run_dir, "weekly_markets.csv")
+    if not paths:
         return pd.DataFrame()
-    return pd.read_csv(path)
+    frames = [pd.read_csv(path) for path in paths]
+    return dedupe_merged_dataframe(pd.concat(frames, ignore_index=True, sort=False), "weekly_markets.csv")
 
 
-def _read_weekly_events(path: Path) -> pd.DataFrame:
-    if not path.exists():
+def _read_weekly_events(run_dir: Path) -> pd.DataFrame:
+    paths = get_run_csv_paths(run_dir, "weekly_events.csv")
+    if not paths:
         return pd.DataFrame(columns=["event_id", "event_slug", "event_title", "event_endDate"])
-    return pd.read_csv(path)
+    frames = [pd.read_csv(path) for path in paths]
+    return dedupe_merged_dataframe(pd.concat(frames, ignore_index=True, sort=False), "weekly_events.csv")
 
 
 def _build_dim_market(markets: pd.DataFrame) -> pd.DataFrame:
@@ -434,8 +498,8 @@ def _ensure_weekly_markets(
     events_path = run_dir / "weekly_events.csv"
     dim_market_path = run_dir / "dim_market_weekly.csv"
 
-    markets_df = _read_weekly_markets(markets_path)
-    events_df = _read_weekly_events(events_path)
+    markets_df = _read_weekly_markets(run_dir)
+    events_df = _read_weekly_events(run_dir)
 
     week_key = week_friday.isoformat()
     if "ticker" in markets_df.columns:
@@ -597,47 +661,48 @@ def _ensure_weekly_markets(
 
 
 def _scan_last_timestamp(
-    price_history_path: Path,
+    price_history_path: Path | Iterable[Path],
     market_ids: Iterable[str],
     token_role: str = "yes",
 ) -> Dict[str, Optional[datetime]]:
-    if not price_history_path.exists():
+    price_history_paths = _coerce_csv_paths(price_history_path)
+    if not price_history_paths:
         return {mid: None for mid in market_ids}
 
     target = set(market_ids)
     max_map: Dict[str, Optional[datetime]] = {mid: None for mid in target}
 
     try:
-        header = pd.read_csv(price_history_path, nrows=0)
-        cols = set(header.columns)
-    except Exception:
-        cols = set()
-    usecols = [c for c in ["timestamp_utc", "market_id", "token_role"] if c in cols]
-    if not usecols:
-        usecols = None
-
-    try:
-        for chunk in pd.read_csv(price_history_path, usecols=usecols, chunksize=100_000):
-            if "market_id" not in chunk.columns:
-                continue
-            chunk["market_id"] = chunk["market_id"].astype(str)
-            chunk = chunk[chunk["market_id"].isin(target)]
-            if chunk.empty:
-                continue
-            if "token_role" in chunk.columns:
-                chunk["token_role"] = chunk["token_role"].astype(str).str.lower()
-                chunk = chunk[chunk["token_role"] == token_role]
+        for path in price_history_paths:
+            try:
+                header = pd.read_csv(path, nrows=0)
+                cols = set(header.columns)
+            except Exception:
+                cols = set()
+            usecols = [c for c in ["timestamp_utc", "market_id", "token_role"] if c in cols]
+            if not usecols:
+                usecols = None
+            for chunk in pd.read_csv(path, usecols=usecols, chunksize=100_000):
+                if "market_id" not in chunk.columns:
+                    continue
+                chunk["market_id"] = chunk["market_id"].astype(str)
+                chunk = chunk[chunk["market_id"].isin(target)]
                 if chunk.empty:
                     continue
-            ts = pd.to_datetime(chunk["timestamp_utc"], utc=True, errors="coerce")
-            chunk = chunk.assign(timestamp_utc=ts)
-            for market_id, grp in chunk.groupby("market_id"):
-                latest = grp["timestamp_utc"].max()
-                if pd.isna(latest):
-                    continue
-                prev = max_map.get(market_id)
-                if prev is None or latest > prev:
-                    max_map[market_id] = latest.to_pydatetime()
+                if "token_role" in chunk.columns:
+                    chunk["token_role"] = chunk["token_role"].astype(str).str.lower()
+                    chunk = chunk[chunk["token_role"] == token_role]
+                    if chunk.empty:
+                        continue
+                ts = pd.to_datetime(chunk["timestamp_utc"], utc=True, errors="coerce")
+                chunk = chunk.assign(timestamp_utc=ts)
+                for market_id, grp in chunk.groupby("market_id"):
+                    latest = grp["timestamp_utc"].max()
+                    if pd.isna(latest):
+                        continue
+                    prev = max_map.get(market_id)
+                    if prev is None or latest > prev:
+                        max_map[market_id] = latest.to_pydatetime()
     except Exception:
         return {mid: None for mid in market_ids}
 
@@ -645,14 +710,15 @@ def _scan_last_timestamp(
 
 
 def _load_price_history_slice(
-    price_history_path: Path,
+    price_history_path: Path | Iterable[Path],
     market_ids: Iterable[str],
     *,
     token_roles: Optional[Iterable[str]] = None,
     start_dt: Optional[datetime] = None,
     end_dt: Optional[datetime] = None,
 ) -> pd.DataFrame:
-    if not price_history_path.exists():
+    price_history_paths = _coerce_csv_paths(price_history_path)
+    if not price_history_paths:
         return pd.DataFrame()
 
     target = set(str(mid) for mid in market_ids)
@@ -660,41 +726,42 @@ def _load_price_history_slice(
     if token_roles:
         roles = {r.strip().lower() for r in token_roles if r}
 
-    try:
-        header = pd.read_csv(price_history_path, nrows=0)
-        cols = set(header.columns)
-    except Exception:
-        cols = set()
-    base_cols = ["timestamp_utc", "price", "market_id", "token_role", "token_id"]
-    usecols = [c for c in base_cols if c in cols]
-    if not usecols:
-        usecols = None
     frames: List[pd.DataFrame] = []
 
     try:
-        for chunk in pd.read_csv(price_history_path, usecols=usecols, chunksize=200_000):
-            if "market_id" not in chunk.columns:
-                continue
-            chunk["market_id"] = chunk["market_id"].astype(str)
-            chunk = chunk[chunk["market_id"].isin(target)]
-            if chunk.empty:
-                continue
-            if "token_role" in chunk.columns:
-                chunk["token_role"] = chunk["token_role"].astype(str).str.lower()
-            else:
-                chunk["token_role"] = "yes"
-            if roles:
-                chunk = chunk[chunk["token_role"].isin(roles)]
+        for path in price_history_paths:
+            try:
+                header = pd.read_csv(path, nrows=0)
+                cols = set(header.columns)
+            except Exception:
+                cols = set()
+            base_cols = ["timestamp_utc", "price", "market_id", "token_role", "token_id"]
+            usecols = [c for c in base_cols if c in cols]
+            if not usecols:
+                usecols = None
+            for chunk in pd.read_csv(path, usecols=usecols, chunksize=200_000):
+                if "market_id" not in chunk.columns:
+                    continue
+                chunk["market_id"] = chunk["market_id"].astype(str)
+                chunk = chunk[chunk["market_id"].isin(target)]
                 if chunk.empty:
                     continue
-            chunk["timestamp_utc"] = pd.to_datetime(chunk["timestamp_utc"], utc=True, errors="coerce")
-            chunk = chunk.dropna(subset=["timestamp_utc"])
-            if start_dt is not None:
-                chunk = chunk[chunk["timestamp_utc"] >= start_dt]
-            if end_dt is not None:
-                chunk = chunk[chunk["timestamp_utc"] <= end_dt]
-            if not chunk.empty:
-                frames.append(chunk)
+                if "token_role" in chunk.columns:
+                    chunk["token_role"] = chunk["token_role"].astype(str).str.lower()
+                else:
+                    chunk["token_role"] = "yes"
+                if roles:
+                    chunk = chunk[chunk["token_role"].isin(roles)]
+                    if chunk.empty:
+                        continue
+                chunk["timestamp_utc"] = pd.to_datetime(chunk["timestamp_utc"], utc=True, errors="coerce")
+                chunk = chunk.dropna(subset=["timestamp_utc"])
+                if start_dt is not None:
+                    chunk = chunk[chunk["timestamp_utc"] >= start_dt]
+                if end_dt is not None:
+                    chunk = chunk[chunk["timestamp_utc"] <= end_dt]
+                if not chunk.empty:
+                    frames.append(chunk)
     except Exception as exc:
         print(f"[Markets] WARNING failed to load price_history slice: {exc}", flush=True)
         return pd.DataFrame()
@@ -720,8 +787,51 @@ def build_hourly_series(history: pd.DataFrame, hourly_index: pd.DatetimeIndex) -
         on="timestamp_utc",
         direction="backward",
         allow_exact_matches=True,
+        tolerance=pd.Timedelta(hours=4),
     )
     return merged
+
+
+def attach_prn_groupwise(hourly_base: pd.DataFrame, prn_df: pd.DataFrame) -> pd.DataFrame:
+    if hourly_base.empty:
+        return hourly_base
+    if prn_df.empty:
+        result = hourly_base.copy()
+        result["prn_asof_time"] = pd.NaT
+        return result
+
+    group_cols = ["ticker", "threshold", "expiry_date"]
+    prn_groups = {
+        key: grp.sort_values("asof_time").reset_index(drop=True)
+        for key, grp in prn_df.groupby(group_cols, dropna=False, sort=False)
+    }
+
+    merged_parts: List[pd.DataFrame] = []
+    for key, base_part in hourly_base.groupby(group_cols, dropna=False, sort=False):
+        base_part = base_part.sort_values("timestamp_utc").reset_index(drop=True)
+        prn_part = prn_groups.get(key)
+        if prn_part is None or prn_part.empty:
+            empty_part = base_part.copy()
+            empty_part["prn_asof_time"] = pd.NaT
+            merged_parts.append(empty_part)
+            continue
+        merged = pd.merge_asof(
+            base_part,
+            prn_part,
+            left_on="timestamp_utc",
+            right_on="asof_time",
+            direction="backward",
+            allow_exact_matches=True,
+            tolerance=pd.Timedelta(hours=4),
+            suffixes=("", "_prn"),
+        )
+        merged_parts.append(merged.rename(columns={"asof_time": "prn_asof_time"}))
+
+    if not merged_parts:
+        result = hourly_base.copy()
+        result["prn_asof_time"] = pd.NaT
+        return result
+    return pd.concat(merged_parts, ignore_index=True, sort=False)
 
 
 def write_bars_replace(bars: pd.DataFrame, bars_dir: Path, freq: str) -> int:
@@ -790,17 +900,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tickers", type=str, default=None, help="Comma-separated tickers")
     parser.add_argument("--tz", type=str, default=MarketsConfig().tz_name)
     parser.add_argument("--fidelity", type=int, default=MarketsConfig().clob_fidelity_min)
-    parser.add_argument(
-        "--bidask-spread-bps",
-        type=float,
-        default=MarketsConfig().bidask_spread_bps,
-        help="Spread proxy (bps) used to derive polymarket_bid from polymarket_buy.",
-    )
     parser.add_argument("--prn-dataset", type=str, default=None, help="Path to option-chain pRN dataset.")
     parser.add_argument("--prn-asof-tz", type=str, default=MarketsConfig().prn_asof_tz)
     parser.add_argument("--prn-asof-close-time", type=str, default=MarketsConfig().prn_asof_close_time)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force-refresh", action="store_true")
+    parser.add_argument(
+        "--replace-week",
+        action="store_true",
+        help="Replace markets_prn_hourly rows for the selected week without deleting price_history.",
+    )
     return parser.parse_args()
 
 
@@ -810,7 +919,6 @@ def main() -> None:
     cfg = MarketsConfig(
         tz_name=args.tz,
         clob_fidelity_min=int(args.fidelity),
-        bidask_spread_bps=float(args.bidask_spread_bps),
         prn_asof_tz=args.prn_asof_tz,
         prn_asof_close_time=args.prn_asof_close_time,
     )
@@ -873,6 +981,42 @@ def main() -> None:
     else:
         markets_week["event_endDate"] = week_friday.isoformat()
 
+    prn_dataset_path: Optional[Path]
+    if args.dry_run:
+        if args.prn_dataset:
+            prn_dataset_path = Path(args.prn_dataset)
+        else:
+            prn_dataset_path = find_run_local_prn_training_file(run_dir) or find_latest_prn_dataset()
+    else:
+        try:
+            prn_refresh = refresh_run_local_prn_dataset(
+                run_dir,
+                week_fridays={week_friday},
+                explicit_prn_dataset=args.prn_dataset,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Exact run-local pRN refresh failed for {run_id} {week_key}: {exc}") from exc
+        if prn_refresh.missing_pairs_after:
+            sample = ", ".join(
+                f"{ticker}:{week.isoformat()}"
+                for ticker, week in sorted(prn_refresh.missing_pairs_after)[:10]
+            )
+            print(
+                "[Markets] WARNING exact run-local pRN still missing some ticker/week pairs "
+                f"missing_pairs_after={len(prn_refresh.missing_pairs_after)} "
+                f"sample={sample}",
+                flush=True,
+            )
+        prn_dataset_path = prn_refresh.training_path
+        print(
+            "[Markets] Exact run-local pRN ready "
+            f"training={prn_dataset_path} "
+            f"seeded_from_source={prn_refresh.seeded_from_source} "
+            f"missing_before={len(prn_refresh.missing_pairs_before)} "
+            f"markets_missing_before={len(prn_refresh.missing_markets_pairs_before)}",
+            flush=True,
+        )
+
     market_ids = markets_week["market_id"].dropna().astype(str).tolist()
     if not market_ids:
         raise RuntimeError("No weekly markets with market_id to refresh.")
@@ -890,9 +1034,10 @@ def main() -> None:
     price_history_path = run_dir / "price_history.csv"
     if args.force_refresh and not args.dry_run and price_history_path.exists():
         price_history_path.unlink()
+    price_history_paths = get_run_csv_paths(run_dir, "price_history.csv")
 
-    last_ts_yes = _scan_last_timestamp(price_history_path, market_ids, token_role="yes")
-    last_ts_no = _scan_last_timestamp(price_history_path, market_ids, token_role="no")
+    last_ts_yes = _scan_last_timestamp(price_history_paths, market_ids, token_role="yes")
+    last_ts_no = _scan_last_timestamp(price_history_paths, market_ids, token_role="no")
 
     for mid, payload in (index_markets or {}).items():
         if not payload:
@@ -993,11 +1138,12 @@ def main() -> None:
         prices_out["timestamp_utc"] = prices_out["timestamp_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         append_df_to_csv_with_schema(prices_out, price_history_path)
         price_history_appended = len(prices_out)
+        price_history_paths = get_run_csv_paths(run_dir, "price_history.csv")
 
     # Load price history slice for bars + snapshot
     history_start = date_to_utc_start(week_monday)
     price_hist = _load_price_history_slice(
-        price_history_path,
+        price_history_paths,
         market_ids,
         token_roles=["yes", "no"],
         start_dt=history_start,
@@ -1014,7 +1160,7 @@ def main() -> None:
                 bar_partitions += write_bars_replace(bars, BARS_HISTORY_DIR, freq)
 
     # Load pRN dataset (option-chain snapshots)
-    prn_path = Path(args.prn_dataset) if args.prn_dataset else find_latest_prn_dataset()
+    prn_path = prn_dataset_path
     prn_df = pd.DataFrame()
     prn_missing = False
     if prn_path is None or not prn_path.exists():
@@ -1103,24 +1249,23 @@ def main() -> None:
             prn_df = prn_df.copy()
             prn_df["ticker"] = prn_df["ticker"].astype(str).str.upper()
             prn_df["threshold"] = pd.to_numeric(prn_df["threshold"], errors="coerce").round(6)
-            prn_df["expiry_date"] = pd.to_datetime(prn_df["expiry_date"], errors="coerce").dt.date
+            prn_df["expiry_date"] = pd.to_datetime(prn_df["expiry_date"], errors="coerce")
             prn_df["asof_time"] = pd.to_datetime(prn_df["asof_time"], utc=True, errors="coerce")
             prn_df = prn_df.dropna(subset=["ticker", "threshold", "expiry_date", "asof_time"])
 
-            prn_out = prn_out.sort_values(["ticker", "threshold", "expiry_date", "timestamp_utc"])
-            prn_df = prn_df.sort_values(["ticker", "threshold", "expiry_date", "asof_time"])
+            prn_out["threshold"] = pd.to_numeric(prn_out["threshold"], errors="coerce").round(6)
+            prn_out["expiry_date"] = pd.to_datetime(prn_out["expiry_date"], errors="coerce")
+            prn_out["timestamp_utc"] = pd.to_datetime(prn_out["timestamp_utc"], utc=True, errors="coerce")
+            prn_out = prn_out.dropna(subset=["ticker", "threshold", "expiry_date", "timestamp_utc"])
 
-            prn_out = pd.merge_asof(
-                prn_out,
-                prn_df,
-                left_on="timestamp_utc",
-                right_on="asof_time",
-                by=["ticker", "threshold", "expiry_date"],
-                direction="backward",
-                allow_exact_matches=True,
-                suffixes=("", "_prn"),
-            )
-            prn_out = prn_out.rename(columns={"asof_time": "prn_asof_time"})
+            prn_out = prn_out.sort_values(
+                ["ticker", "threshold", "expiry_date", "timestamp_utc"]
+            ).reset_index(drop=True)
+            prn_df = prn_df.sort_values(
+                ["ticker", "threshold", "expiry_date", "asof_time"]
+            ).reset_index(drop=True)
+
+            prn_out = attach_prn_groupwise(prn_out, prn_df)
         else:
             prn_out["prn_asof_time"] = pd.NaT
 
@@ -1162,9 +1307,32 @@ def main() -> None:
         if COL_PM_BUY not in prn_out.columns:
             prn_out[COL_PM_BUY] = np.nan
 
-        spread = cfg.bidask_spread_bps / 10_000.0
-        prn_out[COL_PM_ASK] = pd.to_numeric(prn_out[COL_PM_BUY], errors="coerce")
-        prn_out[COL_PM_BID] = (prn_out[COL_PM_ASK] * (1 - spread)).clip(0, 1)
+        # CLOB price is the best available mid-price proxy for historical rows
+        prn_out[COL_PM_MID] = pd.to_numeric(prn_out[COL_PM_BUY], errors="coerce")
+
+        # Fetch live bid/ask from CLOB for active markets
+        live_bidask = fetch_live_bidask(markets_week, session, cfg)
+        if live_bidask:
+            print(f"[Markets] Live bid/ask fetched for {len(live_bidask)} market(s)", flush=True)
+
+        prn_out[COL_PM_BID] = np.nan
+        prn_out[COL_PM_ASK] = np.nan
+
+        if live_bidask:
+            prn_out["_ts_parsed"] = pd.to_datetime(prn_out["timestamp_utc"], utc=True, errors="coerce")
+            for mid_val, prices in live_bidask.items():
+                mask = prn_out["market_id"].astype(str) == str(mid_val)
+                if not mask.any():
+                    continue
+                latest_idx = prn_out.loc[mask, "_ts_parsed"].idxmax()
+                if pd.notna(latest_idx):
+                    if prices.get("bid") is not None:
+                        prn_out.at[latest_idx, COL_PM_BID] = prices["bid"]
+                    if prices.get("ask") is not None:
+                        prn_out.at[latest_idx, COL_PM_ASK] = prices["ask"]
+                    if prices.get("mid") is not None:
+                        prn_out.at[latest_idx, COL_PM_MID] = prices["mid"]
+            prn_out.drop(columns=["_ts_parsed"], inplace=True)
 
         prn_out["schema_version"] = SCHEMA_VERSION_PRN
         prn_out["run_id"] = run_id
@@ -1196,26 +1364,27 @@ def main() -> None:
             prn_out["snapshot_date"] = prn_out["snapshot_date"].astype(str)
 
     # Deduplicate by market_id + timestamp_utc
-    prn_path = run_dir / "markets_prn_hourly.csv"
+    markets_prn_hourly_path = run_dir / "markets_prn_hourly.csv"
+    replace_week = args.force_refresh or args.replace_week
 
     # On force-refresh: purge this week's rows so new data fully replaces old / errored data
-    if args.force_refresh and prn_path.exists():
+    if replace_week and markets_prn_hourly_path.exists():
         try:
-            existing_prn = pd.read_csv(prn_path)
+            existing_prn = pd.read_csv(markets_prn_hourly_path)
             if "week_friday" in existing_prn.columns:
                 existing_prn = existing_prn[existing_prn["week_friday"] != week_key]
-                existing_prn.to_csv(prn_path, index=False)
+                existing_prn.to_csv(markets_prn_hourly_path, index=False)
             else:
-                prn_path.unlink()
-            print(f"[Markets] force-refresh: cleared existing rows for week {week_key}", flush=True)
+                markets_prn_hourly_path.unlink()
+            print(f"[Markets] replace-week: cleared existing rows for week {week_key}", flush=True)
         except Exception as exc:
-            print(f"[Markets] force-refresh: warning — could not clear prn rows: {exc}", file=sys.stderr)
+            print(f"[Markets] replace-week: warning - could not clear prn rows: {exc}", file=sys.stderr)
 
-    if not prn_out.empty and prn_path.exists():
+    if not prn_out.empty and markets_prn_hourly_path.exists():
         if "market_id" in prn_out.columns:
             existing_max: Dict[str, datetime] = {}
             usecols = ["timestamp_utc", "market_id"]
-            for chunk in pd.read_csv(prn_path, usecols=usecols, chunksize=100_000):
+            for chunk in pd.read_csv(markets_prn_hourly_path, usecols=usecols, chunksize=100_000):
                 if "market_id" not in chunk.columns:
                     continue
                 chunk["timestamp_utc"] = pd.to_datetime(chunk["timestamp_utc"], utc=True, errors="coerce")
@@ -1237,7 +1406,7 @@ def main() -> None:
         else:
             existing_max: Dict[Tuple[str, float, str], datetime] = {}
             usecols = ["timestamp_utc", "ticker", "threshold", "event_endDate"]
-            for chunk in pd.read_csv(prn_path, usecols=usecols, chunksize=100_000):
+            for chunk in pd.read_csv(markets_prn_hourly_path, usecols=usecols, chunksize=100_000):
                 chunk["timestamp_utc"] = pd.to_datetime(chunk["timestamp_utc"], utc=True, errors="coerce")
                 chunk = chunk.dropna(subset=["timestamp_utc", "ticker", "threshold", "event_endDate"])
                 for (ticker, threshold, end_date), grp in chunk.groupby(["ticker", "threshold", "event_endDate"]):
@@ -1266,10 +1435,10 @@ def main() -> None:
 
     if prn_out.empty:
         print("[Markets] No new pRN rows to append.")
-        if not args.dry_run and not prn_path.exists():
-            append_df_to_csv_with_schema(prn_out, prn_path)
+        if not args.dry_run and not markets_prn_hourly_path.exists():
+            append_df_to_csv_with_schema(prn_out, markets_prn_hourly_path)
     elif not args.dry_run:
-        append_df_to_csv_with_schema(prn_out, prn_path)
+        append_df_to_csv_with_schema(prn_out, markets_prn_hourly_path)
 
     progress("append", 1, 1)
 
@@ -1396,9 +1565,23 @@ def main() -> None:
                     snapshot["pPM_buy"] = pd.to_numeric(snapshot["pPM_buy"], errors="coerce")
                     snapshot["qPM_buy"] = pd.to_numeric(snapshot["qPM_buy"], errors="coerce")
 
-                    snapshot["pPM_mid"] = snapshot["pPM_buy"]
+                    # Use live bid/ask if available
+                    if live_bidask:
+                        snapshot["market_id"] = snapshot["market_id"].astype(str)
+                        for ba_mid, ba_prices in live_bidask.items():
+                            mask = snapshot["market_id"] == str(ba_mid)
+                            if not mask.any():
+                                continue
+                            if ba_prices.get("bid") is not None and ba_prices.get("ask") is not None:
+                                snapshot.loc[mask, "pPM_buy"] = ba_prices["ask"]
+                                snapshot.loc[mask, "pPM_mid"] = ba_prices["mid"]
+                                snapshot.loc[mask, "yes_spread"] = ba_prices["ask"] - ba_prices["bid"]
+
+                    if "pPM_mid" not in snapshot.columns:
+                        snapshot["pPM_mid"] = snapshot["pPM_buy"]
                     snapshot["qPM_mid"] = snapshot["qPM_buy"]
-                    snapshot["yes_spread"] = np.nan
+                    if "yes_spread" not in snapshot.columns:
+                        snapshot["yes_spread"] = np.nan
                     snapshot["no_spread"] = np.nan
                     snapshot["pm_ok"] = snapshot["pPM_buy"].notna() | snapshot["qPM_buy"].notna()
                     snapshot["pm_reason"] = np.where(snapshot["pm_ok"], "ok", "no_clob_trade")
@@ -1444,8 +1627,8 @@ def main() -> None:
             "--prn-asof-close-time",
             cfg.prn_asof_close_time,
         ]
-        if prn_path is not None:
-            features_cmd.extend(["--prn-dataset", str(prn_path)])
+        if prn_dataset_path is not None:
+            features_cmd.extend(["--prn-dataset", str(prn_dataset_path)])
 
         progress("features", 0, 1)
         result = subprocess.run(features_cmd, capture_output=True, text=True)
@@ -1494,7 +1677,7 @@ def main() -> None:
         "prn_rows_appended": 0 if prn_out is None else len(prn_out),
         "bars_partitions": bar_partitions,
         "despike_adjusted": despike_adjusted,
-        "prn_dataset": str(prn_path) if prn_path else None,
+        "prn_dataset": str(prn_dataset_path) if prn_dataset_path else None,
         "prn_missing": prn_missing,
         "last_snapshot_date": last_snapshot_date,
         "snapshot_rows_appended": snapshot_rows_appended,
