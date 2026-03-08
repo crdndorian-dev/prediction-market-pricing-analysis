@@ -175,9 +175,13 @@ const C_GRID_PRESETS: Record<string, string> = {
 
 const AUTO_FEATURE_SETS = [
   ["x_logit_prn"],
+  ["x_logit_prn", "rv5"],
+  ["x_logit_prn", "rv10"],
   ["x_logit_prn", "rv20"],
   ["x_logit_prn", "abs_log_m_fwd"],
   ["x_logit_prn", "rv20", "abs_log_m_fwd"],
+  ["x_logit_prn", "rv20", "rv5_over_rv20"],
+  ["x_logit_prn", "rv20", "rv10_over_rv20"],
   ["x_logit_prn", "rv20", "abs_log_m_fwd", "log_rel_spread"],
 ];
 const AUTO_C_VALUES = [0.003, 0.01, 0.03, 0.1, 0.3];
@@ -203,8 +207,13 @@ const BASE_FEATURE = "x_logit_prn";
 const FEATURE_OPTIONS = [
   "log_m_fwd",
   "abs_log_m_fwd",
+  "rv5",
+  "rv10",
   "rv20",
   "rv20_sqrtT",
+  "rv5_over_rv20",
+  "rv5_over_rv10",
+  "rv10_over_rv20",
   "log_m_fwd_over_volT",
   "log_rel_spread",
   "had_fallback",
@@ -223,7 +232,8 @@ const CATEGORICAL_FEATURE_LABELS: Record<string, string> = {
 const CATEGORICAL_FEATURE_OPTION_SET = new Set<string>(CATEGORICAL_FEATURE_OPTIONS);
 const FEATURE_CATEGORIES: Array<{ title: string; items: readonly string[] }> = [
   { title: "Moneyness", items: ["log_m_fwd", "abs_log_m_fwd", "log_m_fwd_over_volT"] },
-  { title: "Volatility", items: ["rv20", "rv20_sqrtT"] },
+  { title: "Volatility", items: ["rv5", "rv10", "rv20", "rv20_sqrtT"] },
+  { title: "Volatility Regime", items: ["rv5_over_rv20", "rv5_over_rv10", "rv10_over_rv20"] },
   { title: "Market Quality", items: ["log_rel_spread", "prn_raw_gap", "dividend_yield"] },
   { title: "Coverage and Sanity", items: ["had_fallback", "had_intrinsic_drop", "had_band_clip"] },
   { title: "Interactions", items: ["x_m", "x_abs_m"] },
@@ -435,6 +445,114 @@ const formatMaybe = (value: unknown): string => {
   if (typeof value === "number") return Number.isFinite(value) ? value.toFixed(4) : "--";
   if (typeof value === "string") return value.trim().length ? value : "--";
   return JSON.stringify(value);
+};
+
+const DEFAULT_REGULARIZATION_PENALTY = "l2";
+const DEFAULT_REGULARIZATION_SOLVER = "lbfgs";
+
+const inferRegularizationSummary = (data: Record<string, unknown>): Record<string, unknown> => {
+  const regularization =
+    data.regularization && typeof data.regularization === "object"
+      ? (data.regularization as Record<string, unknown>)
+      : null;
+  return {
+    penalty:
+      regularization?.penalty ??
+      data.regularization_penalty ??
+      DEFAULT_REGULARIZATION_PENALTY,
+    solver:
+      regularization?.solver ??
+      data.regularization_solver ??
+      DEFAULT_REGULARIZATION_SOLVER,
+    best_c:
+      regularization?.best_c ??
+      data.best_C ??
+      null,
+    c_grid:
+      regularization?.c_grid ??
+      null,
+    selection_rule:
+      regularization?.selection_rule ??
+      data.c_selection_rule ??
+      null,
+  };
+};
+
+const splitCsvValue = (value: unknown): string[] => {
+  if (typeof value !== "string") return [];
+  return Array.from(
+    new Set(
+      value
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
+};
+
+const toProjectRelativePath = (value: unknown): string => {
+  if (typeof value !== "string") return "";
+  const normalized = value.replace(/\\/g, "/").trim();
+  if (!normalized) return "";
+  if (!normalized.startsWith("/")) return normalized;
+  const srcIndex = normalized.lastIndexOf("/src/");
+  if (srcIndex >= 0) return normalized.slice(srcIndex + 1);
+  const dataIndex = normalized.lastIndexOf("/data/");
+  if (dataIndex >= 0) return normalized.slice(dataIndex + 1);
+  return normalized;
+};
+
+const resolveTimeRegimeKey = (config: Record<string, unknown>): TimeRegimeKey => {
+  const filters =
+    config.filters && typeof config.filters === "object"
+      ? (config.filters as Record<string, unknown>)
+      : null;
+  const topLevelDow = typeof config.asof_dow_allowed === "string" ? config.asof_dow_allowed : null;
+  const filterDowRaw = Array.isArray(filters?.asof_dow_allowed) ? filters?.asof_dow_allowed[0] : filters?.asof_dow_allowed;
+  const filterTdaysRaw = Array.isArray(filters?.tdays_allowed) ? filters?.tdays_allowed[0] : filters?.tdays_allowed;
+  const topLevelTdays = toNumber(config.tdays_allowed);
+  const filterTdays = toNumber(filterTdaysRaw);
+  const dowMap: Record<string, TimeRegimeKey> = {
+    mon: "mon_4",
+    monday: "mon_4",
+    tue: "tue_3",
+    tues: "tue_3",
+    tuesday: "tue_3",
+    wed: "wed_2",
+    wednesday: "wed_2",
+    thu: "thu_1",
+    thur: "thu_1",
+    thurs: "thu_1",
+    thursday: "thu_1",
+  };
+  if (topLevelDow) {
+    const match = dowMap[topLevelDow.trim().toLowerCase()];
+    if (match) return match;
+  }
+  if (typeof filterDowRaw === "string") {
+    const match = dowMap[filterDowRaw.trim().toLowerCase()];
+    if (match) return match;
+  }
+  const dowIndex = toNumber(filterDowRaw);
+  if (dowIndex != null) {
+    if (dowIndex === 0) return "mon_4";
+    if (dowIndex === 1) return "tue_3";
+    if (dowIndex === 2) return "wed_2";
+    if (dowIndex === 3) return "thu_1";
+  }
+  if (topLevelTdays != null) {
+    if (topLevelTdays === 4) return "mon_4";
+    if (topLevelTdays === 3) return "tue_3";
+    if (topLevelTdays === 2) return "wed_2";
+    if (topLevelTdays === 1) return "thu_1";
+  }
+  if (filterTdays != null) {
+    if (filterTdays === 4) return "mon_4";
+    if (filterTdays === 3) return "tue_3";
+    if (filterTdays === 2) return "wed_2";
+    if (filterTdays === 1) return "thu_1";
+  }
+  return "thu_1";
 };
 
 const computeAvailableWeeks = (dataset?: DatasetFileSummary | null): number | null => {
@@ -991,11 +1109,48 @@ const JsonSectionView = ({
   );
 };
 
-const ConfigJsonView = ({ data }: { data: Record<string, unknown> }) => (
+const EquationNotes = ({ spec }: { spec?: ModelDetailResponse["model_equation_spec"] | null }) => {
+  const notes = Array.isArray(spec?.notes)
+    ? spec.notes.filter((note): note is string => typeof note === "string" && note.trim().length > 0)
+    : [];
+  if (!notes.length) return null;
+  return (
+    <div className="equation-notes">
+      {notes.map((note) => (
+        <div key={note} className="equation-note">
+          {note}
+        </div>
+      ))}
+    </div>
+  );
+};
+
+const ConfigJsonView = ({
+  data,
+  title,
+  onRunAgain,
+}: {
+  data: Record<string, unknown>;
+  title?: string;
+  onRunAgain?: (() => void) | null;
+}) => (
   <div className="artifact-stack">
+    <section className="artifact-section">
+      <div className="artifact-section-header">
+        <span className="meta-label">{title ?? "Config"}</span>
+        {onRunAgain ? (
+          <button type="button" className="button light small" onClick={onRunAgain}>
+            Run again
+          </button>
+        ) : null}
+      </div>
+      <span className="artifact-section-copy">
+        Load this configuration into the Run Job tab so you can rerun it directly.
+      </span>
+    </section>
     <JsonSectionView title="Dataset" data={{ csv: data.csv, out_dir: data.out_dir, run_mode: data.run_mode }} />
     <JsonSectionView title="Split" data={(data.split as Record<string, unknown>) ?? null} />
-    <JsonSectionView title="Regularization" data={(data.regularization as Record<string, unknown>) ?? null} />
+    <JsonSectionView title="Regularization" data={inferRegularizationSummary(data)} />
     <JsonSectionView title="Model structure" data={(data.model_structure as Record<string, unknown>) ?? null} />
     <JsonSectionView title="Weighting" data={(data.weighting as Record<string, unknown>) ?? null} />
     <JsonSectionView title="Bootstrap" data={(data.bootstrap as Record<string, unknown>) ?? null} />
@@ -1009,6 +1164,8 @@ const MetadataView = ({ data }: { data: Record<string, unknown> }) => (
       title="Run summary"
       data={{
         best_C: data.best_C,
+        regularization_penalty: data.regularization_penalty ?? DEFAULT_REGULARIZATION_PENALTY,
+        regularization_solver: data.regularization_solver ?? DEFAULT_REGULARIZATION_SOLVER,
         calibration_used: data.calibration_used,
         selection_objective: data.selection_objective,
         split_strategy: data.split_strategy,
@@ -2195,7 +2352,13 @@ export default function CalibrateModelsPage() {
         return parsedJson ? <KeyValueGrid data={parsedJson} /> : <div className="empty">No summary data.</div>;
       case "config.executed.json":
       case "best_config.json":
-        return parsedJson ? <ConfigJsonView data={parsedJson} /> : <div className="empty">No config data.</div>;
+        return parsedJson ? (
+          <ConfigJsonView
+            data={parsedJson}
+            title={artifactDisplayTitle(selectedName)}
+            onRunAgain={() => handleRunAgainFromConfig(parsedJson)}
+          />
+        ) : <div className="empty">No config data.</div>;
       case "metadata.json":
       case "two_stage_metadata.json":
         return parsedJson ? <MetadataView data={parsedJson} /> : <div className="empty">No metadata.</div>;
@@ -3107,6 +3270,148 @@ export default function CalibrateModelsPage() {
       setCancelLoading(false);
     }
   }, [jobId, jobStatus?.job_id, setJobStatus]);
+
+  const handleRunAgainFromConfig = useCallback((config: Record<string, unknown>) => {
+    const split =
+      config.split && typeof config.split === "object"
+        ? (config.split as Record<string, unknown>)
+        : {};
+    const regularization =
+      config.regularization && typeof config.regularization === "object"
+        ? (config.regularization as Record<string, unknown>)
+        : {};
+    const modelStructure =
+      config.model_structure && typeof config.model_structure === "object"
+        ? (config.model_structure as Record<string, unknown>)
+        : {};
+    const weighting =
+      config.weighting && typeof config.weighting === "object"
+        ? (config.weighting as Record<string, unknown>)
+        : {};
+    const bootstrap =
+      config.bootstrap && typeof config.bootstrap === "object"
+        ? (config.bootstrap as Record<string, unknown>)
+        : {};
+    const diagnostics =
+      config.diagnostics && typeof config.diagnostics === "object"
+        ? (config.diagnostics as Record<string, unknown>)
+        : {};
+    const csv = toProjectRelativePath(config.csv);
+    const matchedDataset =
+      datasets.find((dataset) => {
+        const relative = dataset.path.replace(/\\/g, "/");
+        return csv === relative || csv.endsWith(relative);
+      })?.path ?? csv;
+    const features = splitCsvValue(config.features).filter(
+      (feature) => feature !== BASE_FEATURE && FEATURE_OPTION_SET.has(feature),
+    );
+    const categorical = splitCsvValue(config.categorical_features).filter((feature) =>
+      CATEGORICAL_FEATURE_OPTION_SET.has(feature),
+    );
+    const cGrid =
+      typeof regularization.c_grid === "string"
+        ? regularization.c_grid
+        : typeof config.c_grid === "string"
+          ? config.c_grid
+          : "";
+    const cGridPreset =
+      (Object.entries(C_GRID_PRESETS).find(([, preset]) => preset === cGrid)?.[0] as CalibrateFormState["cGridPreset"] | undefined) ??
+      "custom";
+    const ciLevelValue = toNumber(bootstrap.ci_level);
+    const nextModelName =
+      sanitizeModelDirName(selectedModelId ? `${selectedModelId}-rerun` : defaultModelName()) || defaultModelName();
+
+    setForm((prev) => ({
+      ...prev,
+      runMode: "manual",
+      modelDirName: nextModelName,
+      datasetPath: matchedDataset,
+      randomSeed: String(toNumber(config.random_state) ?? toNumber(config.randomSeed) ?? 7),
+      weightColStrategy:
+        config.weight_col_strategy === "auto" ||
+        config.weight_col_strategy === "weight_final" ||
+        config.weight_col_strategy === "sample_weight_final" ||
+        config.weight_col_strategy === "uniform"
+          ? config.weight_col_strategy
+          : prev.weightColStrategy,
+      timeRegime: resolveTimeRegimeKey(config),
+      selectedFeatures: features,
+      selectedCategoricalFeatures: categorical,
+      splitStrategy: split.strategy === "single_holdout" ? "single_holdout" : "walk_forward",
+      windowMode: split.window_mode === "expanding" ? "expanding" : "rolling",
+      trainWindowWeeks: String(toNumber(split.train_window_weeks) ?? prev.trainWindowWeeks),
+      validationFolds: String(toNumber(split.validation_folds) ?? prev.validationFolds),
+      validationWindowWeeks: String(toNumber(split.validation_window_weeks) ?? prev.validationWindowWeeks),
+      testWindowWeeks: String(toNumber(split.test_window_weeks) ?? toNumber(config.test_weeks) ?? prev.testWindowWeeks),
+      embargoDays: String(toNumber(split.embargo_days) ?? prev.embargoDays),
+      cGridPreset,
+      cGridCustom: cGrid || prev.cGridCustom,
+      calibrationMethod:
+        regularization.calibration_method === "platt" || config.calibrate === "platt" ? "platt" : "none",
+      selectionObjective:
+        regularization.selection_objective === "brier" || regularization.selection_objective === "ece_q"
+          ? regularization.selection_objective
+          : regularization.selection_objective === "logloss"
+            ? "logloss"
+            : prev.selectionObjective,
+      tradingUniverseTickers: splitCsvValue(
+        modelStructure.trading_universe_tickers ??
+        weighting.trading_universe_tickers ??
+        modelStructure.train_tickers ??
+        config.train_tickers,
+      ),
+      trainTickers: splitCsvValue(modelStructure.train_tickers ?? config.train_tickers),
+      foundationTickers: splitCsvValue(modelStructure.foundation_tickers ?? config.foundation_tickers),
+      foundationWeight: String(toNumber(modelStructure.foundation_weight ?? config.foundation_weight) ?? prev.foundationWeight),
+      tickerInterceptMode:
+        modelStructure.ticker_intercepts === "none" ||
+        modelStructure.ticker_intercepts === "all" ||
+        modelStructure.ticker_intercepts === "non_foundation"
+          ? modelStructure.ticker_intercepts
+          : prev.tickerInterceptMode,
+      perTickerInteractions: Boolean(modelStructure.ticker_x_interactions ?? config.ticker_x_interactions),
+      minSupportIntercepts: String(toNumber(modelStructure.ticker_min_support ?? config.ticker_min_support) ?? prev.minSupportIntercepts),
+      minSupportInteractions: String(
+        toNumber(modelStructure.ticker_min_support_interactions ?? config.ticker_min_support_interactions) ??
+        prev.minSupportInteractions,
+      ),
+      baseWeightSource: weighting.base_weight_source === "uniform" ? "uniform" : "dataset_weight",
+      groupingKey: typeof weighting.grouping_key === "string" ? weighting.grouping_key : prev.groupingKey,
+      groupEqualization:
+        typeof weighting.group_equalization === "boolean"
+          ? weighting.group_equalization
+          : (weighting.group_reweight ?? config.group_reweight) === "chain_snapshot",
+      renorm: "mean1",
+      tradingUniverseUpweight: String(toNumber(weighting.trading_universe_upweight) ?? prev.tradingUniverseUpweight),
+      tickerBalanceMode: weighting.ticker_balance_mode === "sqrt_inv_clipped" ? "sqrt_inv_clipped" : "none",
+      bootstrapEnabled: Boolean(bootstrap.bootstrap_ci ?? config.bootstrap_ci),
+      bootstrapGroup:
+        bootstrap.bootstrap_group === "contract_id" ||
+        bootstrap.bootstrap_group === "group_id" ||
+        bootstrap.bootstrap_group === "ticker_day" ||
+        bootstrap.bootstrap_group === "day" ||
+        bootstrap.bootstrap_group === "iid" ||
+        bootstrap.bootstrap_group === "auto"
+          ? bootstrap.bootstrap_group
+          : prev.bootstrapGroup,
+      bootstrapDraws: String(toNumber(bootstrap.bootstrap_b ?? bootstrap.bootstrap_B ?? config.bootstrap_B) ?? prev.bootstrapDraws),
+      bootstrapSeed: String(toNumber(bootstrap.bootstrap_seed ?? config.bootstrap_seed) ?? prev.bootstrapSeed),
+      ciLevel: ciLevelValue === 90 || ciLevelValue === 99 ? (ciLevelValue as 90 | 99) : 95,
+      perSplitReporting: Boolean(bootstrap.per_split_reporting ?? prev.perSplitReporting),
+      perFoldReporting: Boolean(bootstrap.per_fold_reporting ?? prev.perFoldReporting),
+      splitTimeline: Boolean(diagnostics.split_timeline ?? prev.splitTimeline),
+      perFoldDeltaChart: Boolean(diagnostics.per_fold_delta_chart ?? prev.perFoldDeltaChart),
+      perGroupDeltaDistribution: Boolean(diagnostics.per_group_delta_distribution ?? prev.perGroupDeltaDistribution),
+      maxAbsLogm: String(toNumber(config.max_abs_logm) ?? prev.maxAbsLogm),
+      dropPrnExtremes: Boolean(config.drop_prn_extremes),
+      dropPrnBelow: String(toNumber(config.prn_below) ?? prev.dropPrnBelow),
+      dropPrnAbove: String(toNumber(config.prn_above) ?? prev.dropPrnAbove),
+    }));
+    setRunError(null);
+    setCancelError(null);
+    setWorkspaceTab("run_job");
+    setRunJobPanel("configuration");
+  }, [datasets, selectedModelId]);
 
   const openModelFile = useCallback(async (
     modelId: string,
@@ -5047,7 +5352,7 @@ export default function CalibrateModelsPage() {
                                 <div>
                                   <span className="meta-label">Hyperparams</span>
                                   <span>
-                                    split={model.split_strategy ?? "--"}, C={model.c_value ?? "--"}, calib={model.calibration_method ?? "--"}
+                                    split={model.split_strategy ?? "--"}, penalty=L2, C={model.c_value ?? "--"}, calib={model.calibration_method ?? "--"}
                                   </span>
                                 </div>
                                 {isAutoRun ? (
@@ -5131,114 +5436,124 @@ export default function CalibrateModelsPage() {
                                           modelTestGroups != null;
                                         if (!hasCounts) return null;
                                         return (
-                                          <div className="run-meta-grid">
-                                            <div>
-                                              <span className="meta-label">Train rows</span>
-                                              <span>{formatCountValue(modelTrainRows as number | null)}</span>
+                                          <div className="metrics-detail-card">
+                                            <div className="metrics-detail-card-header">
+                                              <span className="meta-label">Split coverage</span>
                                             </div>
-                                            <div>
-                                              <span className="meta-label">Val rows</span>
-                                              <span>{formatCountValue(modelValRows as number | null)}</span>
-                                            </div>
-                                            <div>
-                                              <span className="meta-label">Test rows</span>
-                                              <span>{formatCountValue(modelTestRows as number | null)}</span>
-                                            </div>
-                                            <div>
-                                              <span className="meta-label">Train groups</span>
-                                              <span>{formatCountValue(modelTrainGroups as number | null)}</span>
-                                            </div>
-                                            <div>
-                                              <span className="meta-label">Val groups</span>
-                                              <span>{formatCountValue(modelValGroups as number | null)}</span>
-                                            </div>
-                                            <div>
-                                              <span className="meta-label">Test groups</span>
-                                              <span>{formatCountValue(modelTestGroups as number | null)}</span>
+                                            <div className="run-meta-grid">
+                                              <div>
+                                                <span className="meta-label">Train rows</span>
+                                                <span>{formatCountValue(modelTrainRows as number | null)}</span>
+                                              </div>
+                                              <div>
+                                                <span className="meta-label">Val rows</span>
+                                                <span>{formatCountValue(modelValRows as number | null)}</span>
+                                              </div>
+                                              <div>
+                                                <span className="meta-label">Test rows</span>
+                                                <span>{formatCountValue(modelTestRows as number | null)}</span>
+                                              </div>
+                                              <div>
+                                                <span className="meta-label">Train groups</span>
+                                                <span>{formatCountValue(modelTrainGroups as number | null)}</span>
+                                              </div>
+                                              <div>
+                                                <span className="meta-label">Val groups</span>
+                                                <span>{formatCountValue(modelValGroups as number | null)}</span>
+                                              </div>
+                                              <div>
+                                                <span className="meta-label">Test groups</span>
+                                                <span>{formatCountValue(modelTestGroups as number | null)}</span>
+                                              </div>
                                             </div>
                                           </div>
                                         );
                                       })()}
-                                      <div className="metrics-summary-grid">
-                                        {metricsOrder
-                                          .map((split) => modelDetail.metrics_summary?.[split])
-                                          .filter(Boolean)
-                                          .map((metric) => (
-                                          <div key={`${model.id}-${metric!.split}`} className="metrics-card">
-                                            <div className="metrics-card-heading">
-                                              <strong>{metric!.split}</strong>
-                                              <span className={`status-pill ${metric!.status === "good" ? "success" : "failed"}`}>
-                                                {metric!.status}
-                                              </span>
-                                            </div>
-                                            <div className="metrics-card-row">
-                                              <span>Baseline logloss</span>
-                                              <strong>{formatMetricValue(metric!.baseline_logloss)}</strong>
-                                            </div>
-                                            <div className="metrics-card-row">
-                                              <span>Model logloss</span>
-                                              <strong>{formatMetricValue(metric!.model_logloss)}</strong>
-                                            </div>
-                                            <div className="metrics-card-row">
-                                              <span>Delta logloss</span>
-                                              <strong className={deltaMetricClass(metric!.delta_model_minus_baseline)}>
-                                                {formatMetricValue(metric!.delta_model_minus_baseline)}
-                                              </strong>
-                                            </div>
-                                            {metric!.delta_logloss_ci_lo != null && metric!.delta_logloss_ci_hi != null ? (
-                                              <div className="metrics-card-row metrics-card-ci">
-                                                <span>Logloss {modelCiLabel}</span>
-                                                <strong>
-                                                  [{metric!.delta_logloss_ci_lo.toFixed(4)}, {metric!.delta_logloss_ci_hi.toFixed(4)}]
+                                      <div className="metrics-detail-card">
+                                        <div className="metrics-detail-card-header">
+                                          <span className="meta-label">Metrics card</span>
+                                        </div>
+                                        <div className="metrics-summary-grid">
+                                          {metricsOrder
+                                            .map((split) => modelDetail.metrics_summary?.[split])
+                                            .filter(Boolean)
+                                            .map((metric) => (
+                                            <div key={`${model.id}-${metric!.split}`} className="metrics-card">
+                                              <div className="metrics-card-heading">
+                                                <strong>{metric!.split}</strong>
+                                                <span className={`status-pill ${metric!.status === "good" ? "success" : "failed"}`}>
+                                                  {metric!.status}
+                                                </span>
+                                              </div>
+                                              <div className="metrics-card-row">
+                                                <span>Baseline logloss</span>
+                                                <strong>{formatMetricValue(metric!.baseline_logloss)}</strong>
+                                              </div>
+                                              <div className="metrics-card-row">
+                                                <span>Model logloss</span>
+                                                <strong>{formatMetricValue(metric!.model_logloss)}</strong>
+                                              </div>
+                                              <div className="metrics-card-row">
+                                                <span>Delta logloss</span>
+                                                <strong className={deltaMetricClass(metric!.delta_model_minus_baseline)}>
+                                                  {formatMetricValue(metric!.delta_model_minus_baseline)}
                                                 </strong>
                                               </div>
-                                            ) : null}
-                                            <div className="metrics-card-row">
-                                              <span>Baseline brier</span>
-                                              <strong>{formatMetricValue(metric!.baseline_brier)}</strong>
-                                            </div>
-                                            <div className="metrics-card-row">
-                                              <span>Model brier</span>
-                                              <strong>{formatMetricValue(metric!.model_brier)}</strong>
-                                            </div>
-                                            <div className="metrics-card-row">
-                                              <span>Delta brier</span>
-                                              <strong className={deltaMetricClass(metric!.delta_brier)}>
-                                                {formatMetricValue(metric!.delta_brier)}
-                                              </strong>
-                                            </div>
-                                            {metric!.delta_brier_ci_lo != null && metric!.delta_brier_ci_hi != null ? (
-                                              <div className="metrics-card-row metrics-card-ci">
-                                                <span>Brier {modelCiLabel}</span>
-                                                <strong>
-                                                  [{metric!.delta_brier_ci_lo.toFixed(4)}, {metric!.delta_brier_ci_hi.toFixed(4)}]
+                                              {metric!.delta_logloss_ci_lo != null && metric!.delta_logloss_ci_hi != null ? (
+                                                <div className="metrics-card-row metrics-card-ci">
+                                                  <span>Logloss {modelCiLabel}</span>
+                                                  <strong>
+                                                    [{metric!.delta_logloss_ci_lo.toFixed(4)}, {metric!.delta_logloss_ci_hi.toFixed(4)}]
+                                                  </strong>
+                                                </div>
+                                              ) : null}
+                                              <div className="metrics-card-row">
+                                                <span>Baseline brier</span>
+                                                <strong>{formatMetricValue(metric!.baseline_brier)}</strong>
+                                              </div>
+                                              <div className="metrics-card-row">
+                                                <span>Model brier</span>
+                                                <strong>{formatMetricValue(metric!.model_brier)}</strong>
+                                              </div>
+                                              <div className="metrics-card-row">
+                                                <span>Delta brier</span>
+                                                <strong className={deltaMetricClass(metric!.delta_brier)}>
+                                                  {formatMetricValue(metric!.delta_brier)}
                                                 </strong>
                                               </div>
-                                            ) : null}
-                                            <div className="metrics-card-row">
-                                              <span>Baseline ece_q</span>
-                                              <strong>{formatMetricValue(metric!.baseline_ece_q)}</strong>
-                                            </div>
-                                            <div className="metrics-card-row">
-                                              <span>Model ece_q</span>
-                                              <strong>{formatMetricValue(metric!.model_ece_q)}</strong>
-                                            </div>
-                                            <div className="metrics-card-row">
-                                              <span>Delta ece_q</span>
-                                              <strong className={deltaMetricClass(metric!.delta_ece_q)}>
-                                                {formatMetricValue(metric!.delta_ece_q)}
-                                              </strong>
-                                            </div>
-                                            {metric!.delta_ece_q_ci_lo != null && metric!.delta_ece_q_ci_hi != null ? (
-                                              <div className="metrics-card-row metrics-card-ci">
-                                                <span>ECE-Q {modelCiLabel}</span>
-                                                <strong>
-                                                  [{metric!.delta_ece_q_ci_lo.toFixed(4)}, {metric!.delta_ece_q_ci_hi.toFixed(4)}]
+                                              {metric!.delta_brier_ci_lo != null && metric!.delta_brier_ci_hi != null ? (
+                                                <div className="metrics-card-row metrics-card-ci">
+                                                  <span>Brier {modelCiLabel}</span>
+                                                  <strong>
+                                                    [{metric!.delta_brier_ci_lo.toFixed(4)}, {metric!.delta_brier_ci_hi.toFixed(4)}]
+                                                  </strong>
+                                                </div>
+                                              ) : null}
+                                              <div className="metrics-card-row">
+                                                <span>Baseline ece_q</span>
+                                                <strong>{formatMetricValue(metric!.baseline_ece_q)}</strong>
+                                              </div>
+                                              <div className="metrics-card-row">
+                                                <span>Model ece_q</span>
+                                                <strong>{formatMetricValue(metric!.model_ece_q)}</strong>
+                                              </div>
+                                              <div className="metrics-card-row">
+                                                <span>Delta ece_q</span>
+                                                <strong className={deltaMetricClass(metric!.delta_ece_q)}>
+                                                  {formatMetricValue(metric!.delta_ece_q)}
                                                 </strong>
                                               </div>
-                                            ) : null}
-                                          </div>
-                                        ))}
+                                              {metric!.delta_ece_q_ci_lo != null && metric!.delta_ece_q_ci_hi != null ? (
+                                                <div className="metrics-card-row metrics-card-ci">
+                                                  <span>ECE-Q {modelCiLabel}</span>
+                                                  <strong>
+                                                    [{metric!.delta_ece_q_ci_lo.toFixed(4)}, {metric!.delta_ece_q_ci_hi.toFixed(4)}]
+                                                  </strong>
+                                                </div>
+                                              ) : null}
+                                            </div>
+                                          ))}
+                                        </div>
                                       </div>
                                     </div>
                                   ) : null}
@@ -5247,6 +5562,7 @@ export default function CalibrateModelsPage() {
                                     <div className="equation-summary">
                                       <span className="meta-label">Model equation</span>
                                       <LatexBlock latex={modelDetail.model_equation} />
+                                      <EquationNotes spec={modelDetail.model_equation_spec} />
                                     </div>
                                   ) : null}
 
@@ -5254,6 +5570,7 @@ export default function CalibrateModelsPage() {
                                     <div className="equation-summary">
                                       <span className="meta-label">Stage A equation</span>
                                       <LatexBlock latex={modelDetail.stage1_equation} />
+                                      <EquationNotes spec={modelDetail.stage1_equation_spec} />
                                     </div>
                                   ) : null}
 
@@ -5261,6 +5578,7 @@ export default function CalibrateModelsPage() {
                                     <div className="equation-summary">
                                       <span className="meta-label">Stage B equation</span>
                                       <LatexBlock latex={modelDetail.two_stage_equation} />
+                                      <EquationNotes spec={modelDetail.two_stage_equation_spec} />
                                     </div>
                                   ) : null}
 

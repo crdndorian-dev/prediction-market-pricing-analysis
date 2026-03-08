@@ -50,9 +50,13 @@ RISKY_FEATURES = {"prn_raw_gap", "had_fallback", "had_intrinsic_drop", "had_band
 
 DEFAULT_FEATURE_SETS = [
     [BASE_FEATURE],
+    [BASE_FEATURE, "rv5"],
+    [BASE_FEATURE, "rv10"],
     [BASE_FEATURE, "rv20"],
     [BASE_FEATURE, "abs_log_m_fwd"],
     [BASE_FEATURE, "rv20", "abs_log_m_fwd"],
+    [BASE_FEATURE, "rv20", "rv5_over_rv20"],
+    [BASE_FEATURE, "rv20", "rv10_over_rv20"],
     [BASE_FEATURE, "rv20", "abs_log_m_fwd", "log_rel_spread"],
 ]
 DEFAULT_C_VALUES = [0.003, 0.01, 0.03, 0.1, 0.3]

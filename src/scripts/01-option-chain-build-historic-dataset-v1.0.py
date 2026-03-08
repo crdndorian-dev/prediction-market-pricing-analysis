@@ -1103,6 +1103,10 @@ def process_one(
         }
     T_years = float(T_days) / 365.25
 
+    rv5_raw = realized_vol_proxy(raw_map, asof_used, 5)
+    rv5_adj = realized_vol_proxy(adj_map, asof_used, 5)
+    rv10_raw = realized_vol_proxy(raw_map, asof_used, 10)
+    rv10_adj = realized_vol_proxy(adj_map, asof_used, 10)
     rv20_raw = realized_vol_proxy(raw_map, asof_used, cfg.rv_lookback_days)
     rv20_adj = realized_vol_proxy(adj_map, asof_used, cfg.rv_lookback_days)
 
@@ -1319,11 +1323,15 @@ def process_one(
     if spot_scale_used == "raw":
         S0_used = float(S0_raw)
         ST_used = float(ST_raw)
+        rv5_used = rv5_raw
+        rv10_used = rv10_raw
         rv20_used = rv20_raw
         div_yield_used = float(div_yield_raw)
     else:
         S0_used = float(S0_adj)
         ST_used = float(ST_adj)
+        rv5_used = rv5_adj
+        rv10_used = rv10_adj
         rv20_used = rv20_adj
         div_yield_used = float(div_yield_adj)
 
@@ -1424,6 +1432,8 @@ def process_one(
                 "abs_log_m_fwd": float(np.round(abs(np.log(float(K_val) / float(forward_used))), 9)) if np.isfinite(forward_used) and forward_used > 0 else np.nan,
 
                 # vol proxy
+                "rv5": float(np.round(rv5_used, 8)) if np.isfinite(rv5_used) else np.nan,
+                "rv10": float(np.round(rv10_used, 8)) if np.isfinite(rv10_used) else np.nan,
                 "rv20": float(np.round(rv20_used, 8)) if np.isfinite(rv20_used) else np.nan,
 
                 # pRN (+ audit raw targets)
@@ -1566,6 +1576,9 @@ def build_snapshot_view(out_df: pd.DataFrame, *, cfg: Config) -> pd.DataFrame:
         "dividend_yield_adj",
         "dividend_yield",
         "forward_price",
+        "rv5",
+        "rv10",
+        "rv20",
         "moneyness_ref",
         "moneyness_ref_price",
         "used_max_abs_logm",

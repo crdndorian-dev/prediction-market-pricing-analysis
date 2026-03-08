@@ -429,6 +429,12 @@ def get_dataset_features(dataset_path: str) -> "DatasetFeaturesResponse":
         if "rv20" in raw_cols and ("T_days" in raw_cols or "sqrt_T_years" in raw_cols):
             if "rv20_sqrtT" not in raw_cols:
                 derived.append("rv20_sqrtT")
+        if "rv5" in raw_cols and "rv20" in raw_cols and "rv5_over_rv20" not in raw_cols:
+            derived.append("rv5_over_rv20")
+        if "rv5" in raw_cols and "rv10" in raw_cols and "rv5_over_rv10" not in raw_cols:
+            derived.append("rv5_over_rv10")
+        if "rv10" in raw_cols and "rv20" in raw_cols and "rv10_over_rv20" not in raw_cols:
+            derived.append("rv10_over_rv20")
         has_log_m_fwd = "log_m_fwd" in raw_cols or has_forward
         if has_log_m_fwd and "rv20" in raw_cols and "T_days" in raw_cols:
             if "log_m_fwd_over_volT" not in raw_cols:
@@ -1249,6 +1255,33 @@ def _parse_optional_int(val: Optional[str]) -> Optional[int]:
         return None
 
 
+def _parse_fold_deltas(path: Path) -> Optional[Dict[str, Any]]:
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return None
+    if df.empty or "delta_logloss" not in df.columns:
+        return None
+    values = pd.to_numeric(df["delta_logloss"], errors="coerce").dropna()
+    if values.empty:
+        return None
+    mean = float(values.mean())
+    std = float(values.std(ddof=1)) if len(values) > 1 else 0.0
+    se = float(std / math.sqrt(len(values))) if len(values) > 0 else None
+    improved = int((values < 0).sum())
+    worst = float(values.max())
+    return {
+        "n_folds": int(len(values)),
+        "mean_delta_logloss": mean,
+        "std_delta_logloss": std,
+        "se_delta_logloss": se,
+        "folds_improved": improved,
+        "worst_delta_logloss": worst,
+    }
+
+
 def _build_metrics_summary(metrics_path: Path) -> Dict[str, SplitMetricSummary]:
     splits: Dict[str, Dict[str, Optional[float]]] = {}
     if not metrics_path.exists():
@@ -1633,7 +1666,12 @@ def _format_feature_latex(feat_name: str) -> str:
         "abs_log_m": "|\\log(m)|",
         "abs_log_m_fwd": "|\\log(m_{\\text{fwd}})|",
         "sqrt_T_years": "\\sqrt{T}",
+        "rv5": "\\sigma_{5}",
+        "rv10": "\\sigma_{10}",
         "rv20_sqrtT": "\\sigma_{20} \\sqrt{T}",
+        "rv5_over_rv20": "\\frac{\\sigma_{5}}{\\sigma_{20}}",
+        "rv5_over_rv10": "\\frac{\\sigma_{5}}{\\sigma_{10}}",
+        "rv10_over_rv20": "\\frac{\\sigma_{10}}{\\sigma_{20}}",
         "log_m_over_volT": "\\frac{\\log(m)}{\\sigma \\sqrt{T}}",
         "abs_log_m_over_volT": "\\frac{|\\log(m)|}{\\sigma \\sqrt{T}}",
         "log_m_fwd_over_volT": "\\frac{\\log(m_{\\text{fwd}})}{\\sigma \\sqrt{T}}",
@@ -1981,6 +2019,7 @@ def _build_linear_equation_spec(
     notes: List[str] = []
     if platt_mode:
         notes.append("Displayed coefficients are the base logistic layer; final pHAT applies an additional Platt calibration transform.")
+    notes.append("Base logistic layer is fit with sklearn LogisticRegression using solver=lbfgs and the default L2 penalty; C controls regularization strength.")
     if mismatch:
         notes.append(
             f"Coefficient/feature count mismatch: {len(coefficients)} coefficients vs {len(feature_names)} feature names; truncated to {n_pairs} terms."
@@ -2103,6 +2142,9 @@ def _build_two_stage_equation_spec(out_dir: Path) -> Optional[Dict[str, Any]]:
         spec["notes"] = list(spec.get("notes") or []) + [
             "Stage B final probabilities may apply an additional Platt calibration transform when configured."
         ]
+    spec["notes"] = list(spec.get("notes") or []) + [
+        "Stage B logistic layer uses sklearn LogisticRegression with solver=lbfgs and the default L2 penalty; C controls regularization strength."
+    ]
     spec["model_family"] = "two_stage_overlay"
     return spec
 

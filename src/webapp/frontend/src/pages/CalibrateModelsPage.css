@@ -588,7 +588,7 @@
   border-radius: var(--radius-md);
   border: 1px solid color-mix(in srgb, var(--color-error) 24%, var(--outline));
   background: color-mix(in srgb, var(--color-error) 4%, var(--surface-soft));
-  padding: var(--space-3);
+  padding: var(--space-3) var(--space-3) var(--space-4);
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
@@ -653,6 +653,23 @@
   background: var(--surface-panel);
   font-size: var(--text-sm);
   color: var(--ink-700);
+}
+
+.metrics-detail-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--outline);
+  background: color-mix(in srgb, var(--surface-soft) 88%, white);
+}
+
+.metrics-detail-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
 }
 
 .metrics-summary-grid {
@@ -792,6 +809,23 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+}
+
+.equation-notes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.equation-note {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--outline);
+  background: color-mix(in srgb, var(--surface-soft) 90%, white);
+  color: var(--ink-600);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .calibrate-equation {
@@ -1004,6 +1038,21 @@
   border-radius: var(--radius-md);
   border: 1px solid var(--outline);
   background: color-mix(in srgb, var(--surface-panel) 94%, white);
+}
+
+.artifact-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.artifact-section-copy {
+  font-size: var(--text-sm);
+  color: var(--ink-600);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .artifact-kv-grid {
