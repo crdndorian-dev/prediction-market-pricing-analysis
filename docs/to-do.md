@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Testing
 
 Testing is what keeps a project from turning into guesswork. When code changes without tests, every deploy becomes a small act of faith. Good tests do not just catch bugs after the fact; they make refactoring safer, clarify expected behavior, and force the team to define what "working" actually means.
@@ -10,3 +11,5 @@ Testing also has to stay practical. The goal is not to reach perfect coverage fo
 Task 1) Improve and make no mistakes
 
 d
+=======
+>>>>>>> 368c07bad26b36c36f3b240102426ff0fae51131
