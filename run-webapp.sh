@@ -109,10 +109,10 @@ start_backend() {
     fi
     # shellcheck disable=SC1091
     source ".venv/bin/activate"
-    if ! python -c "import fastapi, uvicorn, numpy, pandas, requests, yfinance, scipy" >/dev/null 2>&1; then
-      echo "Installing backend deps (fastapi, uvicorn, numpy, pandas, requests, yfinance, scipy)..."
+    if ! python -c "import fastapi, uvicorn, numpy, pandas, requests, yfinance, scipy, sqlalchemy, psycopg" >/dev/null 2>&1; then
+      echo "Installing backend deps (fastapi, uvicorn, numpy, pandas, requests, yfinance, scipy, sqlalchemy, psycopg)..."
       pip install -U pip
-      pip install fastapi uvicorn numpy pandas requests yfinance scipy
+      pip install fastapi uvicorn numpy pandas requests yfinance scipy sqlalchemy "psycopg[binary]"
     fi
     echo "Starting backend on http://localhost:$BACKEND_PORT"
     uvicorn main:app --reload --port "$BACKEND_PORT"
@@ -126,6 +126,16 @@ start_frontend() {
     if [[ ! -d "node_modules" ]]; then
       echo "Installing frontend deps..."
       npm install
+    elif ! npm ls react-plotly.js plotly.js >/dev/null 2>&1; then
+      echo "Installing updated frontend deps..."
+      npm install
+    fi
+    if command -v xattr >/dev/null 2>&1; then
+      for native_pkg in "node_modules/@esbuild/darwin-arm64" "node_modules/@rollup/rollup-darwin-arm64"; do
+        if [[ -d "$native_pkg" ]]; then
+          xattr -dr com.apple.quarantine "$native_pkg" 2>/dev/null || true
+        fi
+      done
     fi
     echo "Starting frontend dev server..."
     VITE_API_BASE_URL="http://localhost:$BACKEND_PORT" npm run dev

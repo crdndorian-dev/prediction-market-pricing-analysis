@@ -9,6 +9,7 @@ from app.api.polymarket_history import router as polymarket_history_router
 from app.api.market_map import router as market_map_router
 from app.api.bars import router as bars_router
 from app.api.markets import router as markets_router
+from app.api.analysis import router as analysis_router
 
 app = FastAPI(title="Polyedgetool Web App")
 app.add_middleware(
@@ -26,3 +27,4 @@ app.include_router(polymarket_history_router)
 app.include_router(market_map_router)
 app.include_router(bars_router)
 app.include_router(markets_router)
+app.include_router(analysis_router)

@@ -26,6 +26,10 @@ def list_active_jobs() -> List[Dict[str, str]]:
     from app.services.polymarket_history import POLYMARKET_HISTORY_JOB_MANAGER
     from app.services.markets import MARKETS_JOB_MANAGER
     try:
+        from app.services.analysis import ANALYSIS_JOB_MANAGER
+    except ModuleNotFoundError:
+        ANALYSIS_JOB_MANAGER = None
+    try:
         from app.services.polymarket_subgraph import SUBGRAPH_JOB_MANAGER
     except ModuleNotFoundError:
         SUBGRAPH_JOB_MANAGER = None
@@ -105,6 +109,20 @@ def list_active_jobs() -> List[Dict[str, str]]:
                 "state": status.status,
             }
         )
+
+    if ANALYSIS_JOB_MANAGER is not None:
+        for status in ANALYSIS_JOB_MANAGER.list_jobs():
+            if status.status not in RUNNING_STATUSES:
+                continue
+            detail = status.progress.stage if status.progress and status.progress.stage else "Research refresh"
+            items.append(
+                {
+                    "jobId": status.job_id,
+                    "name": "Data analysis",
+                    "detail": detail,
+                    "state": status.status,
+                }
+            )
 
     if SUBGRAPH_JOB_MANAGER is not None:
         for status in SUBGRAPH_JOB_MANAGER.list_jobs():

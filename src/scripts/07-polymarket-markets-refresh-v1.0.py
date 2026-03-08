@@ -39,6 +39,7 @@ from polymarket.prn_loader import (
     load_prn_dataset,
     normalize_threshold,
 )
+from polymarket.path_utils import serialize_portable_repo_path
 from polymarket.snapshot_enrichment import enrich_snapshot_features
 from polymarket.weekly_history_io import (
     append_df_to_csv_with_schema,
@@ -1677,7 +1678,7 @@ def main() -> None:
         "prn_rows_appended": 0 if prn_out is None else len(prn_out),
         "bars_partitions": bar_partitions,
         "despike_adjusted": despike_adjusted,
-        "prn_dataset": str(prn_dataset_path) if prn_dataset_path else None,
+        "prn_dataset": serialize_portable_repo_path(prn_dataset_path, REPO_ROOT) if prn_dataset_path else None,
         "prn_missing": prn_missing,
         "last_snapshot_date": last_snapshot_date,
         "snapshot_rows_appended": snapshot_rows_appended,

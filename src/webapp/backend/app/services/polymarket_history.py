@@ -32,6 +32,7 @@ from app.services.polymarket_run_prn import find_run_local_prn_training_file
 from app.services.run_csv_files import PRESERVED_RUNTIME_CSVS
 
 BASE_DIR = Path(__file__).resolve().parents[5]
+SCRIPTS_DIR = BASE_DIR / "src" / "scripts"
 SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "02-polymarket-weekly-history-v1.0.py"
 FEATURES_SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "02-polymarket-build-features-v1.0.py"
 RUN_LOCAL_PRN_REFRESH_SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "08-polymarket-run-prn-refresh-v1.0.py"
@@ -44,6 +45,11 @@ ENV_FILE = BASE_DIR / ".env"
 ENV_SAMPLE_FILE = BASE_DIR / "config" / "polymarket_subgraph.env.sample"
 MAX_RUN_DIR_NAME_LEN = 140
 LEGACY_DECISION_FEATURES_CSV = "decision_features.csv"
+
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from polymarket.path_utils import manifest_path_candidates, serialize_portable_repo_path
 
 _HISTORY_COMPLETE_RE = re.compile(
     r"\[Weekly History\] Market complete (?P<current>\d+)/(?P<total>\d+)\s+job_id=(?P<job_id>[^\s]+)\s+status=(?P<status>\w+)"
@@ -339,10 +345,19 @@ def _load_run_manifest(run_dir: Path) -> Dict[str, Any]:
 
 
 def _resolve_manifest_path(value: Optional[str], *, fallback: Path, label: str, must_exist: bool = True) -> Path:
-    path = _resolve_project_path(value) if value else fallback
-    if must_exist and not path.exists():
-        raise FileNotFoundError(f"{label} not found: {path}")
-    return path
+    candidates: List[Path] = [fallback]
+    if value:
+        candidates.extend(manifest_path_candidates(value, BASE_DIR))
+    seen: set[str] = set()
+    for path in candidates:
+        resolved = path.resolve(strict=False)
+        key = resolved.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        if not must_exist or resolved.exists():
+            return resolved
+    raise FileNotFoundError(f"{label} not found. Checked: {', '.join(sorted(seen))}")
 
 
 def _resolve_manifest_date(manifest: Dict[str, Any], key: str) -> Optional[str]:
@@ -368,15 +383,6 @@ def _expand_dim_market_candidates(path: Path) -> List[Path]:
 def _find_dim_market_for_run(run_dir: Path, manifest: Dict[str, Any]) -> Path:
     candidates: List[Path] = []
 
-    raw_value = manifest.get("dim_market") or manifest.get("dim_market_out")
-    if raw_value:
-        try:
-            resolved = _resolve_project_path(str(raw_value))
-            candidates.extend(_expand_dim_market_candidates(resolved))
-        except ValueError:
-            path = Path(str(raw_value)).expanduser()
-            candidates.extend(_expand_dim_market_candidates(path))
-
     candidates.extend(
         [
             run_dir / "dim_market_weekly.csv",
@@ -397,6 +403,11 @@ def _find_dim_market_for_run(run_dir: Path, manifest: Dict[str, Any]) -> Path:
             BASE_DIR / "src" / "data" / "models" / "polymarket" / "dim_market.csv",
         ]
     )
+
+    raw_value = manifest.get("dim_market") or manifest.get("dim_market_out")
+    if raw_value:
+        for path in manifest_path_candidates(str(raw_value), BASE_DIR):
+            candidates.extend(_expand_dim_market_candidates(path))
 
     for path in candidates:
         if path.exists() and path.is_file():
@@ -517,7 +528,7 @@ def _pipeline_args_from_payload(payload: PolymarketHistoryRunRequest) -> Dict[st
     args["include_subgraph"] = payload.include_subgraph
     args["build_features"] = payload.build_features
     if payload.prn_dataset:
-        args["prn_dataset"] = payload.prn_dataset
+        args["prn_dataset"] = serialize_portable_repo_path(payload.prn_dataset, BASE_DIR)
     args["skip_subgraph_labels"] = payload.skip_subgraph_labels
     return args
 

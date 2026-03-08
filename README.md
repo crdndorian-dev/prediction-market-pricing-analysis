@@ -3,10 +3,10 @@
 A local webapp and research pipeline for comparing Polymarket-style binary prices to option-implied benchmarks.
 Run the full data ingestion, calibration, and analysis workflow on your machine with reproducible outputs.
 
-Author : Dorian Cardon  
+Author : Dorian Cardon & Paul Mieussens
 Year : 2025-2026  
-Contact : crdn.dorian@gmail.com  
-GitHub : https://github.com/crdndorian-dev
+Contact : crdn.dorian@gmail.com  |  mieussens.paul@gmail.com
+GitHub : https://github.com/crdndorian-dev  |  https://github.com/paulmatthewmieussens
 
 # Abstract
 
@@ -26,7 +26,7 @@ The project places particular emphasis on dataset design, temporal consistency, 
 - Frontend: React + TypeScript + Vite (Node 20+).
 - Shared: JSON schemas in `src/webapp/shared/`.
 - Data tooling: numpy, pandas, scipy, yfinance, requests.
-- Storage: local files under `src/data/` and `data/`.
+- Storage: local files under `src/data/` and `data/`, plus PostgreSQL for the Polymarket analysis research store that powers `/data-analysis`.
 
 # Installation and setup
 
@@ -59,8 +59,16 @@ The project places particular emphasis on dataset design, temporal consistency, 
 - `VITE_API_BASE_URL`: frontend API base.
 - `MAX_ACTIVE_JOBS` and `VITE_MAX_ACTIVE_JOBS`: job concurrency caps.
 - `GRAPH_API_KEY`: required for Polymarket subgraph pulls.
+- `POLYMARKET_ANALYSIS_DATABASE_URL`: required for the Postgres-backed Polymarket analysis page and refresh pipeline.
 - `POLYMARKET_SUBGRAPH_ID`, `ORDERBOOK_SUBGRAPH_ID`, `PNL_SUBGRAPH_ID`, `POLYMARKET_SUBGRAPH_URL`: subgraph routing overrides.
 - `THETA_TERMINAL_CMD`, `THETA_TERMINAL_JAR`, `THETA_TERMINAL_WORKDIR`, `THETA_TERMINAL_CREDS`, `THETA_TERMINAL_LOG`, `THETA_TERMINAL_STARTUP_WAIT`: optional Theta Terminal launcher settings.
+
+# Polymarket analysis page
+
+- The `Data Analysis for Polymarket` page reads from PostgreSQL, not directly from the raw files.
+- To enable it, set `POLYMARKET_ANALYSIS_DATABASE_URL` in `.env`. The sample file at `config/polymarket_analysis.env.sample` is a template and is not auto-loaded.
+- Refresh the analysis store with `python src/scripts/09-polymarket-analysis-refresh-v1.0.py`.
+- For authoritative volume metrics, also configure Polymarket subgraph access and avoid `--skip-trade-backfill`; otherwise the dashboard stays usable but volume outputs are marked incomplete/non-authoritative.
 
 # Future work
 

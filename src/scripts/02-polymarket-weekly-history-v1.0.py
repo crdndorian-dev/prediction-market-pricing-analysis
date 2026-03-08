@@ -37,6 +37,7 @@ from polymarket.weekly_history_io import (
     fetch_price_history,
     write_bars,
 )
+from polymarket.path_utils import serialize_portable_repo_path
 
 # Endpoints
 GAMMA_EVENTS = "https://gamma-api.polymarket.com/events"
@@ -1226,10 +1227,10 @@ def main() -> None:
             "gamma_price_mismatches": validation_gamma_mismatches,
             "sparse_markets": validation_sparse_markets,
         },
-        "bars_dir": str(bars_dir),
-        "fact_trade_dir": str(fact_trade_dir),
+        "bars_dir": serialize_portable_repo_path(bars_dir, REPO_ROOT),
+        "fact_trade_dir": serialize_portable_repo_path(fact_trade_dir, REPO_ROOT),
         "bar_partitions": bar_partitions,
-        "dim_market": str(dim_market_out),
+        "dim_market": serialize_portable_repo_path(dim_market_out, REPO_ROOT),
         "subgraph": subgraph_info,
     }
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))

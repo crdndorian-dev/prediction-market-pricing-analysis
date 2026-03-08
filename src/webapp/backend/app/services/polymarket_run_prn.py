@@ -34,6 +34,7 @@ LATEST_POINTER_PATH = WEEKLY_HISTORY_DIR / "latest.json"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+from polymarket.path_utils import manifest_path_candidates
 from polymarket.prn_loader import find_latest_prn_dataset
 
 PRN_DATASET_DIRNAME = "prn_dataset"
@@ -172,9 +173,9 @@ def resolve_preferred_prn_dataset_path(
     if isinstance(pipeline_args, dict):
         prn_value = pipeline_args.get("prn_dataset")
         if isinstance(prn_value, str) and prn_value.strip():
-            path = _resolve_project_path(prn_value)
-            if path.exists():
-                return path
+            for path in manifest_path_candidates(prn_value, BASE_DIR):
+                if path.exists():
+                    return path
 
     latest = find_latest_prn_dataset()
     return latest if latest and latest.exists() else None

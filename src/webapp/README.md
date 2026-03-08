@@ -24,7 +24,7 @@ cd src/webapp/backend
 python -m venv .venv
 source .venv/bin/activate
 pip install -U pip
-pip install fastapi uvicorn
+pip install -r requirements.txt
 ```
 
 Run the server:
@@ -45,9 +45,12 @@ concurrency, set:
 
 ```bash
 cd src/webapp/frontend
-npm create vite@latest . -- --template react-ts
 npm install
 ```
+
+On macOS, if native Vite dependencies are quarantined after install, `run-webapp.sh`
+automatically clears the quarantine flag for the local `esbuild` and `rollup`
+binaries before starting the dev server.
 
 Run the dev server:
 
@@ -55,8 +58,49 @@ Run the dev server:
 npm run dev
 ```
 
-## Next steps
+## Analysis database
 
-1. Add a `/health` route in `backend/app/api/` and wire it in `backend/main.py`.
-2. Create a simple API client in `frontend/src/api/` and call `/health`.
-3. Define the first schema in `shared/schemas/` for a pipeline run result.
+Create a PostgreSQL database for the research layer and expose it via:
+
+```bash
+POLYMARKET_ANALYSIS_DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/polymarket_analysis
+```
+
+Set it in `.env`. `config/polymarket_analysis.env.sample` is a template only and is not auto-loaded by the backend.
+
+## Polymarket analysis refresh
+
+The `Data Analysis for Polymarket` page reads from the Postgres research store.
+Refresh it by running:
+
+```bash
+python src/scripts/09-polymarket-analysis-refresh-v1.0.py
+```
+
+Useful flags:
+
+- `--run-id <run-id>` to limit the import to selected weekly-history runs
+- `--skip-trade-backfill` to avoid orderbook subgraph pulls
+- `--force-full-rebuild` to clear and rebuild raw + mart + research tables
+
+Notes:
+
+- If `POLYMARKET_ANALYSIS_DATABASE_URL` is missing or points to an unreachable database, the analysis endpoints fail fast instead of silently falling back to a sample URL.
+- The refresh script now requires core weekly-history artifacts such as `manifest.json`, `weekly_markets.csv`, and `price_history.csv` for each selected run.
+- The dashboard is still usable without trade backfill, but volume-focused outputs are flagged as non-authoritative when coverage is incomplete.
+
+The webapp also exposes this through `POST /analysis/refresh`.
+
+## Local route
+
+Once backend and frontend are running, open:
+
+```text
+http://localhost:5173/data-analysis
+```
+
+## Current focus
+
+1. Weekly stock ladder market research and monitoring
+2. Postgres-backed empirical thresholds and drift monitoring
+3. Local notes and diagnostics for ongoing Polymarket analysis
