@@ -1664,6 +1664,49 @@ const deltaMetricClass = (value?: number | null): string | undefined => {
   return value <= 0 ? "delta-negative" : "delta-positive";
 };
 
+const autoStatusPillLabel = (status?: string | null): string => {
+  if (status === "selected") return "accepted";
+  if (status === "no_viable_model") return "rejected";
+  return status ? humanizeLabel(status) : "--";
+};
+
+const describeAutoSelection = ({
+  status,
+  selectedTrialId,
+  hasSelectedModel,
+}: {
+  status?: string | null;
+  selectedTrialId?: number | null;
+  hasSelectedModel?: boolean | null;
+}): string => {
+  if (status === "selected") {
+    return selectedTrialId != null ? `Selected (trial ${selectedTrialId})` : "Selected";
+  }
+  if (status === "no_viable_model") {
+    if (hasSelectedModel) {
+      return selectedTrialId != null
+        ? `Best candidate materialized (trial ${selectedTrialId}), not accepted`
+        : "Best candidate materialized, not accepted";
+    }
+    return "No candidate passed acceptance gates";
+  }
+  if (hasSelectedModel) {
+    return selectedTrialId != null ? `Materialized candidate (trial ${selectedTrialId})` : "Materialized candidate";
+  }
+  return "No selected model";
+};
+
+const formatThresholdValue = (value: unknown): string => {
+  const numeric = toNumber(value);
+  if (numeric != null) return formatChartNumber(numeric);
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (value == null) return "--";
+  const text = String(value).trim();
+  return text || "--";
+};
+
+const METRIC_INTERPRETATION_COPY = "Val metrics are pooled across all validation folds. Fold acceptance uses fold-level deltas from fold_deltas.csv.";
+
 const formatTimestamp = (value?: string | null): string => {
   if (!value) return "Unknown";
   const date = new Date(value);
@@ -1675,6 +1718,85 @@ const formatTimestamp = (value?: string | null): string => {
     hour: "2-digit",
     minute: "2-digit",
   });
+};
+
+const AutoSelectionSummaryCard = ({
+  summary,
+  validationFolds,
+}: {
+  summary: NonNullable<ModelDetailResponse["auto_selection_summary"]>;
+  validationFolds: number | null;
+}) => {
+  const reasons = Array.isArray(summary.no_viable_reasons)
+    ? summary.no_viable_reasons.filter((reason): reason is string => typeof reason === "string" && reason.trim().length > 0)
+    : [];
+  const acceptanceEntries = Object.entries(summary.acceptance ?? {}).filter(([, value]) => value != null);
+  const outerEntries = Object.entries(summary.outer_cv ?? {}).filter(([, value]) => value != null);
+  const foldGate = summary.fold_gate_summary ?? null;
+  const showPooledNote = (validationFolds ?? 0) > 1;
+
+  return (
+    <div className="auto-selection-summary-card">
+      <div className="auto-selection-summary-header">
+        <span className="meta-label">Auto-selection status</span>
+        <span className={`status-pill ${summary.status === "selected" ? "success" : "failed"}`}>
+          {autoStatusPillLabel(summary.status)}
+        </span>
+      </div>
+      <div className="auto-selection-summary-copy">
+        {describeAutoSelection({
+          status: summary.status,
+          selectedTrialId: summary.selected_trial_id,
+          hasSelectedModel: summary.has_selected_model,
+        })}
+      </div>
+      {showPooledNote ? (
+        <div className="auto-selection-summary-note">{METRIC_INTERPRETATION_COPY}</div>
+      ) : null}
+      {foldGate && foldGate.n_folds != null ? (
+        <div className="auto-selection-summary-note">
+          Acceptance gates: {foldGate.improved_folds ?? 0}/{foldGate.n_folds} folds improved, worst fold delta{" "}
+          {formatMetricValue(foldGate.worst_delta_logloss)}.
+        </div>
+      ) : null}
+      {reasons.length ? (
+        <div className="auto-selection-summary-section">
+          <span className="meta-label">Rejection reasons</span>
+          <ul className="auto-selection-summary-list">
+            {reasons.map((reason) => (
+              <li key={reason}>{reason}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {acceptanceEntries.length ? (
+        <div className="auto-selection-summary-section">
+          <span className="meta-label">Acceptance thresholds</span>
+          <div className="auto-selection-threshold-grid">
+            {acceptanceEntries.map(([key, value]) => (
+              <div key={key} className="auto-selection-threshold-item">
+                <span className="meta-label">{humanizeLabel(key)}</span>
+                <span>{formatThresholdValue(value)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {outerEntries.length && (summary.outer_cv?.enabled || outerEntries.some(([key]) => key.startsWith("outer"))) ? (
+        <div className="auto-selection-summary-section">
+          <span className="meta-label">Outer CV</span>
+          <div className="auto-selection-threshold-grid">
+            {outerEntries.map(([key, value]) => (
+              <div key={key} className="auto-selection-threshold-item">
+                <span className="meta-label">{humanizeLabel(key)}</span>
+                <span>{formatThresholdValue(value)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
 };
 
 const loadStoredForm = (): CalibrateFormState | null => {
@@ -1989,6 +2111,10 @@ export default function CalibrateModelsPage() {
     (modelDetail?.metadata as Record<string, unknown> | null | undefined)?.["ci_level"],
   );
   const modelCiLabel = modelDetailCiLevel ? `CI (${modelDetailCiLevel}%)` : "CI";
+  const modelDetailValidationFolds = toNumber(
+    (modelDetail?.metadata as Record<string, unknown> | null | undefined)?.["validation_folds"],
+  );
+  const autoSelectionSummary = modelDetail?.auto_selection_summary ?? null;
   const autoProgress = jobStatus?.mode === "auto" ? jobStatus.progress ?? null : null;
 
   const autoProgressLog = useMemo(() => {
@@ -4863,6 +4989,11 @@ export default function CalibrateModelsPage() {
                       const selected = selectedModelId === model.id;
                       const isAutoRun = model.run_type === "auto";
                       const autoStatus = model.auto_status ?? (model.has_selected_model ? "selected" : null);
+                      const autoSelectionText = describeAutoSelection({
+                        status: autoStatus,
+                        selectedTrialId: model.selected_trial_id,
+                        hasSelectedModel: model.has_selected_model,
+                      });
                       return (
                         <article key={model.id} className={`model-card ${selected ? "active" : ""}`}>
                           <button
@@ -4888,7 +5019,7 @@ export default function CalibrateModelsPage() {
                                       autoStatus === "selected" ? "success" : autoStatus === "no_viable_model" ? "failed" : "idle"
                                     }`}
                                   >
-                                    {autoStatus}
+                                    {autoStatusPillLabel(autoStatus)}
                                   </span>
                                 ) : null}
                               </div>
@@ -4922,11 +5053,7 @@ export default function CalibrateModelsPage() {
                                 {isAutoRun ? (
                                   <div>
                                     <span className="meta-label">Auto selection</span>
-                                    <span>
-                                      {model.has_selected_model
-                                        ? `selected${model.selected_trial_id != null ? ` (trial ${model.selected_trial_id})` : ""}`
-                                        : "no selected model"}
-                                    </span>
+                                    <span>{autoSelectionText}</span>
                                   </div>
                                 ) : null}
                               </div>
@@ -4978,6 +5105,14 @@ export default function CalibrateModelsPage() {
                                         <span className="meta-label">Performance summary</span>
                                         <span className="metrics-summary-note">Delta values are model minus baseline.</span>
                                       </div>
+                                      {isAutoRun && autoSelectionSummary ? (
+                                        <AutoSelectionSummaryCard
+                                          summary={autoSelectionSummary}
+                                          validationFolds={modelDetailValidationFolds}
+                                        />
+                                      ) : modelDetailValidationFolds != null && modelDetailValidationFolds > 1 ? (
+                                        <div className="auto-selection-summary-note">{METRIC_INTERPRETATION_COPY}</div>
+                                      ) : null}
                                       {(() => {
                                         const modelRows = modelDetail.split_row_counts ?? {};
                                         const modelGroups = modelDetail.split_group_counts ?? {};
@@ -5129,9 +5264,9 @@ export default function CalibrateModelsPage() {
                                     </div>
                                   ) : null}
 
-                                  {isAutoRun && !model.has_selected_model ? (
+                                  {isAutoRun && autoStatus === "no_viable_model" && !model.has_selected_model ? (
                                     <div className="warning auto-no-viable-callout">
-                                      No viable model was selected from this auto run. Search diagnostics remain available below.
+                                      No candidate passed the acceptance gates for this auto run. Search diagnostics remain available below.
                                     </div>
                                   ) : null}
 

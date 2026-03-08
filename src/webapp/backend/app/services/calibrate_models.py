@@ -1385,6 +1385,60 @@ def _build_metrics_summary(metrics_path: Path) -> Dict[str, SplitMetricSummary]:
     return summary
 
 
+def _build_auto_selection_summary(
+    run_dir: Path,
+    *,
+    summary: Optional[ModelRunSummary],
+    effective_dir: Path,
+    auto_search_summary: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if not summary or summary.run_type != "auto":
+        return None
+
+    payload: Dict[str, Any] = {
+        "status": summary.auto_status,
+        "selected_trial_id": summary.selected_trial_id,
+        "has_selected_model": bool(summary.has_selected_model),
+        "materialized_best_candidate": bool(summary.has_selected_model),
+    }
+
+    if isinstance(auto_search_summary, dict):
+        payload["selection_rule"] = auto_search_summary.get("selection_rule")
+        payload["epsilon"] = auto_search_summary.get("epsilon")
+        payload["score_definition"] = auto_search_summary.get("score_definition")
+        payload["best_score"] = auto_search_summary.get("best_score")
+        payload["no_viable_reasons"] = (
+            auto_search_summary.get("no_viable_reasons")
+            if isinstance(auto_search_summary.get("no_viable_reasons"), list)
+            else None
+        )
+        acceptance = auto_search_summary.get("acceptance")
+        if isinstance(acceptance, dict):
+            payload["acceptance"] = acceptance
+        outer_cv = auto_search_summary.get("outer_cv")
+        if isinstance(outer_cv, dict):
+            payload["outer_cv"] = outer_cv
+        chosen = auto_search_summary.get("chosen")
+        if isinstance(chosen, dict):
+            payload["chosen"] = chosen
+            if payload.get("selected_trial_id") is None and chosen.get("trial_id") is not None:
+                try:
+                    payload["selected_trial_id"] = int(chosen.get("trial_id"))
+                except Exception:
+                    pass
+
+    fold_stats = _parse_fold_deltas(effective_dir / "fold_deltas.csv")
+    if fold_stats:
+        payload["fold_gate_summary"] = {
+            "n_folds": fold_stats.get("n_folds"),
+            "improved_folds": fold_stats.get("folds_improved"),
+            "worst_delta_logloss": fold_stats.get("worst_delta_logloss"),
+            "mean_delta_logloss": fold_stats.get("mean_delta_logloss"),
+        }
+
+    return payload
+
+
 def _build_split_counts(out_dir: Path) -> Tuple[Dict[str, int], Dict[str, int]]:
     split_row_counts: Dict[str, int] = {}
     split_group_counts: Dict[str, int] = {}
@@ -2441,6 +2495,13 @@ def get_model_detail(model_id: str) -> ModelDetailResponse:
             merged["auto_search_summary"] = auto_search_summary
         metadata_payload = merged
 
+    auto_selection_summary = _build_auto_selection_summary(
+        target,
+        summary=summary,
+        effective_dir=effective_dir,
+        auto_search_summary=auto_search_summary if isinstance(auto_search_summary, dict) else None,
+    )
+
     return ModelDetailResponse(
         id=summary.id,
         path=summary.path,
@@ -2465,6 +2526,7 @@ def get_model_detail(model_id: str) -> ModelDetailResponse:
         two_stage_equation_spec=two_stage_equation_spec,
         combined_p_hat_equation=combined_p_hat_equation,
         combined_p_hat_equation_spec=combined_p_hat_equation_spec,
+        auto_selection_summary=auto_selection_summary,
     )
 
 
