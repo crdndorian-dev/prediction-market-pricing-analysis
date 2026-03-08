@@ -61,8 +61,9 @@ export type MarketsSummaryResponse = {
 export type MarketsSeriesPoint = {
   timestamp_utc: string;
   polymarket_buy?: number | null;   // kept for backward compat
-  polymarket_bid?: number | null;   // best bid (sell YES)
-  polymarket_ask?: number | null;   // best ask (buy YES); service falls back to polymarket_buy
+  polymarket_mid?: number | null;   // CLOB price (historical) or real (bid+ask)/2
+  polymarket_bid?: number | null;   // real best bid when available
+  polymarket_ask?: number | null;   // real best ask when available
   pRN?: number | null;
   spot?: number | null;
 };

@@ -5,7 +5,6 @@ import {
   getBarsByStrike,
   listBarRuns,
   listTradingWeeks,
-  getPrnOverlay,
   getPrnOverlayTheta,
   type ByStrikeResponse,
   type BarDataPoint,
@@ -43,7 +42,6 @@ const TRADING_UNIVERSE_TICKERS = [
 
 const MAX_RANGE_DAYS = 5;
 const DEFAULT_TIMEZONE = "America/New_York";
-const SYNTH_BIDASK_SPREAD = 0.02;
 const REQUIRED_PRN_DTES = [1, 2, 3, 4];
 const GAP_BREAK_MS = 4 * 3600_000; // break chart line when gap > 4 hours
 const SPARSE_DATA_THRESHOLD = 0.3; // warn if points < 30% of expected hourly count
@@ -119,73 +117,21 @@ const buildStrikeKey = (series: StrikeSeries) =>
 const strikeKey = (strike: number): string =>
   strike === Math.floor(strike) ? String(Math.floor(strike)) : strike.toFixed(2);
 
-const hasRequiredPrnDtes = (points: PrnPoint[]): boolean => {
+const MIN_DTES_WITH_HOLIDAYS = 2;
+
+const hasRequiredPrnDtes = (points: PrnPoint[], holidaysInRange = 0): boolean => {
   if (!points || points.length === 0) return false;
   const seen = new Set<number>();
   for (const p of points) {
     if (Number.isFinite(p.dte)) seen.add(p.dte);
   }
+  if (holidaysInRange > 0) {
+    const matched = REQUIRED_PRN_DTES.filter((dte) => seen.has(dte)).length;
+    return matched >= MIN_DTES_WITH_HOLIDAYS;
+  }
   return REQUIRED_PRN_DTES.every((dte) => seen.has(dte));
 };
 
-/** Merge two PrnOverlayResponse objects — stored (primary) + Theta (gap-fill).
- *  Theta points only fill in (strike, asof_date, dte) combos missing from stored. */
-function mergePrnOverlays(
-  stored: PrnOverlayResponse | null,
-  theta: PrnOverlayResponse | null,
-): PrnOverlayResponse | null {
-  if (!theta || theta.strikes.length === 0) return stored;
-  if (!stored || stored.strikes.length === 0) return theta;
-
-  // Build index of existing stored keys per strike
-  const storedByStrike = new Map<string, Set<string>>();
-  for (const ps of stored.strikes) {
-    const seen = new Set<string>();
-    for (const p of ps.points) seen.add(`${p.asof_date}|${p.dte}`);
-    storedByStrike.set(strikeKey(ps.strike), seen);
-  }
-
-  // Clone stored strikes into a mutable map
-  const merged = new Map<string, { strike: number; strike_label: string; points: PrnPoint[] }>();
-  for (const ps of stored.strikes) {
-    merged.set(strikeKey(ps.strike), {
-      strike: ps.strike, strike_label: ps.strike_label, points: [...ps.points],
-    });
-  }
-
-  // Add Theta points where stored has gaps
-  for (const ps of theta.strikes) {
-    const key = strikeKey(ps.strike);
-    const existing = storedByStrike.get(key);
-    const entry = merged.get(key) ?? {
-      strike: ps.strike,
-      strike_label: ps.strike_label,
-      points: [],
-    };
-    for (const p of ps.points) {
-      const pk = `${p.asof_date}|${p.dte}`;
-      if (!existing || !existing.has(pk)) {
-        entry.points.push(p);
-      }
-    }
-    merged.set(key, entry);
-  }
-
-  const strikes = Array.from(merged.values())
-    .sort((a, b) => a.strike - b.strike)
-    .map((s) => ({ ...s }));
-
-  return {
-    ticker: stored.ticker,
-    dataset_path: stored.dataset_path,
-    strikes,
-    metadata: {
-      ...stored.metadata,
-      theta_merged: true,
-      theta_strikes: theta.strikes.length,
-    },
-  };
-}
 
 const formatUtcDate = (date: Date) => date.toISOString().slice(0, 10);
 
@@ -282,6 +228,7 @@ function validateDateRange(
 
 type MarketChartPoint = {
   timeMs: number;
+  polymarketMid?: number | null;
   polymarketBid?: number | null;
   polymarketAsk?: number | null;
   prn?: number | null;
@@ -293,16 +240,13 @@ const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
 
 function buildChartPointsFromMarkets(series: MarketsSeriesResponse): MarketChartPoint[] {
   return series.points
-    .map((p) => {
-      const ask = p.polymarket_ask ?? p.polymarket_buy ?? null;
-      const bid = p.polymarket_bid ?? (ask != null ? ask * (1 - SYNTH_BIDASK_SPREAD) : null);
-      return {
-        timeMs: new Date(p.timestamp_utc).getTime(),
-        polymarketAsk: ask != null ? clamp01(ask) : null,
-        polymarketBid: bid != null ? clamp01(bid) : null,
-        prn: p.pRN ?? null,
-      };
-    })
+    .map((p) => ({
+      timeMs: new Date(p.timestamp_utc).getTime(),
+      polymarketMid: p.polymarket_mid ?? p.polymarket_buy ?? null,
+      polymarketBid: p.polymarket_bid ?? null,
+      polymarketAsk: p.polymarket_ask ?? null,
+      prn: null,
+    }))
     .filter((p) => Number.isFinite(p.timeMs));
 }
 
@@ -316,12 +260,11 @@ function buildChartPointsFromBars(
       dropped += 1;
       continue;
     }
-    const ask = clamp01(bar.price);
-    const bid = clamp01(bar.price * (1 - SYNTH_BIDASK_SPREAD));
     points.push({
       timeMs: bar.timestamp_ms,
-      polymarketAsk: ask,
-      polymarketBid: bid,
+      polymarketMid: clamp01(bar.price),
+      polymarketBid: null,
+      polymarketAsk: null,
       prn: null,
     });
   }
@@ -427,12 +370,13 @@ function BacktestChart({
   }, [filteredDots, filteredPoints, xRange]);
 
   const hasTime = Number.isFinite(minTime) && Number.isFinite(maxTime) && minTime < maxTime;
+  const hasMid = filteredPoints.some((p) => p.polymarketMid !== null && p.polymarketMid !== undefined);
   const hasBid = filteredPoints.some((p) => p.polymarketBid !== null && p.polymarketBid !== undefined);
   const hasAsk = filteredPoints.some((p) => p.polymarketAsk !== null && p.polymarketAsk !== undefined);
   const hasPrnLine = filteredPoints.some((p) => p.prn !== null && p.prn !== undefined);
   const hasPrnDots = filteredDots.length > 0;
 
-  if (!hasTime || (!hasBid && !hasAsk && !hasPrnLine && !hasPrnDots)) {
+  if (!hasTime || (!hasMid && !hasBid && !hasAsk && !hasPrnLine && !hasPrnDots)) {
     return (
       <div className="preview-placeholder">
         Not enough data ({filteredPoints.length} point{filteredPoints.length !== 1 ? "s" : ""}).
@@ -446,6 +390,7 @@ function BacktestChart({
   );
   const yScale = useCallback((v: number) => PT + PLOT_H * (1 - clamp01(v)), []);
 
+  const midPath = hasTime ? buildPath(filteredPoints, (p) => p.polymarketMid, xScale, yScale) : "";
   const bidPath = hasTime ? buildPath(filteredPoints, (p) => p.polymarketBid, xScale, yScale) : "";
   const askPath = hasTime ? buildPath(filteredPoints, (p) => p.polymarketAsk, xScale, yScale) : "";
   const prnPath = hasTime ? buildPath(filteredPoints, (p) => p.prn, xScale, yScale) : "";
@@ -523,6 +468,7 @@ function BacktestChart({
           </g>
         ))}
 
+        {midPath && <path d={midPath} className="chart-line chart-line-mid" />}
         {bidPath && <path d={bidPath} className="chart-line chart-line-bid" />}
         {askPath && <path d={askPath} className="chart-line chart-line-ask" />}
         {prnPath && <path d={prnPath} className="chart-line chart-line-prn" />}
@@ -556,6 +502,12 @@ function BacktestChart({
         <div className="chart-tooltip">
           <div className="chart-tooltip-time">{formatUtcLabel(hovered.timeMs)}</div>
           <div className="chart-tooltip-sub">{formatLocalLabel(hovered.timeMs)} ET</div>
+          {hasMid && (
+            <div className="chart-tooltip-row">
+              <span className="tt-label tt-mid">PM Mid</span>
+              <span>{formatPrice(hovered.polymarketMid ?? NaN)}</span>
+            </div>
+          )}
           {hasBid && (
             <div className="chart-tooltip-row">
               <span className="tt-label tt-bid">PM Bid</span>
@@ -607,11 +559,17 @@ function StrikeCard({
     () => (marketsSeries ? buildChartPointsFromMarkets(marketsSeries) : fallbackPoints),
     [marketsSeries, fallbackPoints],
   );
+  const hasOverlayPrn = (prnPoints?.length ?? 0) > 0;
+  const displayPoints = useMemo(() => {
+    if (!hasOverlayPrn) return chartPoints;
+    return chartPoints.map((point) => ({ ...point, prn: null }));
+  }, [chartPoints, hasOverlayPrn]);
 
-  const hasBid = chartPoints.some((p) => p.polymarketBid !== null && p.polymarketBid !== undefined);
-  const hasAsk = chartPoints.some((p) => p.polymarketAsk !== null && p.polymarketAsk !== undefined);
-  const hasPrnLine = chartPoints.some((p) => p.prn !== null && p.prn !== undefined);
-  const hasPrnDots = (prnPoints?.length ?? 0) > 0;
+  const hasMid = displayPoints.some((p) => p.polymarketMid !== null && p.polymarketMid !== undefined);
+  const hasBid = displayPoints.some((p) => p.polymarketBid !== null && p.polymarketBid !== undefined);
+  const hasAsk = displayPoints.some((p) => p.polymarketAsk !== null && p.polymarketAsk !== undefined);
+  const hasPrnLine = displayPoints.some((p) => p.prn !== null && p.prn !== undefined);
+  const hasPrnDots = hasOverlayPrn;
   const pointsCount = marketsSeries ? marketsSeries.points.length : fallbackPoints.length;
 
   const isSparseData = useMemo(() => {
@@ -623,12 +581,10 @@ function StrikeCard({
 
   const overlaySource = prnSourceLabel
     ? prnSourceLabel.replace(/^pRN source:\s*/i, "")
-    : "overlay";
-  const prnSourceChip = hasPrnDots && hasPrnLine
-    ? `pRN sources: ${overlaySource} + markets proxy`
-    : hasPrnDots
-      ? `pRN source: ${overlaySource}`
-      : (hasPrnLine ? "pRN source: markets proxy" : null);
+    : "Theta";
+  const prnSourceChip = hasPrnDots
+    ? `pRN source: ${overlaySource}`
+    : null;
 
   return (
     <div className="mdc-wrap">
@@ -637,16 +593,22 @@ function StrikeCard({
           {ticker} <span className="mdc-strike">${series.strike_label}</span>
         </div>
         <div className="mdc-legend">
+          {hasMid && (
+            <span className="mdc-legend-item">
+              <span className="mdc-swatch mdc-swatch-mid" />
+              PM Mid
+            </span>
+          )}
           {hasBid && (
             <span className="mdc-legend-item">
               <span className="mdc-swatch mdc-swatch-bid" />
-              Polymarket Bid
+              PM Bid
             </span>
           )}
           {hasAsk && (
             <span className="mdc-legend-item">
               <span className="mdc-swatch mdc-swatch-ask" />
-              Polymarket Ask
+              PM Ask
             </span>
           )}
           {(hasPrnLine || hasPrnDots) && (
@@ -658,13 +620,13 @@ function StrikeCard({
         </div>
       </div>
       <BacktestChart
-        points={chartPoints}
+        points={displayPoints}
         prnDots={prnPoints ?? []}
         xRange={xRange}
       />
       <div className="mdc-footer">
         <div className="mdc-footer-chips">
-          {!hasBid && !hasAsk && (
+          {!hasMid && !hasBid && !hasAsk && (
             <span className="chip chip-warn">No Polymarket data</span>
           )}
           {!hasPrnLine && !hasPrnDots && (
@@ -1114,8 +1076,8 @@ export default function BacktestsPage() {
         `[BacktestsPage] Run: ticker=${selectedTicker} range=${startDate}..${endDate} run=${selectedBarRun || "latest"}`,
       );
 
-      // Fetch PM bars and pRN overlay in parallel
-      const [data, prn, marketsSeries] = await Promise.all([
+      // Fetch PM bars and markets series in parallel
+      const [data, marketsSeries] = await Promise.all([
         getBarsByStrike({
           ticker: selectedTicker,
           runId: selectedBarRun || undefined,
@@ -1124,15 +1086,6 @@ export default function BacktestsPage() {
           tokenRole: "yes",
           maxPointsPerStrike: 500,
           viewMode: "full_history",
-        }),
-        getPrnOverlay({
-          ticker: selectedTicker,
-          runId: selectedBarRun || undefined,
-          timeMin,
-          timeMax,
-        }).catch((err) => {
-          console.warn("[BacktestsPage] pRN overlay fetch failed (non-fatal):", err);
-          return null;
         }),
         getMarketsSeriesByTicker({
           ticker: selectedTicker,
@@ -1148,12 +1101,6 @@ export default function BacktestsPage() {
         `[BacktestsPage] Result: ${data.strikes.length} strikes, metadata=`,
         data.metadata,
       );
-      if (prn) {
-        console.log(
-          `[BacktestsPage] pRN overlay: ${prn.strikes.length} strikes, metadata=`,
-          prn.metadata,
-        );
-      }
 
       setProgress("processing");
 
@@ -1167,17 +1114,14 @@ export default function BacktestsPage() {
       }
 
       setResult(data);
-      setPrnData(prn);
       setMarketsSeriesByTicker(marketsSeries);
       setAvailableStrikes(data.strikes);
       setAvailableStrikesLoading(false);
       setAvailableStrikesError(null);
       const cacheKey = `${selectedTicker}|${selectedBarRun || "latest"}|${startDate}|${endDate}`;
       strikeCacheRef.current.set(cacheKey, data.strikes);
-      setProgress("done");
 
-      // --- Theta fallback: always try to fill per-strike DTE gaps ---
-      // Extract Polymarket strike values so Theta interpolates at exact targets
+      // Theta is the sole pRN source — compute for all PM strikes
       const pmStrikes = data.strikes.map((s) => s.strike);
       if (pmStrikes.length > 0) {
         setProgress("theta");
@@ -1200,12 +1144,10 @@ export default function BacktestsPage() {
             `[BacktestsPage] Theta pRN: ${thetaPrn.strikes.length} strikes, metadata=`,
             thetaPrn.metadata,
           );
-          // Merge: stored data takes priority; Theta fills per-strike per-DTE gaps
-          const merged = mergePrnOverlays(prn, thetaPrn);
-          setPrnData(merged);
+          setPrnData(thetaPrn);
         }
-        setProgress("done");
       }
+      setProgress("done");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setRunError(msg);
@@ -1488,9 +1430,12 @@ export default function BacktestsPage() {
       {result && (() => {
         // Build pRN lookup: canonical strike key -> PrnChartPoint[]
         const prnByStrike = new Map<string, PrnChartPoint[]>();
+        const holidaysInRange = Array.isArray(prnData?.metadata?.holidays_in_range)
+          ? (prnData!.metadata!.holidays_in_range as string[]).length
+          : 0;
         if (prnData) {
           for (const ps of prnData.strikes) {
-            if (!hasRequiredPrnDtes(ps.points)) {
+            if (!hasRequiredPrnDtes(ps.points, holidaysInRange)) {
               continue;
             }
             const key = strikeKey(ps.strike);
@@ -1545,10 +1490,8 @@ export default function BacktestsPage() {
         const prnSourceLabel = (() => {
           if (!prnData) return null;
           const meta = prnData.metadata ?? {};
-          if (meta.theta_merged) return "pRN source: training + Theta";
-          if (meta.source === "theta_on_demand") return "pRN source: Theta on-demand";
-          if (prnData.dataset_path) return "pRN source: training CSV";
-          return "pRN source: overlay";
+          if (meta.source === "theta_on_demand") return "pRN source: Theta";
+          return "pRN source: Theta";
         })();
 
         const qualityFlags = (() => {

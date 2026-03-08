@@ -540,9 +540,10 @@ def _build_series_point(row: pd.Series, col_flags: Dict[str, bool]) -> MarketsSe
     """
     Build a MarketsSeriesPoint from a DataFrame row.
 
-    Bid/ask resolution (no data leakage — values are read as-of each timestamp):
-      - polymarket_ask  → 'polymarket_ask' column if present, else fallback to 'polymarket_buy'
-      - polymarket_bid  → 'polymarket_bid' column if present, else None
+    Price resolution:
+      - polymarket_mid  → 'polymarket_mid' column, else fallback to 'polymarket_buy'
+      - polymarket_bid  → 'polymarket_bid' column (real CLOB bid, NaN for historical)
+      - polymarket_ask  → 'polymarket_ask' column (real CLOB ask, NaN for historical)
       - polymarket_buy  → kept verbatim for backward compat
     """
     def _f(col: str) -> Optional[float]:
@@ -551,13 +552,16 @@ def _build_series_point(row: pd.Series, col_flags: Dict[str, bool]) -> MarketsSe
         return None
 
     buy = _f("polymarket_buy")
+    mid = _f("polymarket_mid")
+    if mid is None:
+        mid = buy
     bid = _f("polymarket_bid")
-    # ask: use dedicated column if available, otherwise fall back to buy price
-    ask = _f("polymarket_ask") if col_flags.get("polymarket_ask") else buy
+    ask = _f("polymarket_ask")
 
     return MarketsSeriesPoint(
         timestamp_utc=row["timestamp_utc"].strftime("%Y-%m-%dT%H:%M:%SZ"),
         polymarket_buy=buy,
+        polymarket_mid=mid,
         polymarket_bid=bid,
         polymarket_ask=ask,
         pRN=_f("pRN"),
@@ -566,7 +570,7 @@ def _build_series_point(row: pd.Series, col_flags: Dict[str, bool]) -> MarketsSe
 
 
 def _col_flags(df: pd.DataFrame) -> Dict[str, bool]:
-    cols = {"polymarket_buy", "polymarket_bid", "polymarket_ask", "pRN", "spot"}
+    cols = {"polymarket_buy", "polymarket_mid", "polymarket_bid", "polymarket_ask", "pRN", "spot"}
     return {c: c in df.columns for c in cols}
 
 

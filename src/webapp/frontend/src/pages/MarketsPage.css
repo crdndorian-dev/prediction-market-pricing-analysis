@@ -499,6 +499,7 @@
   flex-shrink: 0;
 }
 
+.mdc-swatch-mid  { background: #7c3aed; }
 .mdc-swatch-bid  { background: #2563eb; }
 .mdc-swatch-ask  { background: #ef5350; }
 .mdc-swatch-prn  {
@@ -534,8 +535,9 @@
   stroke-linecap: round;
 }
 
-.chart-line-bid { stroke: #2563eb; stroke-width: 2; }
-.chart-line-ask { stroke: #ef5350; stroke-width: 2; }
+.chart-line-mid { stroke: #7c3aed; stroke-width: 2; }
+.chart-line-bid { stroke: #2563eb; stroke-width: 1.5; stroke-dasharray: 4 3; }
+.chart-line-ask { stroke: #ef5350; stroke-width: 1.5; stroke-dasharray: 4 3; }
 .chart-line-prn { stroke: #3ad29f; stroke-width: 2.5; stroke-dasharray: 6 4; }
 .chart-hover    { stroke: rgba(0,0,0,0.25); stroke-width: 1; }
 
@@ -559,6 +561,7 @@
 .chart-tooltip-sub  { color: var(--ink-400); margin-bottom: 0.5rem; font-size: 10px; }
 .chart-tooltip-row  { display: flex; justify-content: space-between; gap: 1rem; line-height: 1.6; }
 .tt-label { font-weight: 600; }
+.tt-mid   { color: #7c3aed; }
 .tt-bid   { color: #2563eb; }
 .tt-ask   { color: #ef5350; }
 .tt-prn   { color: #1daa77; }

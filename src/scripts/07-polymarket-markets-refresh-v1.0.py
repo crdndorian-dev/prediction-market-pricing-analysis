@@ -63,6 +63,7 @@ BAR_FREQS = ("1h", "1d")
 
 # Column names (keep in one place to avoid drift).
 COL_PM_BUY = "polymarket_buy"
+COL_PM_MID = "polymarket_mid"
 COL_PM_BID = "polymarket_bid"
 COL_PM_ASK = "polymarket_ask"
 
@@ -78,6 +79,7 @@ PRN_COLUMNS = [
     "event_id",
     "event_endDate",
     COL_PM_BUY,
+    COL_PM_MID,
     COL_PM_BID,
     COL_PM_ASK,
     "spot",
@@ -127,6 +129,7 @@ market_tradeable = SNAPSHOT.market_tradeable
 discover_finishweek_event_slug = SNAPSHOT.discover_finishweek_event_slug
 extract_strike_K_from_question = SNAPSHOT.extract_strike_K_from_question
 _local_date = SNAPSHOT._local_date
+get_prices_bulk = SNAPSHOT.get_prices_bulk
 
 
 # -----------------------------
@@ -146,7 +149,6 @@ class MarketsConfig:
     request_timeout_s: int = 30
     sleep_between_requests_s: float = 0.15
     clob_max_workers: int = 4
-    bidask_spread_bps: float = 200.0
     despike_enabled: bool = False
     despike_jump: float = 0.25
     despike_revert: float = 0.1
@@ -268,10 +270,54 @@ def make_session() -> requests.Session:
         total=5,
         backoff_factor=0.5,
         status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"],
+        allowed_methods=["GET", "POST"],
     )
     session.mount("https://", HTTPAdapter(max_retries=retry))
     return session
+
+
+def fetch_live_bidask(
+    markets_week: pd.DataFrame,
+    session: requests.Session,
+    cfg: "MarketsConfig",
+) -> Dict[str, Dict[str, Optional[float]]]:
+    """Fetch live bid/ask for all YES tokens via CLOB POST /prices.
+
+    Returns {market_id: {"bid": float|None, "ask": float|None, "mid": float|None}}.
+    Gracefully returns empty dict on failure.
+    """
+    snapshot_cfg = SnapshotConfig(request_timeout_s=cfg.request_timeout_s)
+    token_map: Dict[str, str] = {}
+    for _, row in markets_week.iterrows():
+        mid = str(row.get("market_id", ""))
+        tid = str(row.get("yes_token_id", ""))
+        if mid and tid:
+            token_map[tid] = mid
+
+    if not token_map:
+        return {}
+
+    token_ids = list(token_map.keys())
+    try:
+        buy_prices = get_prices_bulk(token_ids, snapshot_cfg, side="BUY", session=session)
+        sell_prices = get_prices_bulk(token_ids, snapshot_cfg, side="SELL", session=session)
+    except Exception as exc:
+        print(f"[Markets] Live bid/ask fetch failed (non-fatal): {exc}", flush=True)
+        return {}
+
+    result: Dict[str, Dict[str, Optional[float]]] = {}
+    for tid, mid in token_map.items():
+        b = buy_prices.get(tid)
+        s = sell_prices.get(tid)
+        vals = [v for v in (b, s) if v is not None]
+        if not vals:
+            continue
+        bid = min(vals) if len(vals) == 2 else None
+        ask = max(vals) if len(vals) == 2 else None
+        mid_price = (bid + ask) / 2.0 if bid is not None and ask is not None else None
+        result[mid] = {"bid": bid, "ask": ask, "mid": mid_price}
+
+    return result
 
 
 def atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -854,12 +900,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tickers", type=str, default=None, help="Comma-separated tickers")
     parser.add_argument("--tz", type=str, default=MarketsConfig().tz_name)
     parser.add_argument("--fidelity", type=int, default=MarketsConfig().clob_fidelity_min)
-    parser.add_argument(
-        "--bidask-spread-bps",
-        type=float,
-        default=MarketsConfig().bidask_spread_bps,
-        help="Spread proxy (bps) used to derive polymarket_bid from polymarket_buy.",
-    )
     parser.add_argument("--prn-dataset", type=str, default=None, help="Path to option-chain pRN dataset.")
     parser.add_argument("--prn-asof-tz", type=str, default=MarketsConfig().prn_asof_tz)
     parser.add_argument("--prn-asof-close-time", type=str, default=MarketsConfig().prn_asof_close_time)
@@ -879,7 +919,6 @@ def main() -> None:
     cfg = MarketsConfig(
         tz_name=args.tz,
         clob_fidelity_min=int(args.fidelity),
-        bidask_spread_bps=float(args.bidask_spread_bps),
         prn_asof_tz=args.prn_asof_tz,
         prn_asof_close_time=args.prn_asof_close_time,
     )
@@ -1268,9 +1307,32 @@ def main() -> None:
         if COL_PM_BUY not in prn_out.columns:
             prn_out[COL_PM_BUY] = np.nan
 
-        spread = cfg.bidask_spread_bps / 10_000.0
-        prn_out[COL_PM_ASK] = pd.to_numeric(prn_out[COL_PM_BUY], errors="coerce")
-        prn_out[COL_PM_BID] = (prn_out[COL_PM_ASK] * (1 - spread)).clip(0, 1)
+        # CLOB price is the best available mid-price proxy for historical rows
+        prn_out[COL_PM_MID] = pd.to_numeric(prn_out[COL_PM_BUY], errors="coerce")
+
+        # Fetch live bid/ask from CLOB for active markets
+        live_bidask = fetch_live_bidask(markets_week, session, cfg)
+        if live_bidask:
+            print(f"[Markets] Live bid/ask fetched for {len(live_bidask)} market(s)", flush=True)
+
+        prn_out[COL_PM_BID] = np.nan
+        prn_out[COL_PM_ASK] = np.nan
+
+        if live_bidask:
+            prn_out["_ts_parsed"] = pd.to_datetime(prn_out["timestamp_utc"], utc=True, errors="coerce")
+            for mid_val, prices in live_bidask.items():
+                mask = prn_out["market_id"].astype(str) == str(mid_val)
+                if not mask.any():
+                    continue
+                latest_idx = prn_out.loc[mask, "_ts_parsed"].idxmax()
+                if pd.notna(latest_idx):
+                    if prices.get("bid") is not None:
+                        prn_out.at[latest_idx, COL_PM_BID] = prices["bid"]
+                    if prices.get("ask") is not None:
+                        prn_out.at[latest_idx, COL_PM_ASK] = prices["ask"]
+                    if prices.get("mid") is not None:
+                        prn_out.at[latest_idx, COL_PM_MID] = prices["mid"]
+            prn_out.drop(columns=["_ts_parsed"], inplace=True)
 
         prn_out["schema_version"] = SCHEMA_VERSION_PRN
         prn_out["run_id"] = run_id
@@ -1503,9 +1565,23 @@ def main() -> None:
                     snapshot["pPM_buy"] = pd.to_numeric(snapshot["pPM_buy"], errors="coerce")
                     snapshot["qPM_buy"] = pd.to_numeric(snapshot["qPM_buy"], errors="coerce")
 
-                    snapshot["pPM_mid"] = snapshot["pPM_buy"]
+                    # Use live bid/ask if available
+                    if live_bidask:
+                        snapshot["market_id"] = snapshot["market_id"].astype(str)
+                        for ba_mid, ba_prices in live_bidask.items():
+                            mask = snapshot["market_id"] == str(ba_mid)
+                            if not mask.any():
+                                continue
+                            if ba_prices.get("bid") is not None and ba_prices.get("ask") is not None:
+                                snapshot.loc[mask, "pPM_buy"] = ba_prices["ask"]
+                                snapshot.loc[mask, "pPM_mid"] = ba_prices["mid"]
+                                snapshot.loc[mask, "yes_spread"] = ba_prices["ask"] - ba_prices["bid"]
+
+                    if "pPM_mid" not in snapshot.columns:
+                        snapshot["pPM_mid"] = snapshot["pPM_buy"]
                     snapshot["qPM_mid"] = snapshot["qPM_buy"]
-                    snapshot["yes_spread"] = np.nan
+                    if "yes_spread" not in snapshot.columns:
+                        snapshot["yes_spread"] = np.nan
                     snapshot["no_spread"] = np.nan
                     snapshot["pm_ok"] = snapshot["pPM_buy"].notna() | snapshot["qPM_buy"].notna()
                     snapshot["pm_reason"] = np.where(snapshot["pm_ok"], "ok", "no_clob_trade")
