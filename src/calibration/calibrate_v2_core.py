@@ -3217,6 +3217,8 @@ def run_calibration_from_cache(
         },
         "regularization": {
             "c_grid": str(args.C_grid),
+            "penalty": "l2",
+            "solver": "lbfgs",
             "calibration_method": str(args.calibrate),
             "selection_objective": str(args.selection_objective),
             "best_c": float(best_c),
@@ -3269,6 +3271,8 @@ def run_calibration_from_cache(
         "script_version": SCRIPT_VERSION,
         "calibrator_version": "inline-v2.0",
         "best_C": best_c,
+        "regularization_penalty": "l2",
+        "regularization_solver": "lbfgs",
         "c_selection_rule": c_selection_rule,
         "c_search_stats": c_search_stats,
         "best_score": best_score if np.isfinite(best_score) else None,

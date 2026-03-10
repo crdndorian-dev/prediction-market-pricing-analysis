@@ -15,6 +15,11 @@ type DocPageLink = {
 
 const docPages: DocPageLink[] = [
   {
+    id: "patch-notes",
+    label: "Patch Notes",
+    route: "/docs#patch-notes",
+  },
+  {
     id: "option-chain",
     label: "Option Chain History Builder",
     route: "/option-chain-history-builder",
@@ -63,6 +68,11 @@ export const optionChainDoc = (
         <ul>
           <li>
             Historical option-chain snapshots for the tickers and date range you select.
+          </li>
+          <li>
+            Additional realized-volatility context in the dataset artifacts,
+            including <code>rv5</code>, <code>rv10</code>, and the existing
+            <code>rv20</code> snapshot field.
           </li>
           <li>
             Multiple CSV views produced by the build script (training, snapshot,
@@ -1450,6 +1460,10 @@ const polymarketHistoryDoc = (
       <li>Optionally enable subgraph ingestion or feature building.</li>
       <li>Run the pipeline and monitor progress in the output panel.</li>
       <li>
+        Weekly history runs refresh exact run-local pRN coverage after the raw
+        history fetch, then optionally build decision features.
+      </li>
+      <li>
         Use the Run Directory tab to preview CSVs and activate or rename the run for
         downstream use.
       </li>
@@ -1541,8 +1555,13 @@ const polymarketHistoryDoc = (
             Build decision features to support model calibration.
           </li>
           <li>
-            Feature building requires a pRN dataset directory with a
+            Feature building resolves a pRN dataset directory with a
             <code>training-*.csv</code> file from the Option Chain History Builder.
+          </li>
+          <li>
+            The selected training dataset also seeds the exact run-local pRN
+            refresh so weekly outputs and downstream features stay aligned to the
+            same source dataset.
           </li>
           <li>
             The resolved training CSV path is shown after selection.
@@ -1554,11 +1573,12 @@ const polymarketHistoryDoc = (
     <h3>Run Monitoring & Logs</h3>
     <ul>
       <li>
-        Weekly history shows two progress bars: stage 1 for markets/history and
-        stage 2 for feature creation (only when enabled).
+        Weekly history shows a market/history progress bar and, when enabled, a
+        second progress bar for decision-feature creation.
       </li>
       <li>
-        Stage labels update as the pipeline moves through history, features, and finalizing.
+        After the history fetch completes, the run performs an exact run-local
+        pRN refresh before finalizing outputs or starting decision-feature generation.
       </li>
       <li>
         Progress counts only advance when a market finishes, so they never move backward.
@@ -1587,7 +1607,8 @@ const polymarketHistoryDoc = (
         open/download actions.
       </li>
       <li>
-        Use <strong>Rename run</strong> to update the run label (saved immediately).
+        Use <strong>Rename run</strong> to update the label and, when the kebab-case
+        value changes, rename the run directory and prefixed CSV files in the same action.
       </li>
       <li>
         Activate marks a run as the active/default run for downstream workflows.
@@ -1614,6 +1635,65 @@ const polymarketHistoryDoc = (
       <li>
         The job guard prevents overlapping pipeline runs beyond the configured limit.
       </li>
+    </ul>
+  </>
+);
+
+const patchNotesDoc = (
+  <>
+    <p>
+      This section summarizes the feature additions and fixes introduced on the
+      current branch relative to <code>main</code>. Use it as the quick changelog,
+      then refer to the page-specific sections below for the detailed workflows.
+    </p>
+
+    <div className="docs-split">
+      <div className="docs-panel">
+        <h3>Scope</h3>
+        <ul>
+          <li>Branch covered here: <code>fix/stale-pm-history-price</code>.</li>
+          <li>Main areas touched: Option Chain, Polymarket History, Markets, Backtests, and Calibrate.</li>
+          <li>Main goal: replace synthetic or stale market artifacts with exact run-local data and expose the resulting diagnostics in the UI.</li>
+        </ul>
+      </div>
+      <div className="docs-panel">
+        <h3>Operator Notes</h3>
+        <ul>
+          <li>Historical synthetic Polymarket bid/ask values were retired; historical CLOB prices are now treated as a mid-like series unless a live quote is available.</li>
+          <li>Weekly-history runs can now rename their directory and matching prefixed CSV files without breaking the active-run pointer.</li>
+          <li>One-off maintenance scripts were added for exact run-local pRN refreshes, option-chain RV backfills, and Gamma-volume backfills.</li>
+        </ul>
+      </div>
+    </div>
+
+    <h3>Polymarket Data Integrity</h3>
+    <ul>
+      <li>Markets refresh no longer fabricates historical bid/ask spreads from a single Polymarket price field.</li>
+      <li><code>markets_prn_hourly.csv</code> now stores <code>polymarket_mid</code>, while real bid/ask values are only kept when the refresh job can fetch live quotes.</li>
+      <li>Weekly-history runs now execute an exact run-local pRN refresh before optional feature generation so market artifacts and decision features use the same pRN source.</li>
+    </ul>
+
+    <h3>Markets And Backtests</h3>
+    <ul>
+      <li>Markets charts now render a dedicated PM mid line and only show bid/ask when real quote data exists.</li>
+      <li>Backtests now use Theta as the sole pRN overlay source, drop the old markets-proxy pRN line, and render PM mid instead of synthetic bid/ask.</li>
+      <li>Backtests strike cards now surface Gamma volume, sparse-data warnings, and strike-quality flags for low-volume, suspect-midprice, and stale data.</li>
+      <li>Strike filtering now includes <code>Hide suspect data</code> and minimum-volume controls, and holiday weeks relax the strict {`{`}1,2,3,4{`}`} DTE requirement.</li>
+    </ul>
+
+    <h3>Calibration Workflow</h3>
+    <ul>
+      <li>Option-chain datasets now expose additional realized-volatility fields such as <code>rv5</code>, <code>rv10</code>, and RV ratio features when available.</li>
+      <li>The Models tab now opens the default metrics artifact automatically and groups selected-model vs auto-search artifacts more clearly.</li>
+      <li>AUTO model detail now surfaces selection-rule context, fold-gate summary, no-viable reasons, richer metrics cards, and equation notes.</li>
+      <li>Saved Calibrate form state now recovers cleanly when a previously selected dataset path becomes stale.</li>
+    </ul>
+
+    <h3>Dataset And Maintenance Utilities</h3>
+    <ul>
+      <li>Existing option-chain datasets can be backfilled in place with the new realized-volatility columns using <code>01-option-chain-backfill-rv-features-v1.0.py</code>.</li>
+      <li>Weekly-history runs can rebuild exact local pRN coverage with <code>08-polymarket-run-prn-refresh-v1.0.py</code>.</li>
+      <li>Existing weekly-markets files can be enriched with Gamma volume using <code>backfill_gamma_volume.py</code>.</li>
     </ul>
   </>
 );
@@ -1705,6 +1785,11 @@ const calibrateDoc = (
       </li>
       <li>
         AUTO cards also show auto status (<code>selected</code>, <code>no_viable_model</code>, etc.) and selected trial id when available.
+      </li>
+      <li>
+        Selecting a model auto-opens the default metrics artifact, while richer
+        summary cards expose split coverage, per-split deltas, and auto-selection
+        diagnostics when available.
       </li>
       <li>
         AUTO run directories use a dual layout:
@@ -1804,6 +1889,11 @@ const calibrateDoc = (
     <ul>
       <li>
         Optional features are grouped by category (Moneyness, Volatility, Market Quality, Coverage and Sanity, Interactions).
+      </li>
+      <li>
+        The Volatility group can now expose <code>rv5</code>, <code>rv10</code>,
+        <code>rv20</code>, <code>rv20_sqrtT</code>, and RV ratio features when
+        the selected dataset includes them.
       </li>
       <li>
         Optional features are loaded from dataset metadata so unavailable fields are not selectable.
@@ -1994,7 +2084,7 @@ const marketsDoc = (
       <li>Click Refresh Now to fetch data for that week.</li>
       <li>Select a ticker from the trading universe list.</li>
       <li>Choose a strike to view its chart.</li>
-      <li>Hover the chart to compare bid/ask and pRN at a point in time.</li>
+      <li>Hover the chart to compare PM mid, optional bid/ask, and pRN at a point in time.</li>
     </ol>
 
     <h3>Run Configuration</h3>
@@ -2005,8 +2095,9 @@ const marketsDoc = (
     </p>
     <h3>Data Integrity</h3>
     <ul>
-      <li>pRN curves come from option‑chain snapshots (no BS/yfinance).</li>
+      <li>pRN curves come from the exact run-local pRN dataset tied to the active weekly-history run.</li>
       <li>Raw CLOB trades are appended; hourly bars are rebuilt from raw history.</li>
+      <li>Historical bid/ask is no longer synthesized from a hardcoded spread.</li>
       <li>Daily snapshots use the latest completed NY close to avoid leakage.</li>
     </ul>
 
@@ -2073,10 +2164,14 @@ const marketsDoc = (
     <h3>Chart Behavior</h3>
     <ul>
       <li>
-        Lines: Polymarket bid, Polymarket ask, and pRN (risk‑neutral probability).
+        Lines: Polymarket mid, optional live bid/ask, and pRN (risk‑neutral probability).
       </li>
       <li>
         Hover shows UTC timestamp, local time in ET, and values at the nearest point.
+      </li>
+      <li>
+        Historical rows usually show only the mid line; bid/ask appears only when
+        a refresh captured real live quotes for that market.
       </li>
       <li>
         Warning chips appear when Polymarket or pRN data is missing for a strike.
@@ -2106,7 +2201,7 @@ const backtestsDoc = (
     <p>
       The Backtests page is an experimental price explorer for Polymarket data.
       It lets you inspect per‑strike price curves for a specific trading week and
-      compare them to pRN overlays from option‑chain data. This page is still
+      compare them to pRN overlays derived from Theta option data. This page is still
       under active development, so its scope is intentionally narrow and focused
       on visual inspection rather than full strategy backtesting.
     </p>
@@ -2116,9 +2211,9 @@ const backtestsDoc = (
         <h3>What It Does Today</h3>
         <ul>
           <li>Loads per‑strike Polymarket price bars for a ticker and week.</li>
-          <li>Overlays pRN dots computed from option‑chain history.</li>
-          <li>Optionally merges Theta‑computed pRN to fill missing DTEs.</li>
-          <li>Renders a single strike chart with bid/ask + pRN overlays.</li>
+          <li>Overlays Theta-computed pRN dots aligned to the selected week.</li>
+          <li>Surfaces strike quality diagnostics such as volume, suspect data, and stale prices.</li>
+          <li>Renders a single strike chart with PM mid, optional live bid/ask, and pRN overlays.</li>
         </ul>
       </div>
       <div className="docs-panel">
@@ -2135,6 +2230,7 @@ const backtestsDoc = (
     <ul>
       <li>Ticker selector: choose one trading‑universe ticker.</li>
       <li>Strikes panel: select the strike to chart.</li>
+      <li>Quality filters: hide suspect strikes and apply a minimum Gamma-volume threshold.</li>
       <li>Trading week calendar: pick a Mon–Fri week with data.</li>
       <li>Pipeline run selector: choose which historical run to use.</li>
       <li>Results: a single chart for the selected strike.</li>
@@ -2144,9 +2240,10 @@ const backtestsDoc = (
     <ol className="docs-steps">
       <li>Select a ticker from the trading universe.</li>
       <li>Pick a trading week from the calendar (Mon–Fri only).</li>
+      <li>Optionally hide suspect strikes or require a minimum volume threshold.</li>
       <li>Choose a strike from the strikes list.</li>
       <li>The chart renders automatically once selections are valid.</li>
-      <li>Hover the chart to inspect bid/ask and pRN values by time.</li>
+      <li>Hover the chart to inspect PM mid, optional bid/ask, and pRN values by time.</li>
     </ol>
 
     <h3>Controls & Inputs</h3>
@@ -2189,33 +2286,41 @@ const backtestsDoc = (
       <li>
         Selecting a strike auto‑runs the data fetch and renders the chart.
       </li>
+      <li>
+        Strike cards show quality chips for low-volume, suspect-midprice, stale,
+        sparse, or missing-overlay conditions when detected.
+      </li>
     </ul>
 
     <h3>Data Sources & Overlays</h3>
     <ul>
       <li>
-        Polymarket bars are the primary price series; bid/ask is synthesized
-        from bar prices when only mid prices are available.
+        Polymarket bars are the fallback price series and are treated as PM mid
+        when weekly markets data is unavailable.
       </li>
       <li>
-        A weekly markets series is loaded when available to supply bid/ask and
-        a proxy pRN line.
+        A weekly markets series is loaded when available to supply PM mid and any
+        real live bid/ask quotes captured by the Markets refresh workflow.
       </li>
       <li>
-        pRN overlay dots come from the option‑chain dataset; only strikes with
-        DTEs {`{`}1,2,3,4{`}`} are plotted.
+        pRN overlay dots come from Theta on-demand calculations for the selected
+        ticker and week; only strikes with DTEs {`{`}1,2,3,4{`}`} are plotted in normal weeks.
       </li>
       <li>
-        Theta on‑demand pRN is queried after the initial fetch to fill missing
-        strike/DTE gaps; the merge is non‑destructive and only fills gaps.
+        Theta on-demand pRN is the sole overlay source; holiday weeks relax the
+        DTE requirement so valid shortened weeks are not dropped entirely.
       </li>
     </ul>
 
     <h3>Chart Behavior</h3>
     <ul>
       <li>Chart time axis is UTC; tooltips show UTC and ET timestamps.</li>
-      <li>Lines: Polymarket bid, Polymarket ask, and pRN (when available).</li>
-      <li>Dots: pRN overlay points (from training data and/or Theta).</li>
+      <li>Lines: Polymarket mid, optional bid/ask, and pRN (when available).</li>
+      <li>Dots: Theta pRN overlay points.</li>
+      <li>
+        Long gaps in the time series break the rendered path so missing sessions
+        are not connected with a false continuous line.
+      </li>
       <li>
         If there are fewer than two points, the chart shows a “Not enough data”
         placeholder.
@@ -2228,8 +2333,8 @@ const backtestsDoc = (
     <h3>Progress & Errors</h3>
     <ul>
       <li>
-        Progress steps include fetching markets, processing strikes, Theta pRN,
-        and completion.
+        Progress steps include fetching bars and market context first, then the
+        Theta pRN overlay, and finally completion.
       </li>
       <li>
         Errors are shown inline and stop the run; non‑fatal overlay failures log
@@ -2295,6 +2400,7 @@ export default function DocumentationPage() {
                   Open Page
                 </Link>
               </div>
+              {page.id === "patch-notes" ? patchNotesDoc : null}
               {page.id === "option-chain" ? <OptionChainDocContent /> : null}
               {page.id === "polymarket-history" ? polymarketHistoryDoc : null}
               {page.id === "calibrate" ? <CalibrateDocContent /> : null}

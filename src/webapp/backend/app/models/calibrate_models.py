@@ -483,6 +483,7 @@ class ModelDetailResponse(BaseModel):
     two_stage_equation_spec: Optional[Dict[str, Any]] = None
     combined_p_hat_equation: Optional[str] = None
     combined_p_hat_equation_spec: Optional[Dict[str, Any]] = None
+    auto_selection_summary: Optional[Dict[str, Any]] = None
 
 
 class CalibrateModelRunResponse(BaseModel):

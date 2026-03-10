@@ -402,6 +402,8 @@ def ensure_engineered_features(df: pd.DataFrame, requested_features: List[str]) 
     for c in [
         "T_days",
         "T_years",
+        "rv5",
+        "rv10",
         "rv20",
         "r",
         "log_m",
@@ -506,6 +508,18 @@ def ensure_engineered_features(df: pd.DataFrame, requested_features: List[str]) 
 
     if "rv20_sqrtT" in requested_features:
         df["rv20_sqrtT"] = _numeric_series(df, "rv20") * _numeric_series(df, "sqrt_T_years")
+
+    if "rv5_over_rv20" in requested_features:
+        denom = _numeric_series(df, "rv20").replace(0, np.nan)
+        df["rv5_over_rv20"] = _numeric_series(df, "rv5") / denom
+
+    if "rv5_over_rv10" in requested_features:
+        denom = _numeric_series(df, "rv10").replace(0, np.nan)
+        df["rv5_over_rv10"] = _numeric_series(df, "rv5") / denom
+
+    if "rv10_over_rv20" in requested_features:
+        denom = _numeric_series(df, "rv20").replace(0, np.nan)
+        df["rv10_over_rv20"] = _numeric_series(df, "rv10") / denom
 
     if ("log_m_over_volT" in requested_features) or ("abs_log_m_over_volT" in requested_features):
         denom = _numeric_series(df, "rv20") * _numeric_series(df, "sqrt_T_years")

@@ -124,6 +124,7 @@ class Config:
     despike_jump: float = 0.25
     despike_revert: float = 0.1
     clob_price_history_url: str = CLOB_PRICE_HISTORY
+    min_gamma_volume: float = 0.0
 
 
 # ----------------------------
@@ -598,6 +599,25 @@ def extract_weekly_markets(
                     except (ValueError, TypeError):
                         pass
 
+                # Capture Gamma volume metrics for liquidity filtering
+                gamma_volume = None
+                gamma_volume_24hr = None
+                for vol_key in ("volume", "volumeNum"):
+                    raw_vol = market.get(vol_key)
+                    if raw_vol is not None:
+                        try:
+                            gamma_volume = float(raw_vol)
+                        except (ValueError, TypeError):
+                            pass
+                        if gamma_volume is not None:
+                            break
+                raw_vol_24hr = market.get("volume24hr") or market.get("volume_24hr")
+                if raw_vol_24hr is not None:
+                    try:
+                        gamma_volume_24hr = float(raw_vol_24hr)
+                    except (ValueError, TypeError):
+                        pass
+
                 rows.append(
                     {
                         "event_id": event_id,
@@ -622,6 +642,8 @@ def extract_weekly_markets(
                         "active": market.get("active"),
                         "closed": market.get("closed"),
                         "gamma_yes_price": gamma_yes_price,
+                        "gamma_volume": gamma_volume,
+                        "gamma_volume_24hr": gamma_volume_24hr,
                         "schema_version": SCHEMA_VERSION_MARKETS,
                     }
                 )
@@ -893,6 +915,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bars-freqs", type=str, default="1h,1d", help="Comma-separated bar freqs (e.g. 1h,1d)")
     parser.add_argument("--include-subgraph", action="store_true", help="Attempt subgraph trade ingest if configured")
     parser.add_argument("--max-subgraph-entities", type=int, default=Config().max_subgraph_entities)
+    parser.add_argument(
+        "--min-gamma-volume",
+        type=float,
+        default=0.0,
+        help="Minimum Gamma volume (USD) to include a market. Markets below this threshold are skipped during CLOB fetch (0 = no filter).",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -937,6 +965,7 @@ def main() -> None:
         despike_enabled=bool(args.despike),
         despike_jump=float(args.despike_jump),
         despike_revert=float(args.despike_revert),
+        min_gamma_volume=float(args.min_gamma_volume),
     )
 
     out_dir = Path(args.out_dir)
@@ -975,6 +1004,8 @@ def main() -> None:
     print(f"[Weekly History] start_date={start_date} end_date={end_date}", flush=True)
     print(f"[Weekly History] run_id={run_id}", flush=True)
     print(f"[Weekly History] script_version={SCRIPT_VERSION}", flush=True)
+    if cfg.min_gamma_volume > 0:
+        print(f"[Weekly History] min_gamma_volume={cfg.min_gamma_volume:.0f} (filtering enabled)", flush=True)
 
     if slug_requested and not event_sources:
         print("[Weekly History] No event sources parsed from provided URLs/slugs.")
@@ -1034,6 +1065,7 @@ def main() -> None:
     validation_gamma_mismatches = 0
     validation_sparse_markets = 0
     validation_outcomes_swapped = 0
+    validation_low_volume_skipped = 0
 
     start_dt = date_to_utc_start(start_date) if start_date else None
     end_dt = date_to_utc_end(end_date) if end_date else None
@@ -1053,6 +1085,7 @@ def main() -> None:
         ticker = row.get("ticker")
         threshold = row.get("threshold")
         gamma_yes_price = row.get("gamma_yes_price")
+        gamma_volume = row.get("gamma_volume")
 
         job_id = _safe_job_id(f"{ticker}:{threshold}:{market_id}")
         print(
@@ -1060,6 +1093,19 @@ def main() -> None:
             f"job_id={job_id} ticker={ticker} threshold={threshold} market_id={market_id}",
             flush=True,
         )
+
+        # Skip markets below the minimum volume threshold
+        if cfg.min_gamma_volume > 0:
+            vol = gamma_volume if gamma_volume is not None and np.isfinite(gamma_volume) else 0.0
+            if vol < cfg.min_gamma_volume:
+                validation_low_volume_skipped += 1
+                print(
+                    f"[Weekly History][SKIP] Low volume: {ticker} @ ${threshold} "
+                    f"(market_id={market_id}) gamma_volume={vol:.0f} < threshold={cfg.min_gamma_volume:.0f}",
+                    flush=True,
+                )
+                continue
+
         print(
             f"[Weekly History] Processing market {idx + 1}/{markets_total}: "
             f"{ticker} @ ${threshold} (market_id={market_id})",
@@ -1221,10 +1267,12 @@ def main() -> None:
             "complement_tolerance": COMPLEMENT_TOLERANCE,
             "gamma_price_tolerance": GAMMA_PRICE_TOLERANCE,
             "min_points_threshold": MIN_POINTS_THRESHOLD,
+            "min_gamma_volume": cfg.min_gamma_volume,
             "outcomes_swapped": validation_outcomes_swapped,
             "complement_violations": validation_complement_violations,
             "gamma_price_mismatches": validation_gamma_mismatches,
             "sparse_markets": validation_sparse_markets,
+            "low_volume_skipped": validation_low_volume_skipped,
         },
         "bars_dir": str(bars_dir),
         "fact_trade_dir": str(fact_trade_dir),

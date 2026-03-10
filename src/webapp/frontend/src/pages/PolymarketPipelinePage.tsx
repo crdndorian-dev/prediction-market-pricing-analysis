@@ -516,7 +516,7 @@ export default function PolymarketPipelinePage() {
     setRenameError(null);
     try {
       const cleaned = renameValue.trim();
-      await renamePipelineRun(runId, cleaned);
+      await renamePipelineRun(runId, cleaned, cleaned || null);
       await loadRuns();
       handleCancelRename();
     } catch (err) {

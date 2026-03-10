@@ -175,9 +175,13 @@ const C_GRID_PRESETS: Record<string, string> = {
 
 const AUTO_FEATURE_SETS = [
   ["x_logit_prn"],
+  ["x_logit_prn", "rv5"],
+  ["x_logit_prn", "rv10"],
   ["x_logit_prn", "rv20"],
   ["x_logit_prn", "abs_log_m_fwd"],
   ["x_logit_prn", "rv20", "abs_log_m_fwd"],
+  ["x_logit_prn", "rv20", "rv5_over_rv20"],
+  ["x_logit_prn", "rv20", "rv10_over_rv20"],
   ["x_logit_prn", "rv20", "abs_log_m_fwd", "log_rel_spread"],
 ];
 const AUTO_C_VALUES = [0.003, 0.01, 0.03, 0.1, 0.3];
@@ -203,8 +207,13 @@ const BASE_FEATURE = "x_logit_prn";
 const FEATURE_OPTIONS = [
   "log_m_fwd",
   "abs_log_m_fwd",
+  "rv5",
+  "rv10",
   "rv20",
   "rv20_sqrtT",
+  "rv5_over_rv20",
+  "rv5_over_rv10",
+  "rv10_over_rv20",
   "log_m_fwd_over_volT",
   "log_rel_spread",
   "had_fallback",
@@ -223,7 +232,8 @@ const CATEGORICAL_FEATURE_LABELS: Record<string, string> = {
 const CATEGORICAL_FEATURE_OPTION_SET = new Set<string>(CATEGORICAL_FEATURE_OPTIONS);
 const FEATURE_CATEGORIES: Array<{ title: string; items: readonly string[] }> = [
   { title: "Moneyness", items: ["log_m_fwd", "abs_log_m_fwd", "log_m_fwd_over_volT"] },
-  { title: "Volatility", items: ["rv20", "rv20_sqrtT"] },
+  { title: "Volatility", items: ["rv5", "rv10", "rv20", "rv20_sqrtT"] },
+  { title: "Volatility Regime", items: ["rv5_over_rv20", "rv5_over_rv10", "rv10_over_rv20"] },
   { title: "Market Quality", items: ["log_rel_spread", "prn_raw_gap", "dividend_yield"] },
   { title: "Coverage and Sanity", items: ["had_fallback", "had_intrinsic_drop", "had_band_clip"] },
   { title: "Interactions", items: ["x_m", "x_abs_m"] },
@@ -437,6 +447,114 @@ const formatMaybe = (value: unknown): string => {
   return JSON.stringify(value);
 };
 
+const DEFAULT_REGULARIZATION_PENALTY = "l2";
+const DEFAULT_REGULARIZATION_SOLVER = "lbfgs";
+
+const inferRegularizationSummary = (data: Record<string, unknown>): Record<string, unknown> => {
+  const regularization =
+    data.regularization && typeof data.regularization === "object"
+      ? (data.regularization as Record<string, unknown>)
+      : null;
+  return {
+    penalty:
+      regularization?.penalty ??
+      data.regularization_penalty ??
+      DEFAULT_REGULARIZATION_PENALTY,
+    solver:
+      regularization?.solver ??
+      data.regularization_solver ??
+      DEFAULT_REGULARIZATION_SOLVER,
+    best_c:
+      regularization?.best_c ??
+      data.best_C ??
+      null,
+    c_grid:
+      regularization?.c_grid ??
+      null,
+    selection_rule:
+      regularization?.selection_rule ??
+      data.c_selection_rule ??
+      null,
+  };
+};
+
+const splitCsvValue = (value: unknown): string[] => {
+  if (typeof value !== "string") return [];
+  return Array.from(
+    new Set(
+      value
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
+};
+
+const toProjectRelativePath = (value: unknown): string => {
+  if (typeof value !== "string") return "";
+  const normalized = value.replace(/\\/g, "/").trim();
+  if (!normalized) return "";
+  if (!normalized.startsWith("/")) return normalized;
+  const srcIndex = normalized.lastIndexOf("/src/");
+  if (srcIndex >= 0) return normalized.slice(srcIndex + 1);
+  const dataIndex = normalized.lastIndexOf("/data/");
+  if (dataIndex >= 0) return normalized.slice(dataIndex + 1);
+  return normalized;
+};
+
+const resolveTimeRegimeKey = (config: Record<string, unknown>): TimeRegimeKey => {
+  const filters =
+    config.filters && typeof config.filters === "object"
+      ? (config.filters as Record<string, unknown>)
+      : null;
+  const topLevelDow = typeof config.asof_dow_allowed === "string" ? config.asof_dow_allowed : null;
+  const filterDowRaw = Array.isArray(filters?.asof_dow_allowed) ? filters?.asof_dow_allowed[0] : filters?.asof_dow_allowed;
+  const filterTdaysRaw = Array.isArray(filters?.tdays_allowed) ? filters?.tdays_allowed[0] : filters?.tdays_allowed;
+  const topLevelTdays = toNumber(config.tdays_allowed);
+  const filterTdays = toNumber(filterTdaysRaw);
+  const dowMap: Record<string, TimeRegimeKey> = {
+    mon: "mon_4",
+    monday: "mon_4",
+    tue: "tue_3",
+    tues: "tue_3",
+    tuesday: "tue_3",
+    wed: "wed_2",
+    wednesday: "wed_2",
+    thu: "thu_1",
+    thur: "thu_1",
+    thurs: "thu_1",
+    thursday: "thu_1",
+  };
+  if (topLevelDow) {
+    const match = dowMap[topLevelDow.trim().toLowerCase()];
+    if (match) return match;
+  }
+  if (typeof filterDowRaw === "string") {
+    const match = dowMap[filterDowRaw.trim().toLowerCase()];
+    if (match) return match;
+  }
+  const dowIndex = toNumber(filterDowRaw);
+  if (dowIndex != null) {
+    if (dowIndex === 0) return "mon_4";
+    if (dowIndex === 1) return "tue_3";
+    if (dowIndex === 2) return "wed_2";
+    if (dowIndex === 3) return "thu_1";
+  }
+  if (topLevelTdays != null) {
+    if (topLevelTdays === 4) return "mon_4";
+    if (topLevelTdays === 3) return "tue_3";
+    if (topLevelTdays === 2) return "wed_2";
+    if (topLevelTdays === 1) return "thu_1";
+  }
+  if (filterTdays != null) {
+    if (filterTdays === 4) return "mon_4";
+    if (filterTdays === 3) return "tue_3";
+    if (filterTdays === 2) return "wed_2";
+    if (filterTdays === 1) return "thu_1";
+  }
+  return "thu_1";
+};
+
 const computeAvailableWeeks = (dataset?: DatasetFileSummary | null): number | null => {
   if (!dataset) return null;
   if (typeof dataset.week_count === "number" && Number.isFinite(dataset.week_count)) {
@@ -582,7 +700,6 @@ const ARTIFACT_DESCRIPTIONS: Record<string, string> = {
   "leaderboard.csv": "Auto-search leaderboard ranked by objective (legacy).",
   "auto_search_leaderboard.csv": "Auto-search leaderboard ranked by objective.",
   "auto_search_summary.json": "Auto-search selection summary and chosen configuration.",
-  "auto_search_no_viable.json": "Reasons and baseline snapshot when no candidate is accepted.",
   "auto_search_progress.json": "Auto-search progress state captured during the run.",
   "run_manifest.json": "Run-level manifest linking selected model and auto-search artifacts.",
   "outer_folds.json": "Outer backtest fold definitions and date ranges (auto search).",
@@ -597,12 +714,148 @@ const ARTIFACT_DESCRIPTIONS: Record<string, string> = {
   "two_stage_metadata.json": "Two-stage metadata.",
 };
 
+const ARTIFACT_TITLES: Record<string, string> = {
+  "metrics.csv": "Metrics",
+  "metrics_summary.json": "Metrics Summary",
+  "split_timeline.json": "Split Timeline",
+  "fold_deltas.csv": "Fold Delta",
+  "group_delta_distribution.csv": "Group Delta Distribution",
+  "audit_split_composition.csv": "Split Composition Audit",
+  "audit_overlap.json": "Overlap Audit",
+  "audit_weight_distribution.json": "Weight Distribution Audit",
+  "config.executed.json": "Executed Config",
+  "metadata.json": "Run Metadata",
+  "feature_manifest.json": "Feature Manifest",
+  "best_config.json": "Best Config",
+  "best_model_report.md": "Best Model Report",
+  "leaderboard.csv": "Leaderboard",
+  "auto_search_leaderboard.csv": "Auto Search Leaderboard",
+  "auto_search_summary.json": "Auto Search Summary",
+  "auto_search_progress.json": "Auto Search Progress",
+  "run_manifest.json": "Run Manifest",
+  "outer_folds.json": "Outer Folds",
+  "outer_cv_summary.json": "Outer CV Summary",
+  "outer_fold_results.csv": "Outer Fold Result",
+  "reliability_bins.csv": "Reliability Plot",
+  "rolling_summary.csv": "Rolling Summary",
+  "rolling_windows.csv": "Rolling Window",
+  "metrics_groups.csv": "Metrics by Group",
+  "two_stage_metrics.csv": "Two-Stage Metrics",
+  "two_stage_metrics_summary.json": "Two-Stage Metrics Summary",
+  "two_stage_metadata.json": "Two-Stage Metadata",
+  "progress.json": "Progress",
+  "trial_result.json": "Trial Result",
+};
+
+const HIDDEN_ARTIFACT_NAMES = new Set<string>(["auto_search_no_viable.json"]);
+
+const DEFAULT_ARTIFACT_FILE_NAME = "metrics.csv";
+const DEFAULT_CHART_WIDTH = 960;
+
 const fileBaseName = (path: string | null | undefined): string => {
   if (!path) return "";
   const normalized = path.replace(/\\/g, "/");
   const parts = normalized.split("/");
   return parts[parts.length - 1] || normalized;
 };
+
+const artifactFilePath = (file: ModelFileSummary): string => file.relative_path ?? file.name;
+
+const isDefaultArtifactFile = (file: ModelFileSummary | null | undefined): boolean =>
+  !!file && fileBaseName(artifactFilePath(file)) === DEFAULT_ARTIFACT_FILE_NAME;
+
+const humanizeLabel = (value: string): string =>
+  value
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+
+const isHiddenArtifactPath = (path: string | null | undefined): boolean =>
+  HIDDEN_ARTIFACT_NAMES.has(fileBaseName(path));
+
+const artifactDisplayTitle = (path: string | null | undefined): string => {
+  const base = fileBaseName(path);
+  if (!base) return "Artifact";
+  if (ARTIFACT_TITLES[base]) return ARTIFACT_TITLES[base];
+  return humanizeLabel(base.replace(/\.[^.]+$/, "").replace(/[.]+/g, " "));
+};
+
+const formatFileSizeLabel = (sizeBytes: number): string =>
+  sizeBytes < 1024 ? `${sizeBytes} B` : `${(sizeBytes / 1024).toFixed(1)} KB`;
+
+const isProbablyNumeric = (value: string): boolean => {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  const normalized = trimmed.replace(/,/g, "");
+  if (/^(true|false|null|none|nan)$/i.test(normalized)) return false;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed);
+};
+
+const inferNumericColumns = (parsed: ParsedCsv): Set<string> => {
+  const numericColumns = new Set<string>();
+  parsed.headers.forEach((column) => {
+    const values = parsed.rows
+      .map((row) => String(row[column] ?? "").trim())
+      .filter(Boolean);
+    if (!values.length) return;
+    const numericCount = values.filter(isProbablyNumeric).length;
+    if (numericCount / values.length >= 0.85) {
+      numericColumns.add(column);
+    }
+  });
+  return numericColumns;
+};
+
+const buildLinearTicks = (min: number, max: number, count = 5): number[] => {
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return [];
+  if (Math.abs(max - min) < 1e-9) return [min];
+  return Array.from({ length: Math.max(2, count) }, (_, idx) => (
+    min + ((max - min) * idx) / (Math.max(2, count) - 1)
+  ));
+};
+
+const buildIndexTicks = (size: number, count = 6): number[] => {
+  if (size <= 0) return [];
+  if (size === 1) return [0];
+  const steps = Math.min(size, Math.max(2, count));
+  const ticks = new Set<number>();
+  for (let idx = 0; idx < steps; idx += 1) {
+    ticks.add(Math.round(((size - 1) * idx) / (steps - 1)));
+  }
+  return Array.from(ticks).sort((left, right) => left - right);
+};
+
+const formatChartNumber = (value: number): string => {
+  if (!Number.isFinite(value)) return "--";
+  const abs = Math.abs(value);
+  if (abs >= 1000) return value.toFixed(0);
+  if (abs >= 100) return value.toFixed(1);
+  if (abs >= 1) return value.toFixed(3);
+  if (abs >= 0.01) return value.toFixed(4);
+  return value.toExponential(1);
+};
+
+const formatChartDate = (timestamp: number, rangeMs = 0): string => {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(rangeMs > 330 * 24 * 3600 * 1000 ? { year: "numeric" as const } : {}),
+  });
+};
+
+const parseChartDateLabel = (value: string): number | null => {
+  const trimmed = value.trim();
+  if (!trimmed || !/[-/]|[A-Za-z]/.test(trimmed)) return null;
+  const parsed = Date.parse(trimmed);
+  return Number.isNaN(parsed) ? null : parsed;
+};
+
+const truncateAxisLabel = (value: string, max = 16): string =>
+  value.length > max ? `${value.slice(0, max - 1)}…` : value;
 
 const KeyValueGrid = ({ data }: { data: Record<string, unknown> }) => {
   const entries = Object.entries(data);
@@ -617,7 +870,7 @@ const KeyValueGrid = ({ data }: { data: Record<string, unknown> }) => {
         return (
           <div key={key} className="artifact-kv-item">
             <span className="meta-label">{key}</span>
-            <span>{text}</span>
+            <span className="artifact-kv-value">{text}</span>
           </div>
         );
       })}
@@ -626,17 +879,24 @@ const KeyValueGrid = ({ data }: { data: Record<string, unknown> }) => {
 };
 
 const CsvTableView = ({ parsed, limit = 50 }: { parsed: ParsedCsv; limit?: number }) => {
+  const numericColumns = inferNumericColumns(parsed);
+  const tableMinWidth = Math.max(640, parsed.headers.length * 140);
   if (!parsed.headers.length) {
     return <div className="empty">CSV did not include headers.</div>;
   }
   const rows = parsed.rows.slice(0, limit);
   return (
     <div className="table-container artifact-table">
-      <table className="preview-table">
+      <table className="preview-table artifact-preview-table" style={{ minWidth: `${tableMinWidth}px` }}>
         <thead>
           <tr>
             {parsed.headers.map((column) => (
-              <th key={column}>{column}</th>
+              <th
+                key={column}
+                className={numericColumns.has(column) ? "artifact-table-cell-number" : "artifact-table-cell-text"}
+              >
+                {column}
+              </th>
             ))}
           </tr>
         </thead>
@@ -645,7 +905,12 @@ const CsvTableView = ({ parsed, limit = 50 }: { parsed: ParsedCsv; limit?: numbe
             rows.map((row, idx) => (
               <tr key={idx}>
                 {parsed.headers.map((column) => (
-                  <td key={column}>{row[column] ?? ""}</td>
+                  <td
+                    key={column}
+                    className={numericColumns.has(column) ? "artifact-table-cell-number" : "artifact-table-cell-text"}
+                  >
+                    {row[column] ?? ""}
+                  </td>
                 ))}
               </tr>
             ))
@@ -659,6 +924,33 @@ const CsvTableView = ({ parsed, limit = 50 }: { parsed: ParsedCsv; limit?: numbe
     </div>
   );
 };
+
+const ArtifactFileButton = ({
+  titlePath,
+  displayPath,
+  meta,
+  isActive = false,
+  disabled = false,
+  onClick,
+}: {
+  titlePath: string;
+  displayPath: string;
+  meta: string;
+  isActive?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) => (
+  <button
+    type="button"
+    className={`file-item ${isActive ? "active" : ""}`}
+    onClick={onClick}
+    disabled={disabled}
+  >
+    <span className="file-name">{artifactDisplayTitle(titlePath)}</span>
+    <span className="file-path">{displayPath}</span>
+    <span className="file-size">{meta}</span>
+  </button>
+);
 
 const buildMetricsSummaryFromCsv = (parsed: ParsedCsv) => {
   const rows = parsed.rows;
@@ -817,11 +1109,48 @@ const JsonSectionView = ({
   );
 };
 
-const ConfigJsonView = ({ data }: { data: Record<string, unknown> }) => (
+const EquationNotes = ({ spec }: { spec?: ModelDetailResponse["model_equation_spec"] | null }) => {
+  const notes = Array.isArray(spec?.notes)
+    ? spec.notes.filter((note): note is string => typeof note === "string" && note.trim().length > 0)
+    : [];
+  if (!notes.length) return null;
+  return (
+    <div className="equation-notes">
+      {notes.map((note) => (
+        <div key={note} className="equation-note">
+          {note}
+        </div>
+      ))}
+    </div>
+  );
+};
+
+const ConfigJsonView = ({
+  data,
+  title,
+  onRunAgain,
+}: {
+  data: Record<string, unknown>;
+  title?: string;
+  onRunAgain?: (() => void) | null;
+}) => (
   <div className="artifact-stack">
+    <section className="artifact-section">
+      <div className="artifact-section-header">
+        <span className="meta-label">{title ?? "Config"}</span>
+        {onRunAgain ? (
+          <button type="button" className="button light small" onClick={onRunAgain}>
+            Run again
+          </button>
+        ) : null}
+      </div>
+      <span className="artifact-section-copy">
+        Load this configuration into the Run Job tab so you can rerun it directly.
+      </span>
+    </section>
     <JsonSectionView title="Dataset" data={{ csv: data.csv, out_dir: data.out_dir, run_mode: data.run_mode }} />
     <JsonSectionView title="Split" data={(data.split as Record<string, unknown>) ?? null} />
-    <JsonSectionView title="Regularization" data={(data.regularization as Record<string, unknown>) ?? null} />
+    <JsonSectionView title="Regularization" data={inferRegularizationSummary(data)} />
     <JsonSectionView title="Model structure" data={(data.model_structure as Record<string, unknown>) ?? null} />
     <JsonSectionView title="Weighting" data={(data.weighting as Record<string, unknown>) ?? null} />
     <JsonSectionView title="Bootstrap" data={(data.bootstrap as Record<string, unknown>) ?? null} />
@@ -835,6 +1164,8 @@ const MetadataView = ({ data }: { data: Record<string, unknown> }) => (
       title="Run summary"
       data={{
         best_C: data.best_C,
+        regularization_penalty: data.regularization_penalty ?? DEFAULT_REGULARIZATION_PENALTY,
+        regularization_solver: data.regularization_solver ?? DEFAULT_REGULARIZATION_SOLVER,
         calibration_used: data.calibration_used,
         selection_objective: data.selection_objective,
         split_strategy: data.split_strategy,
@@ -958,15 +1289,22 @@ const SplitTimelineView = ({ data }: { data: Record<string, unknown> }) => {
   if (!times.length) return <div className="empty">Timeline dates missing.</div>;
   const minTime = Math.min(...times);
   const maxTime = Math.max(...times);
-  const width = 640;
-  const rowHeight = 18;
-  const topPad = 24;
+  const width = DEFAULT_CHART_WIDTH;
+  const leftPad = 110;
+  const rightPad = 28;
+  const topPad = 28;
+  const bottomPad = 72;
+  const rowHeight = 26;
+  const barHeight = 14;
   const totalRows = entries.length + globalRows.length;
-  const height = topPad + totalRows * rowHeight + 24;
+  const plotHeight = Math.max(120, totalRows * rowHeight);
+  const height = topPad + plotHeight + bottomPad;
+  const xAxisY = topPad + plotHeight + 8;
   const scaleX = (time: number) => {
     const ratio = (time - minTime) / Math.max(1, maxTime - minTime);
-    return 40 + ratio * (width - 80);
+    return leftPad + ratio * (width - leftPad - rightPad);
   };
+  const xTicks = buildLinearTicks(minTime, maxTime, 5);
   const summaryData = {
     split_strategy: data.split_strategy,
     window_mode: data.window_mode,
@@ -1004,28 +1342,55 @@ const SplitTimelineView = ({ data }: { data: Record<string, unknown> }) => {
       </div>
       <KeyValueGrid data={summaryData} />
       <KeyValueGrid data={rangeData} />
-      <svg viewBox={`0 0 ${width} ${height}`} className="artifact-chart">
-        <rect x={0} y={0} width={width} height={height} className="chart-frame" />
+      <div className="artifact-chart-panel">
+        <svg viewBox={`0 0 ${width} ${height}`} className="artifact-chart artifact-chart-tall">
+          <rect x={0} y={0} width={width} height={height} className="chart-frame" />
+          {xTicks.map((tick) => {
+            const x = scaleX(tick);
+            return (
+              <g key={`timeline-tick-${tick}`}>
+                <line x1={x} x2={x} y1={topPad} y2={topPad + plotHeight} className="artifact-grid-line" />
+                <text x={x} y={xAxisY + 18} textAnchor="middle" className="artifact-tick-label">
+                  {formatChartDate(tick, maxTime - minTime)}
+                </text>
+              </g>
+            );
+          })}
+          <line x1={leftPad} x2={width - rightPad} y1={xAxisY} y2={xAxisY} className="artifact-axis-line" />
+          <text x={(leftPad + width - rightPad) / 2} y={height - 16} textAnchor="middle" className="artifact-axis-title">
+            Calendar date
+          </text>
+          <text
+            x={26}
+            y={topPad + plotHeight / 2}
+            transform={`rotate(-90 26 ${topPad + plotHeight / 2})`}
+            textAnchor="middle"
+            className="artifact-axis-title"
+          >
+            Fold / split
+          </text>
         {entries.map((entry, idx) => {
-          const y = topPad + idx * rowHeight;
+          const y = topPad + idx * rowHeight + (rowHeight - barHeight) / 2;
           const trainStart = entry.trainStart != null ? scaleX(entry.trainStart) : null;
           const trainEnd = entry.trainEnd != null ? scaleX(entry.trainEnd) : null;
           const valStart = entry.valStart != null ? scaleX(entry.valStart) : null;
           const valEnd = entry.valEnd != null ? scaleX(entry.valEnd) : null;
           return (
             <g key={`fold-${idx}`}>
-              <text x={8} y={y + 12} className="artifact-axis-label">F{entry.fold || idx + 1}</text>
+              <text x={leftPad - 10} y={y + 11} textAnchor="end" className="artifact-axis-label">
+                F{entry.fold || idx + 1}
+              </text>
               {trainStart != null && trainEnd != null ? (
-                <rect x={trainStart} y={y} width={Math.max(1, trainEnd - trainStart)} height={10} className="artifact-bar-train" />
+                <rect x={trainStart} y={y} width={Math.max(1, trainEnd - trainStart)} height={barHeight} className="artifact-bar-train" />
               ) : null}
               {valStart != null && valEnd != null ? (
-                <rect x={valStart} y={y} width={Math.max(1, valEnd - valStart)} height={10} className="artifact-bar-val" />
+                <rect x={valStart} y={y} width={Math.max(1, valEnd - valStart)} height={barHeight} className="artifact-bar-val" />
               ) : null}
             </g>
           );
         })}
         {globalRows.map((row, idx) => {
-          const y = topPad + (entries.length + idx) * rowHeight;
+          const y = topPad + (entries.length + idx) * rowHeight + (rowHeight - barHeight) / 2;
           const start = scaleX(row.start);
           const end = scaleX(row.end);
           const barClass =
@@ -1036,12 +1401,13 @@ const SplitTimelineView = ({ data }: { data: Record<string, unknown> }) => {
                 : "artifact-bar-train";
           return (
             <g key={`global-${row.label}`}>
-              <text x={8} y={y + 12} className="artifact-axis-label">{row.label}</text>
-              <rect x={start} y={y} width={Math.max(1, end - start)} height={10} className={barClass} />
+              <text x={leftPad - 10} y={y + 11} textAnchor="end" className="artifact-axis-label">{row.label}</text>
+              <rect x={start} y={y} width={Math.max(1, end - start)} height={barHeight} className={barClass} />
             </g>
           );
         })}
-      </svg>
+        </svg>
+      </div>
       <CsvTableView
         parsed={{
           headers: [
@@ -1081,7 +1447,7 @@ const AuditOverlapView = ({ data }: { data: Record<string, unknown> }) => {
         {entries.map(([key, value]) => (
           <div key={key} className="artifact-kv-item">
             <span className="meta-label">{key}</span>
-            <span className={toNumber(value) && Number(value) > 0 ? "artifact-warn" : ""}>
+            <span className={`artifact-kv-value ${toNumber(value) && Number(value) > 0 ? "artifact-warn" : ""}`.trim()}>
               {formatMaybe(value)}
             </span>
           </div>
@@ -1116,25 +1482,83 @@ const SplitCompositionView = ({ parsed }: { parsed: ParsedCsv }) => (
 
 const RollingSummaryView = ({ parsed }: { parsed: ParsedCsv }) => {
   const metricColumn = parsed.headers.find((h) => h.toLowerCase().includes("logloss")) ?? parsed.headers[0];
-  const values = parsed.rows.map((row, idx) => ({ x: idx, y: toNumber(row[metricColumn]) ?? 0 }));
-  if (!values.length) return <div className="empty">No rolling data.</div>;
-  const min = Math.min(...values.map((p) => p.y));
-  const max = Math.max(...values.map((p) => p.y));
-  const width = 520;
-  const height = 160;
-  const pad = 20;
-  const scaleX = (x: number) => pad + (x / Math.max(1, values.length - 1)) * (width - pad * 2);
-  const scaleY = (y: number) => pad + (1 - (y - min) / Math.max(1e-9, max - min)) * (height - pad * 2);
-  const path = values
+  const xColumn = parsed.headers.find(
+    (header) => header !== metricColumn && /(date|week|window|end|start|split|fold|time)/i.test(header),
+  );
+  const points = parsed.rows
+    .map((row, idx) => ({
+      x: idx,
+      y: toNumber(row[metricColumn]),
+      label: xColumn ? String(row[xColumn] ?? "") : String(idx + 1),
+    }))
+    .filter((point): point is { x: number; y: number; label: string } => point.y != null);
+  if (!points.length) return <div className="empty">No rolling data.</div>;
+  const min = Math.min(...points.map((point) => point.y));
+  const max = Math.max(...points.map((point) => point.y));
+  const yMin = min === max ? min - 0.01 : min;
+  const yMax = min === max ? max + 0.01 : max;
+  const width = DEFAULT_CHART_WIDTH;
+  const height = 320;
+  const leftPad = 76;
+  const rightPad = 28;
+  const topPad = 24;
+  const bottomPad = 68;
+  const plotWidth = width - leftPad - rightPad;
+  const plotHeight = height - topPad - bottomPad;
+  const scaleX = (x: number) => leftPad + (x / Math.max(1, points.length - 1)) * plotWidth;
+  const scaleY = (y: number) => topPad + (1 - (y - yMin) / Math.max(1e-9, yMax - yMin)) * plotHeight;
+  const yTicks = buildLinearTicks(yMin, yMax, 5);
+  const xTickIndexes = buildIndexTicks(points.length, 6);
+  const path = points
     .map((point, idx) => `${idx === 0 ? "M" : "L"} ${scaleX(point.x)} ${scaleY(point.y)}`)
     .join(" ");
   return (
     <div className="artifact-stack">
       <span className="meta-label">Rolling summary ({metricColumn})</span>
-      <svg viewBox={`0 0 ${width} ${height}`} className="artifact-chart">
-        <rect x={0} y={0} width={width} height={height} className="chart-frame" />
-        <path d={path} className="chart-line chart-line-prn" />
-      </svg>
+      <div className="artifact-chart-panel">
+        <svg viewBox={`0 0 ${width} ${height}`} className="artifact-chart">
+          <rect x={0} y={0} width={width} height={height} className="chart-frame" />
+          {yTicks.map((tick) => {
+            const y = scaleY(tick);
+            return (
+              <g key={`rolling-y-${tick}`}>
+                <line x1={leftPad} x2={width - rightPad} y1={y} y2={y} className="artifact-grid-line" />
+                <text x={leftPad - 10} y={y + 4} textAnchor="end" className="artifact-tick-label">
+                  {formatChartNumber(tick)}
+                </text>
+              </g>
+            );
+          })}
+          {xTickIndexes.map((tickIndex) => {
+            const point = points[tickIndex];
+            const x = scaleX(point.x);
+            const maybeTime = parseChartDateLabel(point.label);
+            return (
+              <g key={`rolling-x-${tickIndex}`}>
+                <line x1={x} x2={x} y1={topPad} y2={height - bottomPad} className="artifact-grid-line" />
+                <text x={x} y={height - bottomPad + 22} textAnchor="middle" className="artifact-tick-label">
+                  {maybeTime == null ? truncateAxisLabel(point.label) : formatChartDate(maybeTime)}
+                </text>
+              </g>
+            );
+          })}
+          <line x1={leftPad} x2={width - rightPad} y1={height - bottomPad} y2={height - bottomPad} className="artifact-axis-line" />
+          <line x1={leftPad} x2={leftPad} y1={topPad} y2={height - bottomPad} className="artifact-axis-line" />
+          <path d={path} className="chart-line chart-line-prn" />
+          <text x={(leftPad + width - rightPad) / 2} y={height - 14} textAnchor="middle" className="artifact-axis-title">
+            {xColumn ? humanizeLabel(xColumn) : "Window index"}
+          </text>
+          <text
+            x={22}
+            y={topPad + plotHeight / 2}
+            transform={`rotate(-90 22 ${topPad + plotHeight / 2})`}
+            textAnchor="middle"
+            className="artifact-axis-title"
+          >
+            {humanizeLabel(metricColumn)}
+          </text>
+        </svg>
+      </div>
       <CsvTableView parsed={parsed} limit={50} />
     </div>
   );
@@ -1150,15 +1574,20 @@ const FoldDeltaView = ({ parsed }: { parsed: ParsedCsv }) => {
   if (!rows.length) return <div className="empty">No fold deltas available.</div>;
   const min = Math.min(...values, 0);
   const max = Math.max(...values, 0);
-  const width = 520;
-  const height = 180;
-  const pad = 24;
-  const innerWidth = width - pad * 2;
-  const innerHeight = height - pad * 2;
-  const scaleY = (y: number) => pad + (1 - (y - min) / Math.max(1e-9, max - min)) * innerHeight;
+  const width = DEFAULT_CHART_WIDTH;
+  const height = 340;
+  const leftPad = 76;
+  const rightPad = 28;
+  const topPad = 24;
+  const bottomPad = 74;
+  const innerWidth = width - leftPad - rightPad;
+  const innerHeight = height - topPad - bottomPad;
+  const scaleY = (y: number) => topPad + (1 - (y - min) / Math.max(1e-9, max - min)) * innerHeight;
   const zeroY = scaleY(0);
   const step = innerWidth / Math.max(1, rows.length);
   const barWidth = Math.max(8, step * 0.6);
+  const yTicks = buildLinearTicks(min, max, 5);
+  const xTickIndexes = buildIndexTicks(rows.length, 8);
   return (
     <div className="artifact-stack">
       <div className="artifact-header-row">
@@ -1169,26 +1598,62 @@ const FoldDeltaView = ({ parsed }: { parsed: ParsedCsv }) => {
           <option value="delta_ece_q">delta_ece_q</option>
         </select>
       </div>
-      <svg viewBox={`0 0 ${width} ${height}`} className="artifact-chart">
-        <rect x={0} y={0} width={width} height={height} className="chart-frame" />
-        <line x1={pad} x2={width - pad} y1={zeroY} y2={zeroY} className="chart-midline" />
-        {rows.map((row, idx) => {
-          const x = pad + idx * step + (step - barWidth) / 2;
-          const y = row.value >= 0 ? scaleY(row.value) : zeroY;
-          const barHeight = Math.max(1, Math.abs(scaleY(row.value) - zeroY));
-          const barClass = row.value >= 0 ? "artifact-bar-positive" : "artifact-bar-negative";
-          return (
-            <rect
-              key={`fold-${idx}`}
-              x={x}
-              y={y}
-              width={barWidth}
-              height={barHeight}
-              className={barClass}
-            />
-          );
-        })}
-      </svg>
+      <div className="artifact-chart-panel">
+        <svg viewBox={`0 0 ${width} ${height}`} className="artifact-chart">
+          <rect x={0} y={0} width={width} height={height} className="chart-frame" />
+          {yTicks.map((tick) => {
+            const y = scaleY(tick);
+            return (
+              <g key={`fold-y-${tick}`}>
+                <line x1={leftPad} x2={width - rightPad} y1={y} y2={y} className="artifact-grid-line" />
+                <text x={leftPad - 10} y={y + 4} textAnchor="end" className="artifact-tick-label">
+                  {formatChartNumber(tick)}
+                </text>
+              </g>
+            );
+          })}
+          {xTickIndexes.map((tickIndex) => {
+            const row = rows[tickIndex];
+            const x = leftPad + tickIndex * step + step / 2;
+            return (
+              <text key={`fold-x-${tickIndex}`} x={x} y={height - bottomPad + 22} textAnchor="middle" className="artifact-tick-label">
+                F{row.fold || tickIndex + 1}
+              </text>
+            );
+          })}
+          <line x1={leftPad} x2={width - rightPad} y1={height - bottomPad} y2={height - bottomPad} className="artifact-axis-line" />
+          <line x1={leftPad} x2={leftPad} y1={topPad} y2={height - bottomPad} className="artifact-axis-line" />
+          <line x1={leftPad} x2={width - rightPad} y1={zeroY} y2={zeroY} className="chart-midline" />
+          {rows.map((row, idx) => {
+            const x = leftPad + idx * step + (step - barWidth) / 2;
+            const y = row.value >= 0 ? scaleY(row.value) : zeroY;
+            const barHeight = Math.max(1, Math.abs(scaleY(row.value) - zeroY));
+            const barClass = row.value >= 0 ? "artifact-bar-positive" : "artifact-bar-negative";
+            return (
+              <rect
+                key={`fold-${idx}`}
+                x={x}
+                y={y}
+                width={barWidth}
+                height={barHeight}
+                className={barClass}
+              />
+            );
+          })}
+          <text x={(leftPad + width - rightPad) / 2} y={height - 14} textAnchor="middle" className="artifact-axis-title">
+            Fold
+          </text>
+          <text
+            x={22}
+            y={topPad + innerHeight / 2}
+            transform={`rotate(-90 22 ${topPad + innerHeight / 2})`}
+            textAnchor="middle"
+            className="artifact-axis-title"
+          >
+            {humanizeLabel(metric)}
+          </text>
+        </svg>
+      </div>
       <CsvTableView parsed={parsed} limit={50} />
     </div>
   );
@@ -1207,18 +1672,74 @@ const GroupDeltaDistributionView = ({ parsed }: { parsed: ParsedCsv }) => {
     counts[idx] += 1;
   });
   const maxCount = Math.max(...counts);
+  const width = DEFAULT_CHART_WIDTH;
+  const height = 340;
+  const leftPad = 76;
+  const rightPad = 28;
+  const topPad = 24;
+  const bottomPad = 72;
+  const plotWidth = width - leftPad - rightPad;
+  const plotHeight = height - topPad - bottomPad;
+  const barGap = Math.max(2, plotWidth / bins * 0.08);
+  const barWidth = (plotWidth - barGap * (bins - 1)) / bins;
+  const yScale = (count: number) => topPad + (1 - count / Math.max(1, maxCount)) * plotHeight;
+  const yTicks = buildLinearTicks(0, maxCount, 5);
+  const xTicks = buildLinearTicks(min, max, 5);
+  const xRange = Math.max(max - min, 1e-9);
   return (
     <div className="artifact-stack">
       <span className="meta-label">Group delta distribution</span>
-      <div className="artifact-bar-chart">
-        {counts.map((count, idx) => (
-          <div key={idx} className="artifact-bar">
-            <div
-              className="artifact-bar-fill"
-              style={{ height: `${(count / Math.max(1, maxCount)) * 100}%` }}
-            />
-          </div>
-        ))}
+      <div className="artifact-chart-panel">
+        <svg viewBox={`0 0 ${width} ${height}`} className="artifact-chart">
+          <rect x={0} y={0} width={width} height={height} className="chart-frame" />
+          {yTicks.map((tick) => {
+            const y = yScale(tick);
+            return (
+              <g key={`group-y-${tick}`}>
+                <line x1={leftPad} x2={width - rightPad} y1={y} y2={y} className="artifact-grid-line" />
+                <text x={leftPad - 10} y={y + 4} textAnchor="end" className="artifact-tick-label">
+                  {Math.round(tick)}
+                </text>
+              </g>
+            );
+          })}
+          {xTicks.map((tick) => {
+            const x = leftPad + ((tick - min) / xRange) * plotWidth;
+            return (
+              <text key={`group-x-${tick}`} x={x} y={height - bottomPad + 22} textAnchor="middle" className="artifact-tick-label">
+                {formatChartNumber(tick)}
+              </text>
+            );
+          })}
+          <line x1={leftPad} x2={width - rightPad} y1={height - bottomPad} y2={height - bottomPad} className="artifact-axis-line" />
+          <line x1={leftPad} x2={leftPad} y1={topPad} y2={height - bottomPad} className="artifact-axis-line" />
+          {counts.map((count, idx) => {
+            const x = leftPad + idx * (barWidth + barGap);
+            const y = yScale(count);
+            return (
+              <rect
+                key={`group-bar-${idx}`}
+                x={x}
+                y={y}
+                width={Math.max(1, barWidth)}
+                height={Math.max(1, height - bottomPad - y)}
+                className="artifact-bar-neutral"
+              />
+            );
+          })}
+          <text x={(leftPad + width - rightPad) / 2} y={height - 14} textAnchor="middle" className="artifact-axis-title">
+            Delta logloss
+          </text>
+          <text
+            x={22}
+            y={topPad + plotHeight / 2}
+            transform={`rotate(-90 22 ${topPad + plotHeight / 2})`}
+            textAnchor="middle"
+            className="artifact-axis-title"
+          >
+            Group count
+          </text>
+        </svg>
       </div>
       <CsvTableView parsed={parsed} limit={50} />
     </div>
@@ -1235,20 +1756,61 @@ const ReliabilityView = ({ parsed }: { parsed: ParsedCsv }) => {
     }))
     .filter((p): p is { x: number; y: number } => p.x != null && p.y != null);
   if (!points.length) return <div className="empty">No reliability bins.</div>;
-  const width = 520;
-  const height = 180;
-  const pad = 20;
-  const scale = (v: number) => pad + v * (width - pad * 2);
-  const scaleY = (v: number) => height - pad - v * (height - pad * 2);
-  const path = points.map((p, idx) => `${idx === 0 ? "M" : "L"} ${scale(p.x)} ${scaleY(p.y)}`).join(" ");
+  const width = DEFAULT_CHART_WIDTH;
+  const height = 340;
+  const leftPad = 76;
+  const rightPad = 28;
+  const topPad = 24;
+  const bottomPad = 68;
+  const plotWidth = width - leftPad - rightPad;
+  const plotHeight = height - topPad - bottomPad;
+  const xTicks = buildLinearTicks(0, 1, 5);
+  const scaleX = (v: number) => leftPad + v * plotWidth;
+  const scaleY = (v: number) => topPad + (1 - v) * plotHeight;
+  const path = points.map((p, idx) => `${idx === 0 ? "M" : "L"} ${scaleX(p.x)} ${scaleY(p.y)}`).join(" ");
   return (
     <div className="artifact-stack">
       <span className="meta-label">Reliability plot</span>
-      <svg viewBox={`0 0 ${width} ${height}`} className="artifact-chart">
-        <rect x={0} y={0} width={width} height={height} className="chart-frame" />
-        <line x1={pad} y1={height - pad} x2={width - pad} y2={pad} className="chart-midline" />
-        <path d={path} className="chart-line chart-line-prn" />
-      </svg>
+      <div className="artifact-chart-panel">
+        <svg viewBox={`0 0 ${width} ${height}`} className="artifact-chart">
+          <rect x={0} y={0} width={width} height={height} className="chart-frame" />
+          {xTicks.map((tick) => {
+            const x = scaleX(tick);
+            const y = scaleY(tick);
+            return (
+              <g key={`reliability-tick-${tick}`}>
+                <line x1={x} x2={x} y1={topPad} y2={height - bottomPad} className="artifact-grid-line" />
+                <line x1={leftPad} x2={width - rightPad} y1={y} y2={y} className="artifact-grid-line" />
+                <text x={x} y={height - bottomPad + 22} textAnchor="middle" className="artifact-tick-label">
+                  {tick.toFixed(2)}
+                </text>
+                <text x={leftPad - 10} y={y + 4} textAnchor="end" className="artifact-tick-label">
+                  {tick.toFixed(2)}
+                </text>
+              </g>
+            );
+          })}
+          <line x1={leftPad} x2={width - rightPad} y1={height - bottomPad} y2={height - bottomPad} className="artifact-axis-line" />
+          <line x1={leftPad} x2={leftPad} y1={topPad} y2={height - bottomPad} className="artifact-axis-line" />
+          <line x1={leftPad} y1={height - bottomPad} x2={width - rightPad} y2={topPad} className="chart-midline" />
+          <path d={path} className="chart-line chart-line-prn" />
+          {points.map((point, idx) => (
+            <circle key={`reliability-point-${idx}`} cx={scaleX(point.x)} cy={scaleY(point.y)} r={4} className="artifact-chart-point" />
+          ))}
+          <text x={(leftPad + width - rightPad) / 2} y={height - 14} textAnchor="middle" className="artifact-axis-title">
+            {humanizeLabel(predKey)}
+          </text>
+          <text
+            x={22}
+            y={topPad + plotHeight / 2}
+            transform={`rotate(-90 22 ${topPad + plotHeight / 2})`}
+            textAnchor="middle"
+            className="artifact-axis-title"
+          >
+            {humanizeLabel(obsKey)}
+          </text>
+        </svg>
+      </div>
       <CsvTableView parsed={parsed} limit={50} />
     </div>
   );
@@ -1258,6 +1820,49 @@ const deltaMetricClass = (value?: number | null): string | undefined => {
   if (value == null || Number.isNaN(value)) return undefined;
   return value <= 0 ? "delta-negative" : "delta-positive";
 };
+
+const autoStatusPillLabel = (status?: string | null): string => {
+  if (status === "selected") return "accepted";
+  if (status === "no_viable_model") return "rejected";
+  return status ? humanizeLabel(status) : "--";
+};
+
+const describeAutoSelection = ({
+  status,
+  selectedTrialId,
+  hasSelectedModel,
+}: {
+  status?: string | null;
+  selectedTrialId?: number | null;
+  hasSelectedModel?: boolean | null;
+}): string => {
+  if (status === "selected") {
+    return selectedTrialId != null ? `Selected (trial ${selectedTrialId})` : "Selected";
+  }
+  if (status === "no_viable_model") {
+    if (hasSelectedModel) {
+      return selectedTrialId != null
+        ? `Best candidate materialized (trial ${selectedTrialId}), not accepted`
+        : "Best candidate materialized, not accepted";
+    }
+    return "No candidate passed acceptance gates";
+  }
+  if (hasSelectedModel) {
+    return selectedTrialId != null ? `Materialized candidate (trial ${selectedTrialId})` : "Materialized candidate";
+  }
+  return "No selected model";
+};
+
+const formatThresholdValue = (value: unknown): string => {
+  const numeric = toNumber(value);
+  if (numeric != null) return formatChartNumber(numeric);
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (value == null) return "--";
+  const text = String(value).trim();
+  return text || "--";
+};
+
+const METRIC_INTERPRETATION_COPY = "Val metrics are pooled across all validation folds. Fold acceptance uses fold-level deltas from fold_deltas.csv.";
 
 const formatTimestamp = (value?: string | null): string => {
   if (!value) return "Unknown";
@@ -1270,6 +1875,85 @@ const formatTimestamp = (value?: string | null): string => {
     hour: "2-digit",
     minute: "2-digit",
   });
+};
+
+const AutoSelectionSummaryCard = ({
+  summary,
+  validationFolds,
+}: {
+  summary: NonNullable<ModelDetailResponse["auto_selection_summary"]>;
+  validationFolds: number | null;
+}) => {
+  const reasons = Array.isArray(summary.no_viable_reasons)
+    ? summary.no_viable_reasons.filter((reason): reason is string => typeof reason === "string" && reason.trim().length > 0)
+    : [];
+  const acceptanceEntries = Object.entries(summary.acceptance ?? {}).filter(([, value]) => value != null);
+  const outerEntries = Object.entries(summary.outer_cv ?? {}).filter(([, value]) => value != null);
+  const foldGate = summary.fold_gate_summary ?? null;
+  const showPooledNote = (validationFolds ?? 0) > 1;
+
+  return (
+    <div className="auto-selection-summary-card">
+      <div className="auto-selection-summary-header">
+        <span className="meta-label">Auto-selection status</span>
+        <span className={`status-pill ${summary.status === "selected" ? "success" : "failed"}`}>
+          {autoStatusPillLabel(summary.status)}
+        </span>
+      </div>
+      <div className="auto-selection-summary-copy">
+        {describeAutoSelection({
+          status: summary.status,
+          selectedTrialId: summary.selected_trial_id,
+          hasSelectedModel: summary.has_selected_model,
+        })}
+      </div>
+      {showPooledNote ? (
+        <div className="auto-selection-summary-note">{METRIC_INTERPRETATION_COPY}</div>
+      ) : null}
+      {foldGate && foldGate.n_folds != null ? (
+        <div className="auto-selection-summary-note">
+          Acceptance gates: {foldGate.improved_folds ?? 0}/{foldGate.n_folds} folds improved, worst fold delta{" "}
+          {formatMetricValue(foldGate.worst_delta_logloss)}.
+        </div>
+      ) : null}
+      {reasons.length ? (
+        <div className="auto-selection-summary-section">
+          <span className="meta-label">Rejection reasons</span>
+          <ul className="auto-selection-summary-list">
+            {reasons.map((reason) => (
+              <li key={reason}>{reason}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {acceptanceEntries.length ? (
+        <div className="auto-selection-summary-section">
+          <span className="meta-label">Acceptance thresholds</span>
+          <div className="auto-selection-threshold-grid">
+            {acceptanceEntries.map(([key, value]) => (
+              <div key={key} className="auto-selection-threshold-item">
+                <span className="meta-label">{humanizeLabel(key)}</span>
+                <span>{formatThresholdValue(value)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {outerEntries.length && (summary.outer_cv?.enabled || outerEntries.some(([key]) => key.startsWith("outer"))) ? (
+        <div className="auto-selection-summary-section">
+          <span className="meta-label">Outer CV</span>
+          <div className="auto-selection-threshold-grid">
+            {outerEntries.map(([key, value]) => (
+              <div key={key} className="auto-selection-threshold-item">
+                <span className="meta-label">{humanizeLabel(key)}</span>
+                <span>{formatThresholdValue(value)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
 };
 
 const loadStoredForm = (): CalibrateFormState | null => {
@@ -1553,7 +2237,7 @@ export default function CalibrateModelsPage() {
     const total = progress.trials_total ?? 0;
     const completed = progress.trials_done ?? 0;
     const failed = progress.trials_failed ?? 0;
-    const status =
+    const status: "running" | "failed" | "completed" =
       jobStatus?.status === "failed"
         ? "failed"
         : jobStatus?.status === "finished"
@@ -1584,6 +2268,10 @@ export default function CalibrateModelsPage() {
     (modelDetail?.metadata as Record<string, unknown> | null | undefined)?.["ci_level"],
   );
   const modelCiLabel = modelDetailCiLevel ? `CI (${modelDetailCiLevel}%)` : "CI";
+  const modelDetailValidationFolds = toNumber(
+    (modelDetail?.metadata as Record<string, unknown> | null | undefined)?.["validation_folds"],
+  );
+  const autoSelectionSummary = modelDetail?.auto_selection_summary ?? null;
   const autoProgress = jobStatus?.mode === "auto" ? jobStatus.progress ?? null : null;
 
   const autoProgressLog = useMemo(() => {
@@ -1626,7 +2314,27 @@ export default function CalibrateModelsPage() {
     }
     return groups;
   }, [modelFiles]);
-  const selectedArtifactName = fileBaseName(selectedFilePath);
+  const defaultArtifactFile = useMemo(
+    () => (modelFiles?.files ?? []).find((file) => isDefaultArtifactFile(file) && file.is_viewable) ?? null,
+    [modelFiles],
+  );
+  const defaultArtifactPath = defaultArtifactFile ? artifactFilePath(defaultArtifactFile) : null;
+  const visibleGroupedModelFiles = useMemo(
+    () => ({
+      selected_model: groupedModelFiles.selected_model.filter(
+        (file) => !isDefaultArtifactFile(file) && !isHiddenArtifactPath(artifactFilePath(file)),
+      ),
+      auto_search: groupedModelFiles.auto_search.filter(
+        (file) => !isDefaultArtifactFile(file) && !isHiddenArtifactPath(artifactFilePath(file)),
+      ),
+      legacy_root: groupedModelFiles.legacy_root.filter(
+        (file) => !isDefaultArtifactFile(file) && !isHiddenArtifactPath(artifactFilePath(file)),
+      ),
+    }),
+    [groupedModelFiles],
+  );
+  const selectedArtifactName = fileBaseName(selectedFilePath ?? defaultArtifactPath);
+  const isShowingDefaultArtifact = Boolean(defaultArtifactPath && selectedFilePath === defaultArtifactPath);
 
   const renderArtifactView = () => {
     if (!selectedFilePath || !fileContent) return null;
@@ -1644,7 +2352,13 @@ export default function CalibrateModelsPage() {
         return parsedJson ? <KeyValueGrid data={parsedJson} /> : <div className="empty">No summary data.</div>;
       case "config.executed.json":
       case "best_config.json":
-        return parsedJson ? <ConfigJsonView data={parsedJson} /> : <div className="empty">No config data.</div>;
+        return parsedJson ? (
+          <ConfigJsonView
+            data={parsedJson}
+            title={artifactDisplayTitle(selectedName)}
+            onRunAgain={() => handleRunAgainFromConfig(parsedJson)}
+          />
+        ) : <div className="empty">No config data.</div>;
       case "metadata.json":
       case "two_stage_metadata.json":
         return parsedJson ? <MetadataView data={parsedJson} /> : <div className="empty">No metadata.</div>;
@@ -1676,8 +2390,6 @@ export default function CalibrateModelsPage() {
         return parsedJson ? <KeyValueGrid data={parsedJson} /> : <div className="empty">No summary data.</div>;
       case "auto_search_summary.json":
         return parsedJson ? <KeyValueGrid data={parsedJson} /> : <div className="empty">No summary data.</div>;
-      case "auto_search_no_viable.json":
-        return parsedJson ? <KeyValueGrid data={parsedJson} /> : <div className="empty">No no-viable data.</div>;
       case "auto_search_progress.json":
         return parsedJson ? <KeyValueGrid data={parsedJson} /> : <div className="empty">No progress data.</div>;
       case "best_model_report.md":
@@ -1783,7 +2495,9 @@ export default function CalibrateModelsPage() {
       .then((response) => {
         setDatasets(response.datasets);
         setDatasetError(null);
-        if (!form.datasetPath && response.datasets.length) {
+        const paths = new Set(response.datasets.map((d) => d.path));
+        const stale = form.datasetPath && !paths.has(form.datasetPath);
+        if ((!form.datasetPath || stale) && response.datasets.length) {
           setForm((prev) => ({ ...prev, datasetPath: response.datasets[0].path }));
         }
       })
@@ -2557,6 +3271,179 @@ export default function CalibrateModelsPage() {
     }
   }, [jobId, jobStatus?.job_id, setJobStatus]);
 
+  const handleRunAgainFromConfig = useCallback((config: Record<string, unknown>) => {
+    const split =
+      config.split && typeof config.split === "object"
+        ? (config.split as Record<string, unknown>)
+        : {};
+    const regularization =
+      config.regularization && typeof config.regularization === "object"
+        ? (config.regularization as Record<string, unknown>)
+        : {};
+    const modelStructure =
+      config.model_structure && typeof config.model_structure === "object"
+        ? (config.model_structure as Record<string, unknown>)
+        : {};
+    const weighting =
+      config.weighting && typeof config.weighting === "object"
+        ? (config.weighting as Record<string, unknown>)
+        : {};
+    const bootstrap =
+      config.bootstrap && typeof config.bootstrap === "object"
+        ? (config.bootstrap as Record<string, unknown>)
+        : {};
+    const diagnostics =
+      config.diagnostics && typeof config.diagnostics === "object"
+        ? (config.diagnostics as Record<string, unknown>)
+        : {};
+    const csv = toProjectRelativePath(config.csv);
+    const matchedDataset =
+      datasets.find((dataset) => {
+        const relative = dataset.path.replace(/\\/g, "/");
+        return csv === relative || csv.endsWith(relative);
+      })?.path ?? csv;
+    const features = splitCsvValue(config.features).filter(
+      (feature) => feature !== BASE_FEATURE && FEATURE_OPTION_SET.has(feature),
+    );
+    const categorical = splitCsvValue(config.categorical_features).filter((feature) =>
+      CATEGORICAL_FEATURE_OPTION_SET.has(feature),
+    );
+    const cGrid =
+      typeof regularization.c_grid === "string"
+        ? regularization.c_grid
+        : typeof config.c_grid === "string"
+          ? config.c_grid
+          : "";
+    const cGridPreset =
+      (Object.entries(C_GRID_PRESETS).find(([, preset]) => preset === cGrid)?.[0] as CalibrateFormState["cGridPreset"] | undefined) ??
+      "custom";
+    const ciLevelValue = toNumber(bootstrap.ci_level);
+    const nextModelName =
+      sanitizeModelDirName(selectedModelId ? `${selectedModelId}-rerun` : defaultModelName()) || defaultModelName();
+
+    setForm((prev) => ({
+      ...prev,
+      runMode: "manual",
+      modelDirName: nextModelName,
+      datasetPath: matchedDataset,
+      randomSeed: String(toNumber(config.random_state) ?? toNumber(config.randomSeed) ?? 7),
+      weightColStrategy:
+        config.weight_col_strategy === "auto" ||
+        config.weight_col_strategy === "weight_final" ||
+        config.weight_col_strategy === "sample_weight_final" ||
+        config.weight_col_strategy === "uniform"
+          ? config.weight_col_strategy
+          : prev.weightColStrategy,
+      timeRegime: resolveTimeRegimeKey(config),
+      selectedFeatures: features,
+      selectedCategoricalFeatures: categorical,
+      splitStrategy: split.strategy === "single_holdout" ? "single_holdout" : "walk_forward",
+      windowMode: split.window_mode === "expanding" ? "expanding" : "rolling",
+      trainWindowWeeks: String(toNumber(split.train_window_weeks) ?? prev.trainWindowWeeks),
+      validationFolds: String(toNumber(split.validation_folds) ?? prev.validationFolds),
+      validationWindowWeeks: String(toNumber(split.validation_window_weeks) ?? prev.validationWindowWeeks),
+      testWindowWeeks: String(toNumber(split.test_window_weeks) ?? toNumber(config.test_weeks) ?? prev.testWindowWeeks),
+      embargoDays: String(toNumber(split.embargo_days) ?? prev.embargoDays),
+      cGridPreset,
+      cGridCustom: cGrid || prev.cGridCustom,
+      calibrationMethod:
+        regularization.calibration_method === "platt" || config.calibrate === "platt" ? "platt" : "none",
+      selectionObjective:
+        regularization.selection_objective === "brier" || regularization.selection_objective === "ece_q"
+          ? regularization.selection_objective
+          : regularization.selection_objective === "logloss"
+            ? "logloss"
+            : prev.selectionObjective,
+      tradingUniverseTickers: splitCsvValue(
+        modelStructure.trading_universe_tickers ??
+        weighting.trading_universe_tickers ??
+        modelStructure.train_tickers ??
+        config.train_tickers,
+      ),
+      trainTickers: splitCsvValue(modelStructure.train_tickers ?? config.train_tickers),
+      foundationTickers: splitCsvValue(modelStructure.foundation_tickers ?? config.foundation_tickers),
+      foundationWeight: String(toNumber(modelStructure.foundation_weight ?? config.foundation_weight) ?? prev.foundationWeight),
+      tickerInterceptMode:
+        modelStructure.ticker_intercepts === "none" ||
+        modelStructure.ticker_intercepts === "all" ||
+        modelStructure.ticker_intercepts === "non_foundation"
+          ? modelStructure.ticker_intercepts
+          : prev.tickerInterceptMode,
+      perTickerInteractions: Boolean(modelStructure.ticker_x_interactions ?? config.ticker_x_interactions),
+      minSupportIntercepts: String(toNumber(modelStructure.ticker_min_support ?? config.ticker_min_support) ?? prev.minSupportIntercepts),
+      minSupportInteractions: String(
+        toNumber(modelStructure.ticker_min_support_interactions ?? config.ticker_min_support_interactions) ??
+        prev.minSupportInteractions,
+      ),
+      baseWeightSource: weighting.base_weight_source === "uniform" ? "uniform" : "dataset_weight",
+      groupingKey: typeof weighting.grouping_key === "string" ? weighting.grouping_key : prev.groupingKey,
+      groupEqualization:
+        typeof weighting.group_equalization === "boolean"
+          ? weighting.group_equalization
+          : (weighting.group_reweight ?? config.group_reweight) === "chain_snapshot",
+      renorm: "mean1",
+      tradingUniverseUpweight: String(toNumber(weighting.trading_universe_upweight) ?? prev.tradingUniverseUpweight),
+      tickerBalanceMode: weighting.ticker_balance_mode === "sqrt_inv_clipped" ? "sqrt_inv_clipped" : "none",
+      bootstrapEnabled: Boolean(bootstrap.bootstrap_ci ?? config.bootstrap_ci),
+      bootstrapGroup:
+        bootstrap.bootstrap_group === "contract_id" ||
+        bootstrap.bootstrap_group === "group_id" ||
+        bootstrap.bootstrap_group === "ticker_day" ||
+        bootstrap.bootstrap_group === "day" ||
+        bootstrap.bootstrap_group === "iid" ||
+        bootstrap.bootstrap_group === "auto"
+          ? bootstrap.bootstrap_group
+          : prev.bootstrapGroup,
+      bootstrapDraws: String(toNumber(bootstrap.bootstrap_b ?? bootstrap.bootstrap_B ?? config.bootstrap_B) ?? prev.bootstrapDraws),
+      bootstrapSeed: String(toNumber(bootstrap.bootstrap_seed ?? config.bootstrap_seed) ?? prev.bootstrapSeed),
+      ciLevel: ciLevelValue === 90 || ciLevelValue === 99 ? (ciLevelValue as 90 | 99) : 95,
+      perSplitReporting: Boolean(bootstrap.per_split_reporting ?? prev.perSplitReporting),
+      perFoldReporting: Boolean(bootstrap.per_fold_reporting ?? prev.perFoldReporting),
+      splitTimeline: Boolean(diagnostics.split_timeline ?? prev.splitTimeline),
+      perFoldDeltaChart: Boolean(diagnostics.per_fold_delta_chart ?? prev.perFoldDeltaChart),
+      perGroupDeltaDistribution: Boolean(diagnostics.per_group_delta_distribution ?? prev.perGroupDeltaDistribution),
+      maxAbsLogm: String(toNumber(config.max_abs_logm) ?? prev.maxAbsLogm),
+      dropPrnExtremes: Boolean(config.drop_prn_extremes),
+      dropPrnBelow: String(toNumber(config.prn_below) ?? prev.dropPrnBelow),
+      dropPrnAbove: String(toNumber(config.prn_above) ?? prev.dropPrnAbove),
+    }));
+    setRunError(null);
+    setCancelError(null);
+    setWorkspaceTab("run_job");
+    setRunJobPanel("configuration");
+  }, [datasets, selectedModelId]);
+
+  const openModelFile = useCallback(async (
+    modelId: string,
+    file: ModelFileSummary,
+    options?: { allowToggle?: boolean },
+  ) => {
+    const targetPath = artifactFilePath(file);
+    if (!targetPath) return;
+    const allowToggle = options?.allowToggle ?? true;
+    if (allowToggle && selectedFilePath === targetPath) {
+      setSelectedFilePath(null);
+      setFileContent(null);
+      setFileError(null);
+      return;
+    }
+    setSelectedFilePath(targetPath);
+    setFileLoading(true);
+    setFileError(null);
+    try {
+      const content = file.relative_path
+        ? await fetchModelFileContentByPath(modelId, file.relative_path)
+        : await fetchModelFileContent(modelId, file.name);
+      setFileContent(content);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to read file.";
+      setFileError(message);
+      setFileContent(null);
+    } finally {
+      setFileLoading(false);
+    }
+  }, [selectedFilePath]);
+
   const handleSelectModel = useCallback(async (modelId: string) => {
     if (selectedModelId === modelId) {
       setSelectedModelId(null);
@@ -2583,46 +3470,28 @@ export default function CalibrateModelsPage() {
       ]);
       setModelDetail(detail);
       setModelFiles(files);
+      const defaultArtifact = files.files.find(
+        (file) => isDefaultArtifactFile(file) && file.is_viewable,
+      );
+      if (defaultArtifact) {
+        await openModelFile(modelId, defaultArtifact, { allowToggle: false });
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to load model detail.";
       setModelDetailError(message);
       setModelDetail(null);
       setModelFiles(null);
       setSelectedFilePath(null);
+      setFileContent(null);
     } finally {
       setIsModelDetailLoading(false);
     }
-  }, [selectedModelId]);
+  }, [openModelFile, selectedModelId]);
 
   const handleOpenFile = useCallback(async (file: ModelFileSummary) => {
     if (!selectedModelId) return;
-    const targetPath = file.relative_path ?? file.name;
-    if (!targetPath) return;
-    if (selectedFilePath === targetPath) {
-      setSelectedFilePath(null);
-      setFileContent(null);
-      setFileError(null);
-      return;
-    }
-    setSelectedFilePath(targetPath);
-    setFileLoading(true);
-    setFileError(null);
-    try {
-      let content: ModelFileContentResponse;
-      if (file.relative_path) {
-        content = await fetchModelFileContentByPath(selectedModelId, file.relative_path);
-      } else {
-        content = await fetchModelFileContent(selectedModelId, file.name);
-      }
-      setFileContent(content);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to read file.";
-      setFileError(message);
-      setFileContent(null);
-    } finally {
-      setFileLoading(false);
-    }
-  }, [selectedFilePath, selectedModelId]);
+    await openModelFile(selectedModelId, file);
+  }, [openModelFile, selectedModelId]);
 
   const handleRenameModel = useCallback(async (modelId: string) => {
     const next = window.prompt("New model name", modelId);
@@ -4351,28 +5220,33 @@ export default function CalibrateModelsPage() {
                           </div>
                         ) : null}
 
-                        {isJobComplete && activeResult?.artifact_manifest?.length ? (
+                        {isJobComplete && activeResult?.artifact_manifest?.some(
+                          (artifact) => !isHiddenArtifactPath(artifact.relative_path ?? artifact.path ?? artifact.name),
+                        ) ? (
                           <div className="model-detail-section file-viewer-section">
                             <span className="meta-label">Artifacts</span>
                             <div className="file-list">
-                              {activeResult.artifact_manifest.map((artifact) => (
-                                <button
-                                  key={artifact.name}
-                                  type="button"
-                                  className="file-item"
-                                  onClick={() => {
-                                    if (!activeResult.out_dir) return;
-                                    const modelId = activeResult.out_dir.split("/").pop() || "";
-                                    if (modelId) {
-                                      void handleSelectModel(modelId);
-                                      setWorkspaceTab("models");
-                                    }
-                                  }}
-                                >
-                                  <span className="file-name">{artifact.name}</span>
-                                  <span className="file-size">{artifact.type}</span>
-                                </button>
-                              ))}
+                              {activeResult.artifact_manifest
+                                .filter((artifact) => !isHiddenArtifactPath(artifact.relative_path ?? artifact.path ?? artifact.name))
+                                .map((artifact) => {
+                                  const artifactPath = artifact.relative_path ?? artifact.path ?? artifact.name;
+                                  return (
+                                    <ArtifactFileButton
+                                      key={artifactPath}
+                                      titlePath={artifactPath}
+                                      displayPath={artifactPath}
+                                      meta={artifact.type}
+                                      onClick={() => {
+                                        if (!activeResult.out_dir) return;
+                                        const modelId = activeResult.out_dir.split("/").pop() || "";
+                                        if (modelId) {
+                                          void handleSelectModel(modelId);
+                                          setWorkspaceTab("models");
+                                        }
+                                      }}
+                                    />
+                                  );
+                                })}
                             </div>
                           </div>
                         ) : null}
@@ -4420,6 +5294,11 @@ export default function CalibrateModelsPage() {
                       const selected = selectedModelId === model.id;
                       const isAutoRun = model.run_type === "auto";
                       const autoStatus = model.auto_status ?? (model.has_selected_model ? "selected" : null);
+                      const autoSelectionText = describeAutoSelection({
+                        status: autoStatus,
+                        selectedTrialId: model.selected_trial_id,
+                        hasSelectedModel: model.has_selected_model,
+                      });
                       return (
                         <article key={model.id} className={`model-card ${selected ? "active" : ""}`}>
                           <button
@@ -4445,7 +5324,7 @@ export default function CalibrateModelsPage() {
                                       autoStatus === "selected" ? "success" : autoStatus === "no_viable_model" ? "failed" : "idle"
                                     }`}
                                   >
-                                    {autoStatus}
+                                    {autoStatusPillLabel(autoStatus)}
                                   </span>
                                 ) : null}
                               </div>
@@ -4473,17 +5352,13 @@ export default function CalibrateModelsPage() {
                                 <div>
                                   <span className="meta-label">Hyperparams</span>
                                   <span>
-                                    split={model.split_strategy ?? "--"}, C={model.c_value ?? "--"}, calib={model.calibration_method ?? "--"}
+                                    split={model.split_strategy ?? "--"}, penalty=L2, C={model.c_value ?? "--"}, calib={model.calibration_method ?? "--"}
                                   </span>
                                 </div>
                                 {isAutoRun ? (
                                   <div>
                                     <span className="meta-label">Auto selection</span>
-                                    <span>
-                                      {model.has_selected_model
-                                        ? `selected${model.selected_trial_id != null ? ` (trial ${model.selected_trial_id})` : ""}`
-                                        : "no selected model"}
-                                    </span>
+                                    <span>{autoSelectionText}</span>
                                   </div>
                                 ) : null}
                               </div>
@@ -4535,6 +5410,14 @@ export default function CalibrateModelsPage() {
                                         <span className="meta-label">Performance summary</span>
                                         <span className="metrics-summary-note">Delta values are model minus baseline.</span>
                                       </div>
+                                      {isAutoRun && autoSelectionSummary ? (
+                                        <AutoSelectionSummaryCard
+                                          summary={autoSelectionSummary}
+                                          validationFolds={modelDetailValidationFolds}
+                                        />
+                                      ) : modelDetailValidationFolds != null && modelDetailValidationFolds > 1 ? (
+                                        <div className="auto-selection-summary-note">{METRIC_INTERPRETATION_COPY}</div>
+                                      ) : null}
                                       {(() => {
                                         const modelRows = modelDetail.split_row_counts ?? {};
                                         const modelGroups = modelDetail.split_group_counts ?? {};
@@ -4553,114 +5436,124 @@ export default function CalibrateModelsPage() {
                                           modelTestGroups != null;
                                         if (!hasCounts) return null;
                                         return (
-                                          <div className="run-meta-grid">
-                                            <div>
-                                              <span className="meta-label">Train rows</span>
-                                              <span>{formatCountValue(modelTrainRows as number | null)}</span>
+                                          <div className="metrics-detail-card">
+                                            <div className="metrics-detail-card-header">
+                                              <span className="meta-label">Split coverage</span>
                                             </div>
-                                            <div>
-                                              <span className="meta-label">Val rows</span>
-                                              <span>{formatCountValue(modelValRows as number | null)}</span>
-                                            </div>
-                                            <div>
-                                              <span className="meta-label">Test rows</span>
-                                              <span>{formatCountValue(modelTestRows as number | null)}</span>
-                                            </div>
-                                            <div>
-                                              <span className="meta-label">Train groups</span>
-                                              <span>{formatCountValue(modelTrainGroups as number | null)}</span>
-                                            </div>
-                                            <div>
-                                              <span className="meta-label">Val groups</span>
-                                              <span>{formatCountValue(modelValGroups as number | null)}</span>
-                                            </div>
-                                            <div>
-                                              <span className="meta-label">Test groups</span>
-                                              <span>{formatCountValue(modelTestGroups as number | null)}</span>
+                                            <div className="run-meta-grid">
+                                              <div>
+                                                <span className="meta-label">Train rows</span>
+                                                <span>{formatCountValue(modelTrainRows as number | null)}</span>
+                                              </div>
+                                              <div>
+                                                <span className="meta-label">Val rows</span>
+                                                <span>{formatCountValue(modelValRows as number | null)}</span>
+                                              </div>
+                                              <div>
+                                                <span className="meta-label">Test rows</span>
+                                                <span>{formatCountValue(modelTestRows as number | null)}</span>
+                                              </div>
+                                              <div>
+                                                <span className="meta-label">Train groups</span>
+                                                <span>{formatCountValue(modelTrainGroups as number | null)}</span>
+                                              </div>
+                                              <div>
+                                                <span className="meta-label">Val groups</span>
+                                                <span>{formatCountValue(modelValGroups as number | null)}</span>
+                                              </div>
+                                              <div>
+                                                <span className="meta-label">Test groups</span>
+                                                <span>{formatCountValue(modelTestGroups as number | null)}</span>
+                                              </div>
                                             </div>
                                           </div>
                                         );
                                       })()}
-                                      <div className="metrics-summary-grid">
-                                        {metricsOrder
-                                          .map((split) => modelDetail.metrics_summary?.[split])
-                                          .filter(Boolean)
-                                          .map((metric) => (
-                                          <div key={`${model.id}-${metric!.split}`} className="metrics-card">
-                                            <div className="metrics-card-heading">
-                                              <strong>{metric!.split}</strong>
-                                              <span className={`status-pill ${metric!.status === "good" ? "success" : "failed"}`}>
-                                                {metric!.status}
-                                              </span>
-                                            </div>
-                                            <div className="metrics-card-row">
-                                              <span>Baseline logloss</span>
-                                              <strong>{formatMetricValue(metric!.baseline_logloss)}</strong>
-                                            </div>
-                                            <div className="metrics-card-row">
-                                              <span>Model logloss</span>
-                                              <strong>{formatMetricValue(metric!.model_logloss)}</strong>
-                                            </div>
-                                            <div className="metrics-card-row">
-                                              <span>Delta logloss</span>
-                                              <strong className={deltaMetricClass(metric!.delta_model_minus_baseline)}>
-                                                {formatMetricValue(metric!.delta_model_minus_baseline)}
-                                              </strong>
-                                            </div>
-                                            {metric!.delta_logloss_ci_lo != null && metric!.delta_logloss_ci_hi != null ? (
-                                              <div className="metrics-card-row metrics-card-ci">
-                                                <span>Logloss {modelCiLabel}</span>
-                                                <strong>
-                                                  [{metric!.delta_logloss_ci_lo.toFixed(4)}, {metric!.delta_logloss_ci_hi.toFixed(4)}]
+                                      <div className="metrics-detail-card">
+                                        <div className="metrics-detail-card-header">
+                                          <span className="meta-label">Metrics card</span>
+                                        </div>
+                                        <div className="metrics-summary-grid">
+                                          {metricsOrder
+                                            .map((split) => modelDetail.metrics_summary?.[split])
+                                            .filter(Boolean)
+                                            .map((metric) => (
+                                            <div key={`${model.id}-${metric!.split}`} className="metrics-card">
+                                              <div className="metrics-card-heading">
+                                                <strong>{metric!.split}</strong>
+                                                <span className={`status-pill ${metric!.status === "good" ? "success" : "failed"}`}>
+                                                  {metric!.status}
+                                                </span>
+                                              </div>
+                                              <div className="metrics-card-row">
+                                                <span>Baseline logloss</span>
+                                                <strong>{formatMetricValue(metric!.baseline_logloss)}</strong>
+                                              </div>
+                                              <div className="metrics-card-row">
+                                                <span>Model logloss</span>
+                                                <strong>{formatMetricValue(metric!.model_logloss)}</strong>
+                                              </div>
+                                              <div className="metrics-card-row">
+                                                <span>Delta logloss</span>
+                                                <strong className={deltaMetricClass(metric!.delta_model_minus_baseline)}>
+                                                  {formatMetricValue(metric!.delta_model_minus_baseline)}
                                                 </strong>
                                               </div>
-                                            ) : null}
-                                            <div className="metrics-card-row">
-                                              <span>Baseline brier</span>
-                                              <strong>{formatMetricValue(metric!.baseline_brier)}</strong>
-                                            </div>
-                                            <div className="metrics-card-row">
-                                              <span>Model brier</span>
-                                              <strong>{formatMetricValue(metric!.model_brier)}</strong>
-                                            </div>
-                                            <div className="metrics-card-row">
-                                              <span>Delta brier</span>
-                                              <strong className={deltaMetricClass(metric!.delta_brier)}>
-                                                {formatMetricValue(metric!.delta_brier)}
-                                              </strong>
-                                            </div>
-                                            {metric!.delta_brier_ci_lo != null && metric!.delta_brier_ci_hi != null ? (
-                                              <div className="metrics-card-row metrics-card-ci">
-                                                <span>Brier {modelCiLabel}</span>
-                                                <strong>
-                                                  [{metric!.delta_brier_ci_lo.toFixed(4)}, {metric!.delta_brier_ci_hi.toFixed(4)}]
+                                              {metric!.delta_logloss_ci_lo != null && metric!.delta_logloss_ci_hi != null ? (
+                                                <div className="metrics-card-row metrics-card-ci">
+                                                  <span>Logloss {modelCiLabel}</span>
+                                                  <strong>
+                                                    [{metric!.delta_logloss_ci_lo.toFixed(4)}, {metric!.delta_logloss_ci_hi.toFixed(4)}]
+                                                  </strong>
+                                                </div>
+                                              ) : null}
+                                              <div className="metrics-card-row">
+                                                <span>Baseline brier</span>
+                                                <strong>{formatMetricValue(metric!.baseline_brier)}</strong>
+                                              </div>
+                                              <div className="metrics-card-row">
+                                                <span>Model brier</span>
+                                                <strong>{formatMetricValue(metric!.model_brier)}</strong>
+                                              </div>
+                                              <div className="metrics-card-row">
+                                                <span>Delta brier</span>
+                                                <strong className={deltaMetricClass(metric!.delta_brier)}>
+                                                  {formatMetricValue(metric!.delta_brier)}
                                                 </strong>
                                               </div>
-                                            ) : null}
-                                            <div className="metrics-card-row">
-                                              <span>Baseline ece_q</span>
-                                              <strong>{formatMetricValue(metric!.baseline_ece_q)}</strong>
-                                            </div>
-                                            <div className="metrics-card-row">
-                                              <span>Model ece_q</span>
-                                              <strong>{formatMetricValue(metric!.model_ece_q)}</strong>
-                                            </div>
-                                            <div className="metrics-card-row">
-                                              <span>Delta ece_q</span>
-                                              <strong className={deltaMetricClass(metric!.delta_ece_q)}>
-                                                {formatMetricValue(metric!.delta_ece_q)}
-                                              </strong>
-                                            </div>
-                                            {metric!.delta_ece_q_ci_lo != null && metric!.delta_ece_q_ci_hi != null ? (
-                                              <div className="metrics-card-row metrics-card-ci">
-                                                <span>ECE-Q {modelCiLabel}</span>
-                                                <strong>
-                                                  [{metric!.delta_ece_q_ci_lo.toFixed(4)}, {metric!.delta_ece_q_ci_hi.toFixed(4)}]
+                                              {metric!.delta_brier_ci_lo != null && metric!.delta_brier_ci_hi != null ? (
+                                                <div className="metrics-card-row metrics-card-ci">
+                                                  <span>Brier {modelCiLabel}</span>
+                                                  <strong>
+                                                    [{metric!.delta_brier_ci_lo.toFixed(4)}, {metric!.delta_brier_ci_hi.toFixed(4)}]
+                                                  </strong>
+                                                </div>
+                                              ) : null}
+                                              <div className="metrics-card-row">
+                                                <span>Baseline ece_q</span>
+                                                <strong>{formatMetricValue(metric!.baseline_ece_q)}</strong>
+                                              </div>
+                                              <div className="metrics-card-row">
+                                                <span>Model ece_q</span>
+                                                <strong>{formatMetricValue(metric!.model_ece_q)}</strong>
+                                              </div>
+                                              <div className="metrics-card-row">
+                                                <span>Delta ece_q</span>
+                                                <strong className={deltaMetricClass(metric!.delta_ece_q)}>
+                                                  {formatMetricValue(metric!.delta_ece_q)}
                                                 </strong>
                                               </div>
-                                            ) : null}
-                                          </div>
-                                        ))}
+                                              {metric!.delta_ece_q_ci_lo != null && metric!.delta_ece_q_ci_hi != null ? (
+                                                <div className="metrics-card-row metrics-card-ci">
+                                                  <span>ECE-Q {modelCiLabel}</span>
+                                                  <strong>
+                                                    [{metric!.delta_ece_q_ci_lo.toFixed(4)}, {metric!.delta_ece_q_ci_hi.toFixed(4)}]
+                                                  </strong>
+                                                </div>
+                                              ) : null}
+                                            </div>
+                                          ))}
+                                        </div>
                                       </div>
                                     </div>
                                   ) : null}
@@ -4669,6 +5562,7 @@ export default function CalibrateModelsPage() {
                                     <div className="equation-summary">
                                       <span className="meta-label">Model equation</span>
                                       <LatexBlock latex={modelDetail.model_equation} />
+                                      <EquationNotes spec={modelDetail.model_equation_spec} />
                                     </div>
                                   ) : null}
 
@@ -4676,6 +5570,7 @@ export default function CalibrateModelsPage() {
                                     <div className="equation-summary">
                                       <span className="meta-label">Stage A equation</span>
                                       <LatexBlock latex={modelDetail.stage1_equation} />
+                                      <EquationNotes spec={modelDetail.stage1_equation_spec} />
                                     </div>
                                   ) : null}
 
@@ -4683,75 +5578,65 @@ export default function CalibrateModelsPage() {
                                     <div className="equation-summary">
                                       <span className="meta-label">Stage B equation</span>
                                       <LatexBlock latex={modelDetail.two_stage_equation} />
+                                      <EquationNotes spec={modelDetail.two_stage_equation_spec} />
                                     </div>
                                   ) : null}
 
-                                  {isAutoRun && !model.has_selected_model ? (
+                                  {isAutoRun && autoStatus === "no_viable_model" && !model.has_selected_model ? (
                                     <div className="warning auto-no-viable-callout">
-                                      No viable model was selected from this auto run. Search diagnostics remain available below.
+                                      No candidate passed the acceptance gates for this auto run. Search diagnostics remain available below.
                                     </div>
                                   ) : null}
 
                                   {modelFiles?.files?.length ? (
                                     <div className="model-detail-section file-viewer-section">
                                       <span className="meta-label">Artifacts</span>
+                                      {defaultArtifactPath ? (
+                                        <div className="artifact-selection-note">
+                                          <code>{DEFAULT_ARTIFACT_FILE_NAME}</code> opens automatically when you select a model.
+                                        </div>
+                                      ) : null}
                                       {isAutoRun ? (
                                         <div className="artifact-section-stack">
                                           <div className="artifact-section-block">
                                             <span className="meta-label">Selected Model</span>
-                                            {groupedModelFiles.selected_model.length ? (
+                                            {visibleGroupedModelFiles.selected_model.length ? (
                                               <div className="file-list">
-                                                {groupedModelFiles.selected_model.map((file) => {
-                                                  const filePath = file.relative_path ?? file.name;
+                                                {visibleGroupedModelFiles.selected_model.map((file) => {
+                                                  const filePath = artifactFilePath(file);
                                                   return (
-                                                    <button
+                                                    <ArtifactFileButton
                                                       key={`${model.id}-${filePath}`}
-                                                      type="button"
-                                                      className={`file-item ${selectedFilePath === filePath ? "active" : ""}`}
+                                                      titlePath={filePath}
+                                                      displayPath={filePath}
+                                                      meta={formatFileSizeLabel(file.size_bytes)}
+                                                      isActive={selectedFilePath === filePath}
                                                       onClick={() => file.is_viewable && void handleOpenFile(file)}
                                                       disabled={!file.is_viewable}
-                                                    >
-                                                      <span className="file-name">{file.name}</span>
-                                                      {file.relative_path && file.relative_path !== file.name ? (
-                                                        <span className="file-path">{file.relative_path}</span>
-                                                      ) : null}
-                                                      <span className="file-size">
-                                                        {file.size_bytes < 1024
-                                                          ? `${file.size_bytes} B`
-                                                          : `${(file.size_bytes / 1024).toFixed(1)} KB`}
-                                                      </span>
-                                                    </button>
+                                                    />
                                                   );
                                                 })}
                                               </div>
                                             ) : (
-                                              <div className="empty">No selected-model artifacts.</div>
+                                              <div className="empty">No additional selected-model artifacts.</div>
                                             )}
                                           </div>
                                           <div className="artifact-section-block">
                                             <span className="meta-label">Auto Search</span>
-                                            {groupedModelFiles.auto_search.length ? (
+                                            {visibleGroupedModelFiles.auto_search.length ? (
                                               <div className="file-list">
-                                                {groupedModelFiles.auto_search.map((file) => {
-                                                  const filePath = file.relative_path ?? file.name;
+                                                {visibleGroupedModelFiles.auto_search.map((file) => {
+                                                  const filePath = artifactFilePath(file);
                                                   return (
-                                                    <button
+                                                    <ArtifactFileButton
                                                       key={`${model.id}-${filePath}`}
-                                                      type="button"
-                                                      className={`file-item ${selectedFilePath === filePath ? "active" : ""}`}
+                                                      titlePath={filePath}
+                                                      displayPath={filePath}
+                                                      meta={formatFileSizeLabel(file.size_bytes)}
+                                                      isActive={selectedFilePath === filePath}
                                                       onClick={() => file.is_viewable && void handleOpenFile(file)}
                                                       disabled={!file.is_viewable}
-                                                    >
-                                                      <span className="file-name">{file.name}</span>
-                                                      {file.relative_path && file.relative_path !== file.name ? (
-                                                        <span className="file-path">{file.relative_path}</span>
-                                                      ) : null}
-                                                      <span className="file-size">
-                                                        {file.size_bytes < 1024
-                                                          ? `${file.size_bytes} B`
-                                                          : `${(file.size_bytes / 1024).toFixed(1)} KB`}
-                                                      </span>
-                                                    </button>
+                                                    />
                                                   );
                                                 })}
                                               </div>
@@ -4759,30 +5644,22 @@ export default function CalibrateModelsPage() {
                                               <div className="empty">No auto-search artifacts.</div>
                                             )}
                                           </div>
-                                          {groupedModelFiles.legacy_root.length ? (
+                                          {visibleGroupedModelFiles.legacy_root.length ? (
                                             <div className="artifact-section-block">
                                               <span className="meta-label">Legacy Root</span>
                                               <div className="file-list">
-                                                {groupedModelFiles.legacy_root.map((file) => {
-                                                  const filePath = file.relative_path ?? file.name;
+                                                {visibleGroupedModelFiles.legacy_root.map((file) => {
+                                                  const filePath = artifactFilePath(file);
                                                   return (
-                                                    <button
+                                                    <ArtifactFileButton
                                                       key={`${model.id}-${filePath}`}
-                                                      type="button"
-                                                      className={`file-item ${selectedFilePath === filePath ? "active" : ""}`}
+                                                      titlePath={filePath}
+                                                      displayPath={filePath}
+                                                      meta={formatFileSizeLabel(file.size_bytes)}
+                                                      isActive={selectedFilePath === filePath}
                                                       onClick={() => file.is_viewable && void handleOpenFile(file)}
                                                       disabled={!file.is_viewable}
-                                                    >
-                                                      <span className="file-name">{file.name}</span>
-                                                      {file.relative_path && file.relative_path !== file.name ? (
-                                                        <span className="file-path">{file.relative_path}</span>
-                                                      ) : null}
-                                                      <span className="file-size">
-                                                        {file.size_bytes < 1024
-                                                          ? `${file.size_bytes} B`
-                                                          : `${(file.size_bytes / 1024).toFixed(1)} KB`}
-                                                      </span>
-                                                    </button>
+                                                    />
                                                   );
                                                 })}
                                               </div>
@@ -4790,36 +5667,33 @@ export default function CalibrateModelsPage() {
                                           ) : null}
                                         </div>
                                       ) : (
-                                        <div className="file-list">
-                                          {groupedModelFiles.legacy_root.map((file) => {
-                                            const filePath = file.relative_path ?? file.name;
-                                            return (
-                                              <button
-                                                key={`${model.id}-${filePath}`}
-                                                type="button"
-                                                className={`file-item ${selectedFilePath === filePath ? "active" : ""}`}
-                                                onClick={() => file.is_viewable && void handleOpenFile(file)}
-                                                disabled={!file.is_viewable}
-                                              >
-                                                <span className="file-name">{file.name}</span>
-                                                {file.relative_path && file.relative_path !== file.name ? (
-                                                  <span className="file-path">{file.relative_path}</span>
-                                                ) : null}
-                                                <span className="file-size">
-                                                  {file.size_bytes < 1024
-                                                    ? `${file.size_bytes} B`
-                                                    : `${(file.size_bytes / 1024).toFixed(1)} KB`}
-                                                </span>
-                                              </button>
-                                            );
-                                          })}
-                                        </div>
+                                        visibleGroupedModelFiles.legacy_root.length ? (
+                                          <div className="file-list">
+                                            {visibleGroupedModelFiles.legacy_root.map((file) => {
+                                              const filePath = artifactFilePath(file);
+                                              return (
+                                                <ArtifactFileButton
+                                                  key={`${model.id}-${filePath}`}
+                                                  titlePath={filePath}
+                                                  displayPath={filePath}
+                                                  meta={formatFileSizeLabel(file.size_bytes)}
+                                                  isActive={selectedFilePath === filePath}
+                                                  onClick={() => file.is_viewable && void handleOpenFile(file)}
+                                                  disabled={!file.is_viewable}
+                                                />
+                                              );
+                                            })}
+                                          </div>
+                                        ) : (
+                                          <div className="empty">No additional artifacts beyond the default metrics view.</div>
+                                        )
                                       )}
                                       {selectedFilePath ? (
                                         <div className="file-content-panel">
                                           <div className="file-content-header">
                                             <div className="file-content-title">
-                                              {selectedFilePath}
+                                              <span className="file-name">{artifactDisplayTitle(selectedFilePath)}</span>
+                                              <span className="file-content-path">{selectedFilePath}</span>
                                               {ARTIFACT_DESCRIPTIONS[selectedArtifactName] ? (
                                                 <span className="file-content-subtitle">
                                                   {ARTIFACT_DESCRIPTIONS[selectedArtifactName]}
@@ -4834,17 +5708,23 @@ export default function CalibrateModelsPage() {
                                               >
                                                 {showRawFile ? "View visual" : "View raw"}
                                               </button>
-                                              <button
-                                                className="button small"
-                                                type="button"
-                                                onClick={() => {
-                                                  setSelectedFilePath(null);
-                                                  setFileContent(null);
-                                                  setFileError(null);
-                                                }}
-                                              >
-                                                Close
-                                              </button>
+                                              {!isShowingDefaultArtifact || !defaultArtifactFile ? (
+                                                <button
+                                                  className="button small"
+                                                  type="button"
+                                                  onClick={() => {
+                                                    if (defaultArtifactFile && selectedFilePath !== defaultArtifactPath) {
+                                                      void openModelFile(model.id, defaultArtifactFile, { allowToggle: false });
+                                                      return;
+                                                    }
+                                                    setSelectedFilePath(null);
+                                                    setFileContent(null);
+                                                    setFileError(null);
+                                                  }}
+                                                >
+                                                  {defaultArtifactFile ? "Back to metrics" : "Close"}
+                                                </button>
+                                              ) : null}
                                             </div>
                                           </div>
                                           {fileLoading ? <div className="empty">Loading file…</div> : null}

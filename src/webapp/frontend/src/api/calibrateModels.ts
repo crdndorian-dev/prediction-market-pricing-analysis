@@ -91,6 +91,26 @@ export type ModelDetailResponse = {
   two_stage_equation_spec?: EquationSpec | null;
   combined_p_hat_equation?: string | null;
   combined_p_hat_equation_spec?: EquationSpec | null;
+  auto_selection_summary?: {
+    status?: string | null;
+    selected_trial_id?: number | null;
+    has_selected_model?: boolean | null;
+    materialized_best_candidate?: boolean | null;
+    selection_rule?: string | null;
+    epsilon?: number | null;
+    score_definition?: string | null;
+    best_score?: number | null;
+    no_viable_reasons?: string[] | null;
+    acceptance?: Record<string, number | boolean | string | null> | null;
+    outer_cv?: Record<string, number | boolean | string | null> | null;
+    chosen?: Record<string, unknown> | null;
+    fold_gate_summary?: {
+      n_folds?: number | null;
+      improved_folds?: number | null;
+      worst_delta_logloss?: number | null;
+      mean_delta_logloss?: number | null;
+    } | null;
+  } | null;
 };
 
 export type ModelListResponse = {

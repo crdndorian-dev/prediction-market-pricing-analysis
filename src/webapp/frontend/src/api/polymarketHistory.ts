@@ -284,11 +284,21 @@ export async function listPipelineRuns(): Promise<PipelineRunsResponse> {
 export async function renamePipelineRun(
   runId: string,
   label: string | null,
-): Promise<{ run_id: string; label: string | null }> {
+  newDirName?: string | null,
+): Promise<{
+  run_id: string;
+  label: string | null;
+  renamed_dir: boolean;
+  run_dir: string;
+}> {
+  const payload: Record<string, unknown> = { label };
+  if (newDirName != null) {
+    payload.new_dir_name = newDirName;
+  }
   const response = await fetch(`${API_BASE}/polymarket-history/runs/${runId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ label }),
+    body: JSON.stringify(payload),
   });
   if (!response.ok) {
     const detail = await response.text();

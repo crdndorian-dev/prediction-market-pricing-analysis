@@ -211,6 +211,52 @@ def build_bars_from_prices(
     return ohlc
 
 
+def build_bars_from_trades(
+    trades_df: pd.DataFrame,
+    freq: str,
+    *,
+    schema_version: str,
+) -> pd.DataFrame:
+    """Build OHLCV bars from subgraph trade-level data (price, size, timestamp).
+
+    Unlike build_bars_from_prices which only has CLOB midprice (no volume),
+    this function produces genuine OHLCV bars with real volume and trade counts
+    from the TRADES_BY_MARKET subgraph data.
+
+    Expected columns: market_id, timestamp_utc, price, size.
+    """
+    if trades_df.empty:
+        return trades_df
+
+    required = {"market_id", "timestamp_utc", "price", "size"}
+    if not required.issubset(trades_df.columns):
+        missing = required - set(trades_df.columns)
+        raise ValueError(f"Missing columns for trade bars: {missing}")
+
+    freq_alias = FREQ_ALIASES.get(freq, freq)
+    df = trades_df.copy()
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
+    df["size"] = pd.to_numeric(df["size"], errors="coerce")
+    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
+    df = df.dropna(subset=["timestamp_utc", "price", "size"])
+    df = df.sort_values(["market_id", "timestamp_utc"])
+    df = df.set_index("timestamp_utc")
+
+    grouped = df.groupby("market_id")
+
+    ohlc = grouped["price"].resample(freq_alias).ohlc().reset_index()
+    volume = grouped["size"].resample(freq_alias).sum().reset_index().rename(columns={"size": "volume"})
+    count = grouped["size"].resample(freq_alias).count().reset_index().rename(columns={"size": "trade_count"})
+
+    if ohlc.empty:
+        return ohlc
+
+    bars = ohlc.merge(volume, on=["market_id", "timestamp_utc"], how="left")
+    bars = bars.merge(count, on=["market_id", "timestamp_utc"], how="left")
+    bars["schema_version"] = schema_version
+    return bars
+
+
 def write_bars(bars: pd.DataFrame, bars_dir: Path, freq: str) -> int:
     if bars.empty:
         return 0
