@@ -11,6 +11,7 @@ import pandas as pd
 PRESERVED_RUNTIME_CSVS = frozenset(
     {
         "price_history.csv",
+        "trades.csv",
         "weekly_markets.csv",
         "weekly_events.csv",
         "markets_prn_hourly.csv",
@@ -33,6 +34,10 @@ _ROW_IDENTITY_OPTIONS: Dict[str, Tuple[Tuple[str, ...], ...]] = {
     "markets_prn_hourly.csv": (
         ("market_id", "timestamp_utc"),
         ("ticker", "threshold", "timestamp_utc", "week_friday"),
+    ),
+    "trades.csv": (
+        ("trade_id",),
+        ("tx_hash", "market_id", "timestamp_utc", "outcome_token_id"),
     ),
 }
 

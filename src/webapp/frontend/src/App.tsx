@@ -8,6 +8,7 @@ import CalibrateModelsPage from "./pages/CalibrateModelsPage";
 import PolymarketPipelinePage from "./pages/PolymarketPipelinePage";
 import BacktestsPage from "./pages/BacktestsPage";
 import MarketsPage from "./pages/MarketsPage";
+import AnalyticsPage from "./pages/AnalyticsPage";
 import DocumentationPage from "./pages/DocumentationPage";
 import { DatasetJobProvider } from "./contexts/datasetJob";
 import { CalibrationJobProvider } from "./contexts/calibrationJob";
@@ -85,6 +86,9 @@ export default function App() {
                       <NavLink to="/markets" className={linkClass}>
                         Markets
                       </NavLink>
+                      <NavLink to="/analytics" className={linkClass}>
+                        Analytics
+                      </NavLink>
                       <NavLink to="/backtests" className={linkClass}>
                         Backtests
                       </NavLink>
@@ -116,6 +120,7 @@ export default function App() {
                         element={<Navigate to="/polymarket-history-builder" replace />}
                       />
                       <Route path="/backtests" element={<BacktestsPage />} />
+                      <Route path="/analytics" element={<AnalyticsPage />} />
                       <Route path="/docs" element={<DocumentationPage />} />
                     </Routes>
                   </main>

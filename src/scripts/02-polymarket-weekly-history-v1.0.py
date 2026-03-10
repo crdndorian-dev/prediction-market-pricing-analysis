@@ -37,6 +37,7 @@ from polymarket.weekly_history_io import (
     fetch_price_history,
     write_bars,
 )
+from polymarket.trade_artifact import enrich_trades_for_run, write_run_trades_csv
 
 # Endpoints
 GAMMA_EVENTS = "https://gamma-api.polymarket.com/events"
@@ -738,6 +739,9 @@ def maybe_ingest_subgraph_trades(
     since_ts: Optional[int],
     cfg: Config,
     out_dir: Path,
+    *,
+    run_dir: Path,
+    markets_df: pd.DataFrame,
 ) -> Dict[str, Any]:
     result: Dict[str, Any] = {"ok": False}
     try:
@@ -791,6 +795,10 @@ def maybe_ingest_subgraph_trades(
     df = _normalize_trades(entities)
     ensure_dir(out_dir)
     partitions = _write_trade_partitions(df, out_dir)
+    trade_artifact = None
+    if not df.empty:
+        enriched = enrich_trades_for_run(df, markets_df)
+        trade_artifact = write_run_trades_csv(enriched, run_dir / "trades.csv")
 
     result.update(
         {
@@ -799,6 +807,7 @@ def maybe_ingest_subgraph_trades(
             "run_dir": str(pull.run_dir),
             "total_entities": len(df),
             "partitions": partitions,
+            "trade_artifact": trade_artifact,
         }
     )
     return result
@@ -1192,7 +1201,14 @@ def main() -> None:
     if cfg.include_subgraph and not args.dry_run:
         market_ids = [m for m in markets_df["market_id"].dropna().astype(str).unique().tolist() if m]
         since_ts = int(start_dt.timestamp()) if start_dt else None
-        subgraph_info = maybe_ingest_subgraph_trades(market_ids, since_ts, cfg, fact_trade_dir)
+        subgraph_info = maybe_ingest_subgraph_trades(
+            market_ids,
+            since_ts,
+            cfg,
+            fact_trade_dir,
+            run_dir=run_dir,
+            markets_df=markets_df,
+        )
         if subgraph_info.get("ok"):
             print(f"[Weekly History] subgraph trades run_id={subgraph_info.get('run_id')}")
         else:
@@ -1231,6 +1247,7 @@ def main() -> None:
         "bar_partitions": bar_partitions,
         "dim_market": str(dim_market_out),
         "subgraph": subgraph_info,
+        "trade_artifact": subgraph_info.get("trade_artifact"),
     }
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 

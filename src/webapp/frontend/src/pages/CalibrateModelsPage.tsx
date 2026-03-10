@@ -1553,7 +1553,7 @@ export default function CalibrateModelsPage() {
     const total = progress.trials_total ?? 0;
     const completed = progress.trials_done ?? 0;
     const failed = progress.trials_failed ?? 0;
-    const status =
+    const status: "running" | "completed" | "failed" =
       jobStatus?.status === "failed"
         ? "failed"
         : jobStatus?.status === "finished"

@@ -252,6 +252,157 @@ export type PipelineRunSummary = {
   }[];
   size_bytes: number;
   error_summary: string | null;
+  analytics?: {
+    analytics_ready: boolean;
+    primary_metric: string;
+    requires_true_volume: boolean;
+    include_subgraph_requested: boolean;
+    has_trades: boolean;
+    trade_entities: number | null;
+    trade_days: number | null;
+    trade_artifact_path?: string | null;
+    warning: string | null;
+  } | null;
+};
+
+export type RunDailyAnalyticsDay = {
+  date: string;
+  weekday: string;
+  daily_notional_volume: number;
+  share_volume: number;
+  trade_count: number;
+  active_markets: number;
+  active_tickers: number;
+  expected_notional_volume: number | null;
+  band_lo: number | null;
+  band_hi: number | null;
+  realized_expected_ratio: number | null;
+  day_over_day_delta: number | null;
+  day_over_day_pct: number | null;
+  noise_cv_28d: number | null;
+  noise_mad_ratio_28d: number | null;
+  unusually_active: boolean;
+  unusually_inactive: boolean;
+  flagged_outlier: boolean;
+  baseline_source: string;
+};
+
+export type RunDailyAnalyticsSnapshot = RunDailyAnalyticsDay;
+
+export type RunDailyAnalyticsSummary = {
+  latest_day: RunDailyAnalyticsSnapshot | null;
+  comparison_day: RunDailyAnalyticsSnapshot | null;
+  delta_notional: number | null;
+  delta_notional_pct: number | null;
+  delta_share_volume: number | null;
+  delta_trade_count: number | null;
+  latest_noise_cv_28d: number | null;
+  latest_noise_mad_ratio_28d: number | null;
+  latest_unusually_active: boolean;
+  latest_unusually_inactive: boolean;
+  latest_flagged_outlier: boolean;
+};
+
+export type RunDailyAnalyticsCoverage = {
+  artifact_path: string | null;
+  total_trade_rows: number;
+  valid_trade_rows: number;
+  filtered_trade_rows: number;
+  observed_trade_days: number;
+  filled_days: number;
+  effective_date_min: string | null;
+  effective_date_max: string | null;
+  requested_date_min: string | null;
+  requested_date_max: string | null;
+  requested_tickers: string[];
+  requested_token_role: "all" | "yes" | "no";
+};
+
+export type RunDailyAnalyticsStructureBucket = {
+  key: string;
+  label: string;
+  observations: number;
+  mean_daily_notional_volume: number;
+  median_daily_notional_volume: number;
+  total_notional_volume: number;
+  share_total_notional_volume: number;
+};
+
+export type RunDailyAnalyticsStructure = {
+  weekday: RunDailyAnalyticsStructureBucket[];
+  event_proximity: RunDailyAnalyticsStructureBucket[];
+  ladder_bucket: RunDailyAnalyticsStructureBucket[];
+};
+
+export type RunDailyAnalyticsResponse = {
+  run_id: string;
+  analytics_ready: boolean;
+  primary_metric: string;
+  metric_mode: "true_volume";
+  token_role: "all" | "yes" | "no";
+  ci_level: number;
+  exclude_flagged: boolean;
+  baseline_window_days: number;
+  latest_trade_date: string | null;
+  comparison_date: string | null;
+  available_tickers: string[];
+  coverage: RunDailyAnalyticsCoverage;
+  summary: RunDailyAnalyticsSummary;
+  days: RunDailyAnalyticsDay[];
+  structure: RunDailyAnalyticsStructure;
+  warnings: string[];
+};
+
+export type RunDailyAnalyticsQuery = {
+  dateMin?: string;
+  dateMax?: string;
+  tickers?: string[];
+  tokenRole?: "all" | "yes" | "no";
+  ciLevel?: number;
+  excludeFlagged?: boolean;
+};
+
+export type RunDailyAnalyticsBreakdownRow = {
+  key: string;
+  label: string;
+  ticker: string | null;
+  market_id: string | null;
+  threshold: number | null;
+  week_friday: string | null;
+  event_endDate: string | null;
+  ladder_bucket: string | null;
+  event_proximity_bucket: string | null;
+  daily_notional_volume: number;
+  share_volume: number;
+  trade_count: number;
+  expected_notional_volume: number | null;
+  band_lo: number | null;
+  band_hi: number | null;
+  realized_expected_ratio: number | null;
+  unusually_active: boolean;
+  unusually_inactive: boolean;
+  flagged_outlier: boolean;
+  baseline_source: string;
+  history_days: number;
+  volume_share_of_day: number | null;
+};
+
+export type RunDailyAnalyticsBreakdownResponse = {
+  run_id: string;
+  date: string;
+  group_by: "ticker" | "market";
+  token_role: "all" | "yes" | "no";
+  ci_level: number;
+  exclude_flagged: boolean;
+  available_tickers: string[];
+  selected_tickers: string[];
+  rows: RunDailyAnalyticsBreakdownRow[];
+  warnings: string[];
+};
+
+export type RunDailyAnalyticsBreakdownQuery = RunDailyAnalyticsQuery & {
+  date: string;
+  groupBy?: "ticker" | "market";
 };
 
 export type StorageSummary = {
@@ -277,6 +428,58 @@ export async function listPipelineRuns(): Promise<PipelineRunsResponse> {
   if (!response.ok) {
     const detail = await response.text();
     throw new Error(`Failed to list runs (${response.status}): ${detail}`);
+  }
+  return response.json();
+}
+
+export async function getRunDailyAnalyticsSummary(
+  runId: string,
+  query: RunDailyAnalyticsQuery = {},
+): Promise<RunDailyAnalyticsResponse> {
+  const params = new URLSearchParams();
+  if (query.dateMin) params.set("date_min", query.dateMin);
+  if (query.dateMax) params.set("date_max", query.dateMax);
+  if (query.tickers && query.tickers.length) {
+    params.set("tickers", query.tickers.join(","));
+  }
+  if (query.tokenRole) params.set("token_role", query.tokenRole);
+  if (query.ciLevel != null) params.set("ci_level", String(query.ciLevel));
+  if (query.excludeFlagged != null) {
+    params.set("exclude_flagged", String(query.excludeFlagged));
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(
+    `${API_BASE}/polymarket-history/runs/${encodeURIComponent(runId)}/analytics/daily-summary${suffix}`,
+  );
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`Daily analytics failed (${response.status}): ${detail || "unknown error"}`);
+  }
+  return response.json();
+}
+
+export async function getRunDailyAnalyticsBreakdown(
+  runId: string,
+  query: RunDailyAnalyticsBreakdownQuery,
+): Promise<RunDailyAnalyticsBreakdownResponse> {
+  const params = new URLSearchParams({ date: query.date });
+  if (query.groupBy) params.set("group_by", query.groupBy);
+  if (query.dateMin) params.set("date_min", query.dateMin);
+  if (query.dateMax) params.set("date_max", query.dateMax);
+  if (query.tickers && query.tickers.length) {
+    params.set("tickers", query.tickers.join(","));
+  }
+  if (query.tokenRole) params.set("token_role", query.tokenRole);
+  if (query.ciLevel != null) params.set("ci_level", String(query.ciLevel));
+  if (query.excludeFlagged != null) {
+    params.set("exclude_flagged", String(query.excludeFlagged));
+  }
+  const response = await fetch(
+    `${API_BASE}/polymarket-history/runs/${encodeURIComponent(runId)}/analytics/daily-breakdown?${params.toString()}`,
+  );
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`Daily analytics breakdown failed (${response.status}): ${detail || "unknown error"}`);
   }
   return response.json();
 }

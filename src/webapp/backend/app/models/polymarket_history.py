@@ -141,3 +141,200 @@ class PolymarketHistoryJobStatus(BaseModel):
     error: Optional[str] = None
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
+
+
+class PolymarketDailyAnalyticsDay(BaseModel):
+    date: str = Field(..., description="UTC calendar date (YYYY-MM-DD).")
+    weekday: str = Field(..., description="Weekday label for the UTC date.")
+    daily_notional_volume: float = Field(..., description="Observed notional trade volume for the day.")
+    share_volume: float = Field(..., description="Observed share volume for the day.")
+    trade_count: int = Field(..., description="Observed trade count for the day.")
+    active_markets: int = Field(..., description="Distinct markets with trades on the day.")
+    active_tickers: int = Field(..., description="Distinct tickers with trades on the day.")
+    expected_notional_volume: Optional[float] = Field(
+        default=None,
+        description="Expected notional trade volume from the rolling empirical baseline.",
+    )
+    band_lo: Optional[float] = Field(default=None, description="Lower confidence band for the day.")
+    band_hi: Optional[float] = Field(default=None, description="Upper confidence band for the day.")
+    realized_expected_ratio: Optional[float] = Field(
+        default=None,
+        description="Observed volume divided by expected volume.",
+    )
+    day_over_day_delta: Optional[float] = Field(
+        default=None,
+        description="Observed notional delta versus the prior calendar day.",
+    )
+    day_over_day_pct: Optional[float] = Field(
+        default=None,
+        description="Observed notional delta percentage versus the prior calendar day.",
+    )
+    noise_cv_28d: Optional[float] = Field(
+        default=None,
+        description="Rolling 28-day coefficient of variation for observed volume.",
+    )
+    noise_mad_ratio_28d: Optional[float] = Field(
+        default=None,
+        description="Rolling 28-day MAD/median ratio for observed volume.",
+    )
+    unusually_active: bool = Field(
+        default=False,
+        description="Whether observed volume exceeded the upper confidence band.",
+    )
+    unusually_inactive: bool = Field(
+        default=False,
+        description="Whether observed volume fell below the lower confidence band.",
+    )
+    flagged_outlier: bool = Field(
+        default=False,
+        description="Robust outlier flag from a rolling median/MAD diagnostic.",
+    )
+    baseline_source: str = Field(
+        default="rolling_weekday_median",
+        description="Baseline source used for the day's expected volume.",
+    )
+
+
+class PolymarketDailyAnalyticsSnapshot(BaseModel):
+    date: str = Field(..., description="UTC calendar date (YYYY-MM-DD).")
+    weekday: str = Field(..., description="Weekday label for the UTC date.")
+    daily_notional_volume: float = Field(..., description="Observed notional trade volume for the day.")
+    share_volume: float = Field(..., description="Observed share volume for the day.")
+    trade_count: int = Field(..., description="Observed trade count for the day.")
+    active_markets: int = Field(..., description="Distinct markets with trades on the day.")
+    active_tickers: int = Field(..., description="Distinct tickers with trades on the day.")
+    expected_notional_volume: Optional[float] = None
+    band_lo: Optional[float] = None
+    band_hi: Optional[float] = None
+    realized_expected_ratio: Optional[float] = None
+    day_over_day_delta: Optional[float] = None
+    day_over_day_pct: Optional[float] = None
+    noise_cv_28d: Optional[float] = None
+    noise_mad_ratio_28d: Optional[float] = None
+    unusually_active: bool = False
+    unusually_inactive: bool = False
+    flagged_outlier: bool = False
+    baseline_source: str = "rolling_weekday_median"
+
+
+class PolymarketDailyAnalyticsSummary(BaseModel):
+    latest_day: Optional[PolymarketDailyAnalyticsSnapshot] = None
+    comparison_day: Optional[PolymarketDailyAnalyticsSnapshot] = None
+    delta_notional: Optional[float] = Field(
+        default=None,
+        description="Latest-day notional minus comparison-day notional.",
+    )
+    delta_notional_pct: Optional[float] = Field(
+        default=None,
+        description="Latest-day notional delta divided by comparison-day notional.",
+    )
+    delta_share_volume: Optional[float] = Field(
+        default=None,
+        description="Latest-day share volume minus comparison-day share volume.",
+    )
+    delta_trade_count: Optional[int] = Field(
+        default=None,
+        description="Latest-day trade count minus comparison-day trade count.",
+    )
+    latest_noise_cv_28d: Optional[float] = Field(
+        default=None,
+        description="Latest-day rolling 28-day coefficient of variation.",
+    )
+    latest_noise_mad_ratio_28d: Optional[float] = Field(
+        default=None,
+        description="Latest-day rolling 28-day MAD/median ratio.",
+    )
+    latest_unusually_active: bool = False
+    latest_unusually_inactive: bool = False
+    latest_flagged_outlier: bool = False
+
+
+class PolymarketDailyAnalyticsCoverage(BaseModel):
+    artifact_path: Optional[str] = Field(default=None, description="Run-local trades artifact path.")
+    total_trade_rows: int = Field(..., description="Rows loaded from the run-local trades artifact.")
+    valid_trade_rows: int = Field(..., description="Rows remaining after schema and timestamp validation.")
+    filtered_trade_rows: int = Field(..., description="Rows remaining after ticker/date filters.")
+    observed_trade_days: int = Field(..., description="Observed trade days after filters and before zero-fill.")
+    filled_days: int = Field(..., description="Calendar days returned after zero-fill.")
+    effective_date_min: Optional[str] = Field(default=None, description="Effective minimum date returned.")
+    effective_date_max: Optional[str] = Field(default=None, description="Effective maximum date returned.")
+    requested_date_min: Optional[str] = Field(default=None, description="Requested minimum date filter.")
+    requested_date_max: Optional[str] = Field(default=None, description="Requested maximum date filter.")
+    requested_tickers: List[str] = Field(
+        default_factory=list,
+        description="Ticker filter applied to the artifact.",
+    )
+    requested_token_role: str = Field(default="all", description="Outcome token role filter applied.")
+
+
+class PolymarketDailyAnalyticsStructureBucket(BaseModel):
+    key: str
+    label: str
+    observations: int
+    mean_daily_notional_volume: float
+    median_daily_notional_volume: float
+    total_notional_volume: float
+    share_total_notional_volume: float
+
+
+class PolymarketDailyAnalyticsStructure(BaseModel):
+    weekday: List[PolymarketDailyAnalyticsStructureBucket] = Field(default_factory=list)
+    event_proximity: List[PolymarketDailyAnalyticsStructureBucket] = Field(default_factory=list)
+    ladder_bucket: List[PolymarketDailyAnalyticsStructureBucket] = Field(default_factory=list)
+
+
+class PolymarketDailyAnalyticsResponse(BaseModel):
+    run_id: str
+    analytics_ready: bool
+    primary_metric: str
+    metric_mode: Literal["true_volume"]
+    token_role: Literal["all", "yes", "no"] = "all"
+    ci_level: int = 90
+    exclude_flagged: bool = False
+    baseline_window_days: int = 28
+    latest_trade_date: Optional[str] = None
+    comparison_date: Optional[str] = None
+    available_tickers: List[str] = Field(default_factory=list)
+    coverage: PolymarketDailyAnalyticsCoverage
+    summary: PolymarketDailyAnalyticsSummary
+    days: List[PolymarketDailyAnalyticsDay] = Field(default_factory=list)
+    structure: PolymarketDailyAnalyticsStructure = Field(default_factory=PolymarketDailyAnalyticsStructure)
+    warnings: List[str] = Field(default_factory=list)
+
+
+class PolymarketDailyAnalyticsBreakdownRow(BaseModel):
+    key: str
+    label: str
+    ticker: Optional[str] = None
+    market_id: Optional[str] = None
+    threshold: Optional[float] = None
+    week_friday: Optional[str] = None
+    event_endDate: Optional[str] = None
+    ladder_bucket: Optional[str] = None
+    event_proximity_bucket: Optional[str] = None
+    daily_notional_volume: float
+    share_volume: float
+    trade_count: int
+    expected_notional_volume: Optional[float] = None
+    band_lo: Optional[float] = None
+    band_hi: Optional[float] = None
+    realized_expected_ratio: Optional[float] = None
+    unusually_active: bool = False
+    unusually_inactive: bool = False
+    flagged_outlier: bool = False
+    baseline_source: str = "rolling_weekday_median"
+    history_days: int = 0
+    volume_share_of_day: Optional[float] = None
+
+
+class PolymarketDailyAnalyticsBreakdownResponse(BaseModel):
+    run_id: str
+    date: str
+    group_by: Literal["ticker", "market"]
+    token_role: Literal["all", "yes", "no"] = "all"
+    ci_level: int = 90
+    exclude_flagged: bool = False
+    available_tickers: List[str] = Field(default_factory=list)
+    selected_tickers: List[str] = Field(default_factory=list)
+    rows: List[PolymarketDailyAnalyticsBreakdownRow] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)

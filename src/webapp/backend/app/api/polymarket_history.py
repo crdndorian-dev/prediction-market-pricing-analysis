@@ -4,11 +4,18 @@ from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional, Literal
 
 from app.models.polymarket_history import (
+    PolymarketDailyAnalyticsBreakdownResponse,
+    PolymarketDailyAnalyticsResponse,
     PolymarketHistoryJobStatus,
     PolymarketHistoryRunRequest,
     PolymarketHistoryRunResponse,
     PolymarketRunFeaturesRequest,
     PolymarketRunFeaturesResponse,
+)
+from app.services.analytics import (
+    get_run_daily_analytics_breakdown,
+    get_run_daily_analytics_summary,
+    parse_tickers_query_param,
 )
 from app.services.polymarket_history import (
     get_polymarket_history_job,
@@ -142,6 +149,72 @@ def get_run_csv_preview_endpoint(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get(
+    "/runs/{run_id}/analytics/daily-summary",
+    response_model=PolymarketDailyAnalyticsResponse,
+)
+def get_run_daily_summary(
+    run_id: str,
+    date_min: Optional[str] = Query(default=None),
+    date_max: Optional[str] = Query(default=None),
+    tickers: Optional[str] = Query(default=None, description="Comma-separated ticker filter."),
+    token_role: str = Query(default="all"),
+    ci_level: int = Query(default=90),
+    exclude_flagged: bool = Query(default=False),
+) -> PolymarketDailyAnalyticsResponse:
+    try:
+        return get_run_daily_analytics_summary(
+            run_id,
+            date_min=date_min,
+            date_max=date_max,
+            tickers=parse_tickers_query_param(tickers),
+            token_role=token_role,
+            ci_level=ci_level,
+            exclude_flagged=exclude_flagged,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get(
+    "/runs/{run_id}/analytics/daily-breakdown",
+    response_model=PolymarketDailyAnalyticsBreakdownResponse,
+)
+def get_run_daily_breakdown(
+    run_id: str,
+    date: str = Query(..., description="UTC calendar date (YYYY-MM-DD) to inspect."),
+    group_by: Literal["ticker", "market"] = Query(default="ticker"),
+    date_min: Optional[str] = Query(default=None),
+    date_max: Optional[str] = Query(default=None),
+    tickers: Optional[str] = Query(default=None, description="Comma-separated ticker filter."),
+    token_role: str = Query(default="all"),
+    ci_level: int = Query(default=90),
+    exclude_flagged: bool = Query(default=False),
+) -> PolymarketDailyAnalyticsBreakdownResponse:
+    try:
+        return get_run_daily_analytics_breakdown(
+            run_id,
+            breakdown_date=date,
+            group_by=group_by,
+            date_min=date_min,
+            date_max=date_max,
+            tickers=parse_tickers_query_param(tickers),
+            token_role=token_role,
+            ci_level=ci_level,
+            exclude_flagged=exclude_flagged,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/runs/{run_id}/build-features", response_model=PolymarketRunFeaturesResponse)

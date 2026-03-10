@@ -23,6 +23,7 @@ from app.models.polymarket_history import (
     PolymarketRunFeaturesRequest,
     PolymarketRunFeaturesResponse,
 )
+from app.services.analytics import assess_run_volume_analytics_readiness
 from app.services.process_runtime import (
     ManagedProcessHandle,
     spawn_managed_process,
@@ -918,6 +919,7 @@ def list_pipeline_runs() -> List[Dict[str, Any]]:
         size_bytes = sum(
             item.stat().st_size for item in run_dir.iterdir() if item.is_file()
         )
+        analytics = assess_run_volume_analytics_readiness(manifest)
         runs.append({
             "run_id": run_dir.name,
             "run_dir": str(run_dir.relative_to(BASE_DIR)),
@@ -938,6 +940,7 @@ def list_pipeline_runs() -> List[Dict[str, Any]]:
             "csv_files": _build_run_csv_files(run_dir, manifest),
             "size_bytes": size_bytes,
             "error_summary": manifest.get("error_summary"),
+            "analytics": analytics,
         })
     runs.sort(key=lambda r: r.get("created_at_utc") or "", reverse=True)
     return runs
