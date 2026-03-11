@@ -16,7 +16,7 @@ AGENTS.md
 
 /config/*
 /config/
-/tests/ 
+/tests/
 /ci/
 /tests/*
 !/tests/backend/
