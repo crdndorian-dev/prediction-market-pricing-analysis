@@ -44,9 +44,10 @@ from app.services.process_runtime import (
     terminate_managed_process,
     write_runtime_file,
 )
+from app.services.script_entrypoints import OPTION_CHAIN_DATASET_SCRIPT
 
 BASE_DIR = Path(__file__).resolve().parents[5]
-SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "01-option-chain-build-historic-dataset-v1.0.py"
+SCRIPT_PATH = OPTION_CHAIN_DATASET_SCRIPT.path
 
 DEFAULT_OUT_DIR = "src/data/raw/option-chain"
 DEFAULT_OUT_NAME = "pRN__history__mon_thu__PM10__v1.6.0.csv"
@@ -72,7 +73,11 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 try:
-    from option_chain_weighting_v3 import apply_weighting_v3, drop_weight_columns, WEIGHTING_VERSION
+    from feature_engineering.option_chain.weighting_v3 import (
+        WEIGHTING_VERSION,
+        apply_weighting_v3,
+        drop_weight_columns,
+    )
 except Exception:
     apply_weighting_v3 = None
     drop_weight_columns = None

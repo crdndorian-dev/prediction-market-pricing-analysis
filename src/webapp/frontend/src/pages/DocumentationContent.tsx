@@ -1,38 +1,8 @@
 import { useEffect, useMemo, useRef } from "react";
 import katex from "katex";
-import { Link, useLocation } from "react-router-dom";
 
-import PipelineStatusCard from "../components/PipelineStatusCard";
-import { useAnyJobRunning } from "../contexts/jobGuard";
 import "katex/dist/katex.min.css";
 import "./DocumentationPage.css";
-
-type DocPageLink = {
-  id: string;
-  label: string;
-  route: string;
-};
-
-const docPages: DocPageLink[] = [
-  {
-    id: "patch-notes",
-    label: "Patch Notes",
-    route: "/docs#patch-notes",
-  },
-  {
-    id: "option-chain",
-    label: "Option Chain History Builder",
-    route: "/option-chain-history-builder",
-  },
-  {
-    id: "polymarket-history",
-    label: "Polymarket History Builder",
-    route: "/polymarket-history-builder",
-  },
-  { id: "calibrate", label: "Calibrate", route: "/calibrate" },
-  { id: "markets", label: "Markets", route: "/markets" },
-  { id: "backtests", label: "Backtests", route: "/backtests" },
-];
 
 function DocEquation({ latex }: { latex: string }) {
   const rendered = useMemo(() => {
@@ -68,11 +38,6 @@ export const optionChainDoc = (
         <ul>
           <li>
             Historical option-chain snapshots for the tickers and date range you select.
-          </li>
-          <li>
-            Additional realized-volatility context in the dataset artifacts,
-            including <code>rv5</code>, <code>rv10</code>, and the existing
-            <code>rv20</code> snapshot field.
           </li>
           <li>
             Multiple CSV views produced by the build script (training, snapshot,
@@ -366,16 +331,21 @@ export const optionChainDoc = (
 
     <h3>Training CSV Feature Reference</h3>
     <p>
+      Public CLI entrypoint: <code>src/scripts/entrypoints/option-chain-build-historic-dataset.py</code>.
+      The file-and-line citations below intentionally reference
+      <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py</code>, which is now the internal implementation file behind that wrapper.
+    </p>
+    <p>
       Each row in <code>training-*.csv</code> corresponds to one call strike kept in the
       pRN band for a single ticker + as-of snapshot + expiry. Option chains are fetched
       from Theta Terminal <code>option/history/eod</code> and stock closes are fetched
       via yfinance (when available) or Theta <code>stock/history/eod</code>; dividends
       and splits are pulled via yfinance. Source:
-      <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L335</code>,
-      <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L327</code>,
-      <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L399</code>,
-      <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L638</code>,
-      <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L418</code>.
+      <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L335</code>,
+      <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L327</code>,
+      <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L399</code>,
+      <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L638</code>,
+      <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L418</code>.
     </p>
 
     <h4>Row Identity & Schedule</h4>
@@ -394,8 +364,8 @@ export const optionChainDoc = (
             <td>Stable row identifier used for joins and deduplication.</td>
             <td>
               SHA1 of <code>asof_ts|ticker|expiry_date_used|strike|option_type</code>.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L127</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1375</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L127</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1375</code>.
             </td>
           </tr>
           <tr>
@@ -403,9 +373,9 @@ export const optionChainDoc = (
             <td>UTC ISO timestamp for the actual as-of close date used.</td>
             <td>
               Computed from <code>asof_date</code> via <code>iso_ts</code>.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L123</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1106</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1376</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L123</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1106</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1376</code>.
             </td>
           </tr>
           <tr>
@@ -413,8 +383,8 @@ export const optionChainDoc = (
             <td>Option right; currently always <code>call</code>.</td>
             <td>
               Hard-coded when emitting rows.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1358</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1377</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1358</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1377</code>.
             </td>
           </tr>
           <tr>
@@ -422,7 +392,7 @@ export const optionChainDoc = (
             <td>Underlying symbol for the row.</td>
             <td>
               Taken from the schedule/ticker list.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1379</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1379</code>.
             </td>
           </tr>
           <tr>
@@ -430,7 +400,7 @@ export const optionChainDoc = (
             <td>ISO-week Monday anchor for the schedule.</td>
             <td>
               Derived from the schedule builder.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1380</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1380</code>.
             </td>
           </tr>
           <tr>
@@ -438,8 +408,8 @@ export const optionChainDoc = (
             <td>ISO-week Friday anchor (event end / expiry request).</td>
             <td>
               Derived from the schedule builder; used to set the expiry target.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1110</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1381</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1110</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1381</code>.
             </td>
           </tr>
           <tr>
@@ -447,7 +417,7 @@ export const optionChainDoc = (
             <td>Scheduled snapshot date prior to fallback.</td>
             <td>
               Generated by the schedule builder (weekday or DTE selection).
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1382</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1382</code>.
             </td>
           </tr>
           <tr>
@@ -455,10 +425,10 @@ export const optionChainDoc = (
             <td>Actual close date used after forward fallback.</td>
             <td>
               Forward search in the close map (yfinance or Theta <code>stock/history/eod</code>).
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L679</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1070</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1104</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1383</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L679</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1070</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1104</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1383</code>.
             </td>
           </tr>
           <tr>
@@ -466,10 +436,10 @@ export const optionChainDoc = (
             <td>Actual close date used for the expiry label after backward fallback.</td>
             <td>
               Backward search in the close map (yfinance or Theta <code>stock/history/eod</code>).
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L679</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1087</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1105</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1384</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L679</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1087</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1105</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1384</code>.
             </td>
           </tr>
           <tr>
@@ -477,8 +447,8 @@ export const optionChainDoc = (
             <td>Requested option-chain expiry (defaults to <code>week_friday</code>).</td>
             <td>
               Used to query Theta <code>option/history/eod</code>.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1155</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1387</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1155</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1387</code>.
             </td>
           </tr>
           <tr>
@@ -487,8 +457,8 @@ export const optionChainDoc = (
             <td>
               Chooses Friday then optional Saturday fallback when fetching Theta
               <code>option/history/eod</code>.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1173</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1388</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1173</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1388</code>.
             </td>
           </tr>
           <tr>
@@ -496,8 +466,8 @@ export const optionChainDoc = (
             <td>Marker for which expiry was used: <code>FRI</code> or <code>SAT_FALLBACK</code>.</td>
             <td>
               Set alongside the expiry fetch logic.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1158</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1389</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1158</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1389</code>.
             </td>
           </tr>
           <tr>
@@ -505,8 +475,8 @@ export const optionChainDoc = (
             <td>Calendar days between <code>asof_date</code> and <code>week_friday</code>.</td>
             <td>
               Computed as the schedule horizon in days.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1110</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1392</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1110</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1392</code>.
             </td>
           </tr>
           <tr>
@@ -514,8 +484,8 @@ export const optionChainDoc = (
             <td>Year fraction for the horizon.</td>
             <td>
               <code>T_days / 365.25</code>.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1120</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1393</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1120</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1393</code>.
             </td>
           </tr>
         </tbody>
@@ -538,8 +508,8 @@ export const optionChainDoc = (
             <td>Risk-free rate used for discounting and forward pricing.</td>
             <td>
               Config/CLI value.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L41</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1394</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L41</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1394</code>.
             </td>
           </tr>
           <tr>
@@ -548,10 +518,10 @@ export const optionChainDoc = (
             <td>
               From yfinance (Yahoo Finance) or Theta <code>stock/history/eod</code>,
               forward fallback to the next trading day.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L399</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L327</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1070</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1397</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L399</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L327</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1070</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1397</code>.
             </td>
           </tr>
           <tr>
@@ -560,9 +530,9 @@ export const optionChainDoc = (
             <td>
               From yfinance or Theta <code>stock/history/eod</code>, backward fallback
               from <code>week_friday</code>.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L679</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1087</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1398</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L679</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1087</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1398</code>.
             </td>
           </tr>
           <tr>
@@ -570,10 +540,10 @@ export const optionChainDoc = (
             <td>Split-adjusted as-of close price.</td>
             <td>
               Derived from raw closes using yfinance splits when enabled.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L418</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L527</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1073</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1399</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L418</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L527</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1073</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1399</code>.
             </td>
           </tr>
           <tr>
@@ -581,9 +551,9 @@ export const optionChainDoc = (
             <td>Split-adjusted expiry close for outcome labels.</td>
             <td>
               Derived from raw closes with the same split adjustment.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L679</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1090</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1400</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L679</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1090</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1400</code>.
             </td>
           </tr>
           <tr>
@@ -591,9 +561,9 @@ export const optionChainDoc = (
             <td>Count of split events observed in the preload window.</td>
             <td>
               Pulled via yfinance splits.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L418</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L533</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1401</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L418</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L533</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1401</code>.
             </td>
           </tr>
           <tr>
@@ -601,9 +571,9 @@ export const optionChainDoc = (
             <td>Whether split adjustment was applied when producing adjusted closes.</td>
             <td>
               Boolean derived from config.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L87</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L527</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1402</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L87</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L527</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1402</code>.
             </td>
           </tr>
           <tr>
@@ -611,9 +581,9 @@ export const optionChainDoc = (
             <td>Selected spot scale (<code>raw</code> vs <code>split_adj</code>).</td>
             <td>
               Chosen by curve scoring on strike coverage.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1215</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1243</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1412</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1215</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1243</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1412</code>.
             </td>
           </tr>
           <tr>
@@ -621,9 +591,9 @@ export const optionChainDoc = (
             <td>Score for the raw spot scale (more strikes inside band → higher).</td>
             <td>
               Computed by the spot-scale scoring function.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1034</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1244</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1413</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1034</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1244</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1413</code>.
             </td>
           </tr>
           <tr>
@@ -631,9 +601,9 @@ export const optionChainDoc = (
             <td>Score for the split-adjusted spot scale.</td>
             <td>
               Computed by the spot-scale scoring function.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1034</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1245</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1414</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1034</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1245</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1414</code>.
             </td>
           </tr>
           <tr>
@@ -641,8 +611,8 @@ export const optionChainDoc = (
             <td>Spot close used in calculations (raw or adjusted).</td>
             <td>
               Selected based on <code>spot_scale_used</code>.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1334</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1417</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1334</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1417</code>.
             </td>
           </tr>
           <tr>
@@ -650,8 +620,8 @@ export const optionChainDoc = (
             <td>Expiry close used for outcome labels (raw or adjusted).</td>
             <td>
               Selected based on <code>spot_scale_used</code>.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1334</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1418</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1334</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1418</code>.
             </td>
           </tr>
           <tr>
@@ -659,9 +629,9 @@ export const optionChainDoc = (
             <td>Days moved forward from <code>asof_target</code> to find a close.</td>
             <td>
               Computed by the forward close fallback.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L679</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1070</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1422</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L679</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1070</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1422</code>.
             </td>
           </tr>
           <tr>
@@ -669,9 +639,9 @@ export const optionChainDoc = (
             <td>Days moved backward from <code>week_friday</code> to find a close.</td>
             <td>
               Computed by the backward close fallback.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L679</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1087</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1423</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L679</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1087</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1423</code>.
             </td>
           </tr>
         </tbody>
@@ -694,9 +664,9 @@ export const optionChainDoc = (
             <td>Dividend source actually used (yfinance, default, or none).</td>
             <td>
               Dividends fetched via yfinance; otherwise defaults/none.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L638</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1125</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1405</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L638</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1125</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1405</code>.
             </td>
           </tr>
           <tr>
@@ -704,8 +674,8 @@ export const optionChainDoc = (
             <td>Lookback window (days) for dividend aggregation.</td>
             <td>
               Config/CLI value.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L92</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1406</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L92</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1406</code>.
             </td>
           </tr>
           <tr>
@@ -713,8 +683,8 @@ export const optionChainDoc = (
             <td>Sum of dividends in the lookback window ending at <code>asof_date</code>.</td>
             <td>
               Computed from yfinance dividends over the lookback window.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1131</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1407</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1131</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1407</code>.
             </td>
           </tr>
           <tr>
@@ -722,9 +692,9 @@ export const optionChainDoc = (
             <td>Annualized dividend yield using raw spot close.</td>
             <td>
               Derived from <code>dividend_sum_lookback</code> and raw spot.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1143</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1150</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1408</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1143</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1150</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1408</code>.
             </td>
           </tr>
           <tr>
@@ -732,9 +702,9 @@ export const optionChainDoc = (
             <td>Annualized dividend yield using split-adjusted spot close.</td>
             <td>
               Derived from <code>dividend_sum_lookback</code> and adjusted spot.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1143</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1151</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1409</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1143</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1151</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1409</code>.
             </td>
           </tr>
           <tr>
@@ -742,8 +712,8 @@ export const optionChainDoc = (
             <td>Yield used for forward pricing and curve calculations.</td>
             <td>
               Selected based on <code>spot_scale_used</code>.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1334</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1419</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1334</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1419</code>.
             </td>
           </tr>
           <tr>
@@ -751,9 +721,9 @@ export const optionChainDoc = (
             <td>Forward price for moneyness and band selection.</td>
             <td>
               <code>spot * exp((r - q) * T_years)</code> using the chosen scale.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1210</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1346</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1420</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1210</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1346</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1420</code>.
             </td>
           </tr>
         </tbody>
@@ -776,8 +746,8 @@ export const optionChainDoc = (
             <td>Strike price for the call option.</td>
             <td>
               From the selected strikes in the Theta option-chain curve.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1357</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1426</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1357</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1426</code>.
             </td>
           </tr>
           <tr>
@@ -785,7 +755,7 @@ export const optionChainDoc = (
             <td>Log moneyness <code>log(K / S_asof_close)</code>.</td>
             <td>
               Computed from the chosen spot close.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1427</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1427</code>.
             </td>
           </tr>
           <tr>
@@ -793,7 +763,7 @@ export const optionChainDoc = (
             <td>Absolute log moneyness <code>|log_m|</code>.</td>
             <td>
               Computed from <code>log_m</code>.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1428</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1428</code>.
             </td>
           </tr>
           <tr>
@@ -801,7 +771,7 @@ export const optionChainDoc = (
             <td>Forward moneyness <code>log(K / forward_price)</code> when available.</td>
             <td>
               Computed when a finite forward price exists.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1429</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1429</code>.
             </td>
           </tr>
           <tr>
@@ -809,7 +779,7 @@ export const optionChainDoc = (
             <td>Absolute forward moneyness <code>|log_m_fwd|</code>.</td>
             <td>
               Computed from <code>log_m_fwd</code>.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1430</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1430</code>.
             </td>
           </tr>
           <tr>
@@ -817,10 +787,10 @@ export const optionChainDoc = (
             <td>Annualized realized volatility proxy from recent closes.</td>
             <td>
               Computed from the latest lookback window of closes.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L701</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1122</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1334</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1433</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L701</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1122</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1334</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1433</code>.
             </td>
           </tr>
         </tbody>
@@ -844,10 +814,10 @@ export const optionChainDoc = (
             <td>
               Computed from Theta <code>option/history/eod</code> call-curve slopes
               (Breeden-Litzenberger) with monotone adjustments.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L335</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L772</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L876</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1436</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L335</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L772</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L876</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1436</code>.
             </td>
           </tr>
           <tr>
@@ -855,7 +825,7 @@ export const optionChainDoc = (
             <td>Complement of pRN.</td>
             <td>
               <code>1 - pRN</code>.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1437</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1437</code>.
             </td>
           </tr>
           <tr>
@@ -863,8 +833,8 @@ export const optionChainDoc = (
             <td>Raw interpolation to strikes before isotonic adjustments.</td>
             <td>
               Computed from call-curve slopes without the monotone pass.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L921</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1438</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L921</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1438</code>.
             </td>
           </tr>
           <tr>
@@ -872,7 +842,7 @@ export const optionChainDoc = (
             <td>Complement of <code>pRN_raw</code>.</td>
             <td>
               <code>1 - pRN_raw</code>.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1439</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1439</code>.
             </td>
           </tr>
           <tr>
@@ -880,8 +850,8 @@ export const optionChainDoc = (
             <td>Realized outcome label (1 if expiry close is above strike).</td>
             <td>
               Computed from <code>S_expiry_close</code> and <code>K</code>.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1334</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1441</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1334</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1441</code>.
             </td>
           </tr>
           <tr>
@@ -889,8 +859,8 @@ export const optionChainDoc = (
             <td>Whether isotonic adjustment was needed on interval pRN values.</td>
             <td>
               Computed during pRN curve cleaning.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L925</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1463</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L925</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1463</code>.
             </td>
           </tr>
           <tr>
@@ -898,8 +868,8 @@ export const optionChainDoc = (
             <td>Whether isotonic adjustment was needed on target strike values.</td>
             <td>
               Computed during pRN curve cleaning.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L934</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1464</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L934</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1464</code>.
             </td>
           </tr>
         </tbody>
@@ -922,8 +892,8 @@ export const optionChainDoc = (
             <td>Starting abs log-m band.</td>
             <td>
               Config/CLI value.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L52</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1445</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L52</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1445</code>.
             </td>
           </tr>
           <tr>
@@ -931,8 +901,8 @@ export const optionChainDoc = (
             <td>Maximum abs log-m cap for adaptive widening.</td>
             <td>
               Config/CLI value.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L53</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1446</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L53</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1446</code>.
             </td>
           </tr>
           <tr>
@@ -940,9 +910,9 @@ export const optionChainDoc = (
             <td>Abs log-m band actually used after adaptive widening.</td>
             <td>
               Computed by <code>pick_band_strikes</code>.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L965</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1284</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1447</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L965</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1284</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1447</code>.
             </td>
           </tr>
           <tr>
@@ -950,8 +920,8 @@ export const optionChainDoc = (
             <td>Count of strikes inside the abs log-m band.</td>
             <td>
               Computed by band selection.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1287</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1448</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1287</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1448</code>.
             </td>
           </tr>
           <tr>
@@ -959,8 +929,8 @@ export const optionChainDoc = (
             <td>Count of strikes inside the band after min/max strike filtering.</td>
             <td>
               Computed by band selection.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1288</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1449</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1288</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1449</code>.
             </td>
           </tr>
           <tr>
@@ -968,8 +938,8 @@ export const optionChainDoc = (
             <td>Moneyness reference used for band selection (<code>spot</code> or <code>forward</code>).</td>
             <td>
               Derived from whether forward moneyness is enabled and finite.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1282</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1450</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1282</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1450</code>.
             </td>
           </tr>
           <tr>
@@ -977,8 +947,8 @@ export const optionChainDoc = (
             <td>Spot or forward price used as the moneyness reference.</td>
             <td>
               Derived from spot/forward selection.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1282</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1451</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1282</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1451</code>.
             </td>
           </tr>
           <tr>
@@ -986,8 +956,8 @@ export const optionChainDoc = (
             <td>Minimum strike in the call curve after cleaning.</td>
             <td>
               Derived from the cleaned call curve.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1280</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1452</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1280</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1452</code>.
             </td>
           </tr>
           <tr>
@@ -995,8 +965,8 @@ export const optionChainDoc = (
             <td>Maximum strike in the call curve after cleaning.</td>
             <td>
               Derived from the cleaned call curve.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1281</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1453</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1281</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1453</code>.
             </td>
           </tr>
         </tbody>
@@ -1019,9 +989,9 @@ export const optionChainDoc = (
             <td>Quote source used to build call mids.</td>
             <td>
               Chosen between bid/ask mid vs close fallback from Theta chain.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L824</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L832</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1456</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L824</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L832</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1456</code>.
             </td>
           </tr>
           <tr>
@@ -1029,8 +999,8 @@ export const optionChainDoc = (
             <td>Number of option records in the raw chain.</td>
             <td>
               Count of rows from Theta <code>option/history/eod</code>.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L781</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1457</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L781</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1457</code>.
             </td>
           </tr>
           <tr>
@@ -1038,8 +1008,8 @@ export const optionChainDoc = (
             <td>Number of option records used after filters and cleaning.</td>
             <td>
               Count after liquidity/intrinsic/insane filters.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L856</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1458</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L856</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1458</code>.
             </td>
           </tr>
           <tr>
@@ -1047,8 +1017,8 @@ export const optionChainDoc = (
             <td>Median relative spread of bid/ask mids when available.</td>
             <td>
               Computed from bid/ask quotes in the chain.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L859</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1459</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L859</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1459</code>.
             </td>
           </tr>
           <tr>
@@ -1056,9 +1026,9 @@ export const optionChainDoc = (
             <td>Count dropped due to min trade count or min volume filters.</td>
             <td>
               Computed during call-curve build.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L805</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L810</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1460</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L805</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L810</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1460</code>.
             </td>
           </tr>
           <tr>
@@ -1066,9 +1036,9 @@ export const optionChainDoc = (
             <td>Count dropped for pricing below intrinsic bounds.</td>
             <td>
               Computed during call-curve build.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L842</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L850</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1461</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L842</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L850</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1461</code>.
             </td>
           </tr>
           <tr>
@@ -1076,9 +1046,9 @@ export const optionChainDoc = (
             <td>Count dropped for pricing above the insane price multiple cap.</td>
             <td>
               Computed during call-curve build.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L852</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L854</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1462</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L852</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L854</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1462</code>.
             </td>
           </tr>
         </tbody>
@@ -1101,7 +1071,7 @@ export const optionChainDoc = (
             <td>Compatibility alias for v3 snapshot group key (<code>cluster_snapshot</code>).</td>
             <td>
               Equals <code>ticker|expiry_date|snapshot_date|snapshot_dow</code>.
-              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
+              Source: <code>src/scripts/feature_engineering/option_chain/weighting_v3.py</code>.
             </td>
           </tr>
           <tr>
@@ -1109,8 +1079,8 @@ export const optionChainDoc = (
             <td>Median strike spacing within the group.</td>
             <td>
               Computed from strike distances in the group.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L996</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1484</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L996</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1484</code>.
             </td>
           </tr>
           <tr>
@@ -1118,8 +1088,8 @@ export const optionChainDoc = (
             <td>Minimum strike spacing within the group.</td>
             <td>
               Computed from strike distances in the group.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L996</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L1485</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L996</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L1485</code>.
             </td>
           </tr>
         </tbody>
@@ -1142,7 +1112,7 @@ export const optionChainDoc = (
             <td>Primary cluster key <code>ticker|expiry_date|snapshot_date|snapshot_dow</code>.</td>
             <td>
               Computed in weighting v3 from canonical snapshot and expiry dates.
-              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
+              Source: <code>src/scripts/feature_engineering/option_chain/weighting_v3.py</code>.
             </td>
           </tr>
           <tr>
@@ -1150,7 +1120,7 @@ export const optionChainDoc = (
             <td>Number of rows in <code>weight_group_key</code>.</td>
             <td>
               Group size used to avoid over-counting correlated strikes.
-              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
+              Source: <code>src/scripts/feature_engineering/option_chain/weighting_v3.py</code>.
             </td>
           </tr>
           <tr>
@@ -1158,7 +1128,7 @@ export const optionChainDoc = (
             <td>Per-row group weight, exactly <code>1 / weight_group_size</code>.</td>
             <td>
               Invariant: sum of <code>weight_group_w</code> per group is 1.
-              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
+              Source: <code>src/scripts/feature_engineering/option_chain/weighting_v3.py</code>.
             </td>
           </tr>
           <tr>
@@ -1166,7 +1136,7 @@ export const optionChainDoc = (
             <td>Number of unique snapshot groups for each ticker.</td>
             <td>
               Used by optional ticker moderation.
-              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
+              Source: <code>src/scripts/feature_engineering/option_chain/weighting_v3.py</code>.
             </td>
           </tr>
           <tr>
@@ -1174,7 +1144,7 @@ export const optionChainDoc = (
             <td>Ticker moderation multiplier (<code>1</code> or clipped sqrt-inverse count).</td>
             <td>
               Defaults to 1 in <code>none</code> mode.
-              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
+              Source: <code>src/scripts/feature_engineering/option_chain/weighting_v3.py</code>.
             </td>
           </tr>
           <tr>
@@ -1182,7 +1152,7 @@ export const optionChainDoc = (
             <td>Trading-universe multiplier (<code>beta</code> for selected tickers, else <code>1</code>).</td>
             <td>
               Applied after group and ticker weighting.
-              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
+              Source: <code>src/scripts/feature_engineering/option_chain/weighting_v3.py</code>.
             </td>
           </tr>
           <tr>
@@ -1190,7 +1160,7 @@ export const optionChainDoc = (
             <td>Unnormalized product of group, ticker, and trade-focus multipliers.</td>
             <td>
               <code>weight_group_w * weight_ticker_w_raw * weight_trade_focus_mult</code>.
-              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
+              Source: <code>src/scripts/feature_engineering/option_chain/weighting_v3.py</code>.
             </td>
           </tr>
           <tr>
@@ -1198,7 +1168,7 @@ export const optionChainDoc = (
             <td>Final training weight after mean-1 renormalization.</td>
             <td>
               <code>weight_raw / mean(weight_raw)</code>; required default weight column for model training.
-              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
+              Source: <code>src/scripts/feature_engineering/option_chain/weighting_v3.py</code>.
             </td>
           </tr>
           <tr>
@@ -1206,7 +1176,7 @@ export const optionChainDoc = (
             <td>Weighting schema tag (current: <code>v3</code>).</td>
             <td>
               Added to support deterministic migration and auditability.
-              Source: <code>src/scripts/option_chain_weighting_v3.py</code>.
+              Source: <code>src/scripts/feature_engineering/option_chain/weighting_v3.py</code>.
             </td>
           </tr>
         </tbody>
@@ -1229,7 +1199,7 @@ export const optionChainDoc = (
             <td>pRN version recorded in the training view.</td>
             <td>
               Passed through from the build configuration.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L2374</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L2374</code>.
             </td>
           </tr>
           <tr>
@@ -1237,8 +1207,8 @@ export const optionChainDoc = (
             <td>Hash of pRN configuration settings (or CLI override).</td>
             <td>
               Computed by hashing key config fields (or provided by CLI).
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L139</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L2375</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L139</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L2375</code>.
             </td>
           </tr>
           <tr>
@@ -1246,7 +1216,7 @@ export const optionChainDoc = (
             <td>Constant marker set to <code>train_view</code>.</td>
             <td>
               Set when writing the training view.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L2376</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L2376</code>.
             </td>
           </tr>
           <tr>
@@ -1254,8 +1224,8 @@ export const optionChainDoc = (
             <td>Script filename captured for provenance.</td>
             <td>
               Set to the build script filename.
-              Source: <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L26</code>,
-              <code>src/scripts/01-option-chain-build-historic-dataset-v1.0.py#L2377</code>.
+              Source: <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L26</code>,
+              <code>src/scripts/dataset_building/option_chain/build_historic_dataset_v1_0.py#L2377</code>.
             </td>
           </tr>
         </tbody>
@@ -1385,7 +1355,7 @@ export function OptionChainDocContent({ className }: { className?: string }) {
   );
 }
 
-const polymarketHistoryDoc = (
+export const polymarketHistoryDoc = (
   <>
     <p>
       The Polymarket History Builder manages two related workflows: a weekly
@@ -1459,10 +1429,6 @@ const polymarketHistoryDoc = (
       <li>Optionally provide a run directory name (sanitized to kebab-case).</li>
       <li>Optionally enable subgraph ingestion or feature building.</li>
       <li>Run the pipeline and monitor progress in the output panel.</li>
-      <li>
-        Weekly history runs refresh exact run-local pRN coverage after the raw
-        history fetch, then optionally build decision features.
-      </li>
       <li>
         Use the Run Directory tab to preview CSVs and activate or rename the run for
         downstream use.
@@ -1555,13 +1521,8 @@ const polymarketHistoryDoc = (
             Build decision features to support model calibration.
           </li>
           <li>
-            Feature building resolves a pRN dataset directory with a
+            Feature building requires a pRN dataset directory with a
             <code>training-*.csv</code> file from the Option Chain History Builder.
-          </li>
-          <li>
-            The selected training dataset also seeds the exact run-local pRN
-            refresh so weekly outputs and downstream features stay aligned to the
-            same source dataset.
           </li>
           <li>
             The resolved training CSV path is shown after selection.
@@ -1573,12 +1534,11 @@ const polymarketHistoryDoc = (
     <h3>Run Monitoring & Logs</h3>
     <ul>
       <li>
-        Weekly history shows a market/history progress bar and, when enabled, a
-        second progress bar for decision-feature creation.
+        Weekly history shows two progress bars: stage 1 for markets/history and
+        stage 2 for feature creation (only when enabled).
       </li>
       <li>
-        After the history fetch completes, the run performs an exact run-local
-        pRN refresh before finalizing outputs or starting decision-feature generation.
+        Stage labels update as the pipeline moves through history, features, and finalizing.
       </li>
       <li>
         Progress counts only advance when a market finishes, so they never move backward.
@@ -1607,8 +1567,7 @@ const polymarketHistoryDoc = (
         open/download actions.
       </li>
       <li>
-        Use <strong>Rename run</strong> to update the label and, when the kebab-case
-        value changes, rename the run directory and prefixed CSV files in the same action.
+        Use <strong>Rename run</strong> to update the run label (saved immediately).
       </li>
       <li>
         Activate marks a run as the active/default run for downstream workflows.
@@ -1635,65 +1594,6 @@ const polymarketHistoryDoc = (
       <li>
         The job guard prevents overlapping pipeline runs beyond the configured limit.
       </li>
-    </ul>
-  </>
-);
-
-const patchNotesDoc = (
-  <>
-    <p>
-      This section summarizes the feature additions and fixes introduced on the
-      current branch relative to <code>main</code>. Use it as the quick changelog,
-      then refer to the page-specific sections below for the detailed workflows.
-    </p>
-
-    <div className="docs-split">
-      <div className="docs-panel">
-        <h3>Scope</h3>
-        <ul>
-          <li>Branch covered here: <code>fix/stale-pm-history-price</code>.</li>
-          <li>Main areas touched: Option Chain, Polymarket History, Markets, Backtests, and Calibrate.</li>
-          <li>Main goal: replace synthetic or stale market artifacts with exact run-local data and expose the resulting diagnostics in the UI.</li>
-        </ul>
-      </div>
-      <div className="docs-panel">
-        <h3>Operator Notes</h3>
-        <ul>
-          <li>Historical synthetic Polymarket bid/ask values were retired; historical CLOB prices are now treated as a mid-like series unless a live quote is available.</li>
-          <li>Weekly-history runs can now rename their directory and matching prefixed CSV files without breaking the active-run pointer.</li>
-          <li>One-off maintenance scripts were added for exact run-local pRN refreshes, option-chain RV backfills, and Gamma-volume backfills.</li>
-        </ul>
-      </div>
-    </div>
-
-    <h3>Polymarket Data Integrity</h3>
-    <ul>
-      <li>Markets refresh no longer fabricates historical bid/ask spreads from a single Polymarket price field.</li>
-      <li><code>markets_prn_hourly.csv</code> now stores <code>polymarket_mid</code>, while real bid/ask values are only kept when the refresh job can fetch live quotes.</li>
-      <li>Weekly-history runs now execute an exact run-local pRN refresh before optional feature generation so market artifacts and decision features use the same pRN source.</li>
-    </ul>
-
-    <h3>Markets And Backtests</h3>
-    <ul>
-      <li>Markets charts now render a dedicated PM mid line and only show bid/ask when real quote data exists.</li>
-      <li>Backtests now use Theta as the sole pRN overlay source, drop the old markets-proxy pRN line, and render PM mid instead of synthetic bid/ask.</li>
-      <li>Backtests strike cards now surface Gamma volume, sparse-data warnings, and strike-quality flags for low-volume, suspect-midprice, and stale data.</li>
-      <li>Strike filtering now includes <code>Hide suspect data</code> and minimum-volume controls, and holiday weeks relax the strict {`{`}1,2,3,4{`}`} DTE requirement.</li>
-    </ul>
-
-    <h3>Calibration Workflow</h3>
-    <ul>
-      <li>Option-chain datasets now expose additional realized-volatility fields such as <code>rv5</code>, <code>rv10</code>, and RV ratio features when available.</li>
-      <li>The Models tab now opens the default metrics artifact automatically and groups selected-model vs auto-search artifacts more clearly.</li>
-      <li>AUTO model detail now surfaces selection-rule context, fold-gate summary, no-viable reasons, richer metrics cards, and equation notes.</li>
-      <li>Saved Calibrate form state now recovers cleanly when a previously selected dataset path becomes stale.</li>
-    </ul>
-
-    <h3>Dataset And Maintenance Utilities</h3>
-    <ul>
-      <li>Existing option-chain datasets can be backfilled in place with the new realized-volatility columns using <code>01-option-chain-backfill-rv-features-v1.0.py</code>.</li>
-      <li>Weekly-history runs can rebuild exact local pRN coverage with <code>08-polymarket-run-prn-refresh-v1.0.py</code>.</li>
-      <li>Existing weekly-markets files can be enriched with Gamma volume using <code>backfill_gamma_volume.py</code>.</li>
     </ul>
   </>
 );
@@ -1785,11 +1685,6 @@ const calibrateDoc = (
       </li>
       <li>
         AUTO cards also show auto status (<code>selected</code>, <code>no_viable_model</code>, etc.) and selected trial id when available.
-      </li>
-      <li>
-        Selecting a model auto-opens the default metrics artifact, while richer
-        summary cards expose split coverage, per-split deltas, and auto-selection
-        diagnostics when available.
       </li>
       <li>
         AUTO run directories use a dual layout:
@@ -1889,11 +1784,6 @@ const calibrateDoc = (
     <ul>
       <li>
         Optional features are grouped by category (Moneyness, Volatility, Market Quality, Coverage and Sanity, Interactions).
-      </li>
-      <li>
-        The Volatility group can now expose <code>rv5</code>, <code>rv10</code>,
-        <code>rv20</code>, <code>rv20_sqrtT</code>, and RV ratio features when
-        the selected dataset includes them.
       </li>
       <li>
         Optional features are loaded from dataset metadata so unavailable fields are not selectable.
@@ -2041,7 +1931,7 @@ export function CalibrateDocContent({ className }: { className?: string }) {
   return <div className={className}>{calibrateDoc}</div>;
 }
 
-const marketsDoc = (
+export const marketsDoc = (
   <>
     <p>
       The Markets page refreshes and visualizes weekly Polymarket market data.
@@ -2084,7 +1974,7 @@ const marketsDoc = (
       <li>Click Refresh Now to fetch data for that week.</li>
       <li>Select a ticker from the trading universe list.</li>
       <li>Choose a strike to view its chart.</li>
-      <li>Hover the chart to compare PM mid, optional bid/ask, and pRN at a point in time.</li>
+      <li>Hover the chart to compare bid/ask and pRN at a point in time.</li>
     </ol>
 
     <h3>Run Configuration</h3>
@@ -2095,9 +1985,8 @@ const marketsDoc = (
     </p>
     <h3>Data Integrity</h3>
     <ul>
-      <li>pRN curves come from the exact run-local pRN dataset tied to the active weekly-history run.</li>
+      <li>pRN curves come from option‑chain snapshots (no BS/yfinance).</li>
       <li>Raw CLOB trades are appended; hourly bars are rebuilt from raw history.</li>
-      <li>Historical bid/ask is no longer synthesized from a hardcoded spread.</li>
       <li>Daily snapshots use the latest completed NY close to avoid leakage.</li>
     </ul>
 
@@ -2164,14 +2053,10 @@ const marketsDoc = (
     <h3>Chart Behavior</h3>
     <ul>
       <li>
-        Lines: Polymarket mid, optional live bid/ask, and pRN (risk‑neutral probability).
+        Lines: Polymarket bid, Polymarket ask, and pRN (risk‑neutral probability).
       </li>
       <li>
         Hover shows UTC timestamp, local time in ET, and values at the nearest point.
-      </li>
-      <li>
-        Historical rows usually show only the mid line; bid/ask appears only when
-        a refresh captured real live quotes for that market.
       </li>
       <li>
         Warning chips appear when Polymarket or pRN data is missing for a strike.
@@ -2196,12 +2081,12 @@ const marketsDoc = (
   </>
 );
 
-const backtestsDoc = (
+export const backtestsDoc = (
   <>
     <p>
       The Backtests page is an experimental price explorer for Polymarket data.
       It lets you inspect per‑strike price curves for a specific trading week and
-      compare them to pRN overlays derived from Theta option data. This page is still
+      compare them to pRN overlays from option‑chain data. This page is still
       under active development, so its scope is intentionally narrow and focused
       on visual inspection rather than full strategy backtesting.
     </p>
@@ -2211,9 +2096,9 @@ const backtestsDoc = (
         <h3>What It Does Today</h3>
         <ul>
           <li>Loads per‑strike Polymarket price bars for a ticker and week.</li>
-          <li>Overlays Theta-computed pRN dots aligned to the selected week.</li>
-          <li>Surfaces strike quality diagnostics such as volume, suspect data, and stale prices.</li>
-          <li>Renders a single strike chart with PM mid, optional live bid/ask, and pRN overlays.</li>
+          <li>Overlays pRN dots computed from option‑chain history.</li>
+          <li>Optionally merges Theta‑computed pRN to fill missing DTEs.</li>
+          <li>Renders a single strike chart with bid/ask + pRN overlays.</li>
         </ul>
       </div>
       <div className="docs-panel">
@@ -2230,7 +2115,6 @@ const backtestsDoc = (
     <ul>
       <li>Ticker selector: choose one trading‑universe ticker.</li>
       <li>Strikes panel: select the strike to chart.</li>
-      <li>Quality filters: hide suspect strikes and apply a minimum Gamma-volume threshold.</li>
       <li>Trading week calendar: pick a Mon–Fri week with data.</li>
       <li>Pipeline run selector: choose which historical run to use.</li>
       <li>Results: a single chart for the selected strike.</li>
@@ -2240,10 +2124,9 @@ const backtestsDoc = (
     <ol className="docs-steps">
       <li>Select a ticker from the trading universe.</li>
       <li>Pick a trading week from the calendar (Mon–Fri only).</li>
-      <li>Optionally hide suspect strikes or require a minimum volume threshold.</li>
       <li>Choose a strike from the strikes list.</li>
       <li>The chart renders automatically once selections are valid.</li>
-      <li>Hover the chart to inspect PM mid, optional bid/ask, and pRN values by time.</li>
+      <li>Hover the chart to inspect bid/ask and pRN values by time.</li>
     </ol>
 
     <h3>Controls & Inputs</h3>
@@ -2286,41 +2169,33 @@ const backtestsDoc = (
       <li>
         Selecting a strike auto‑runs the data fetch and renders the chart.
       </li>
-      <li>
-        Strike cards show quality chips for low-volume, suspect-midprice, stale,
-        sparse, or missing-overlay conditions when detected.
-      </li>
     </ul>
 
     <h3>Data Sources & Overlays</h3>
     <ul>
       <li>
-        Polymarket bars are the fallback price series and are treated as PM mid
-        when weekly markets data is unavailable.
+        Polymarket bars are the primary price series; bid/ask is synthesized
+        from bar prices when only mid prices are available.
       </li>
       <li>
-        A weekly markets series is loaded when available to supply PM mid and any
-        real live bid/ask quotes captured by the Markets refresh workflow.
+        A weekly markets series is loaded when available to supply bid/ask and
+        a proxy pRN line.
       </li>
       <li>
-        pRN overlay dots come from Theta on-demand calculations for the selected
-        ticker and week; only strikes with DTEs {`{`}1,2,3,4{`}`} are plotted in normal weeks.
+        pRN overlay dots come from the option‑chain dataset; only strikes with
+        DTEs {`{`}1,2,3,4{`}`} are plotted.
       </li>
       <li>
-        Theta on-demand pRN is the sole overlay source; holiday weeks relax the
-        DTE requirement so valid shortened weeks are not dropped entirely.
+        Theta on‑demand pRN is queried after the initial fetch to fill missing
+        strike/DTE gaps; the merge is non‑destructive and only fills gaps.
       </li>
     </ul>
 
     <h3>Chart Behavior</h3>
     <ul>
       <li>Chart time axis is UTC; tooltips show UTC and ET timestamps.</li>
-      <li>Lines: Polymarket mid, optional bid/ask, and pRN (when available).</li>
-      <li>Dots: Theta pRN overlay points.</li>
-      <li>
-        Long gaps in the time series break the rendered path so missing sessions
-        are not connected with a false continuous line.
-      </li>
+      <li>Lines: Polymarket bid, Polymarket ask, and pRN (when available).</li>
+      <li>Dots: pRN overlay points (from training data and/or Theta).</li>
       <li>
         If there are fewer than two points, the chart shows a “Not enough data”
         placeholder.
@@ -2333,8 +2208,8 @@ const backtestsDoc = (
     <h3>Progress & Errors</h3>
     <ul>
       <li>
-        Progress steps include fetching bars and market context first, then the
-        Theta pRN overlay, and finally completion.
+        Progress steps include fetching markets, processing strikes, Theta pRN,
+        and completion.
       </li>
       <li>
         Errors are shown inline and stop the run; non‑fatal overlay failures log
@@ -2351,65 +2226,3 @@ const backtestsDoc = (
     </ul>
   </>
 );
-
-export default function DocumentationPage() {
-  const { activeJobs } = useAnyJobRunning();
-  const location = useLocation();
-
-  useEffect(() => {
-    if (!location.hash) return;
-    const targetId = decodeURIComponent(location.hash.slice(1));
-    const scrollToTarget = () => {
-      document.getElementById(targetId)?.scrollIntoView({ block: "start" });
-    };
-    scrollToTarget();
-    const rafId = window.requestAnimationFrame(scrollToTarget);
-    return () => window.cancelAnimationFrame(rafId);
-  }, [location.hash]);
-
-  return (
-    <section className="page docs">
-      <PipelineStatusCard className="page-sticky-meta" activeJobsCount={activeJobs.length} />
-      <header className="page-header docs-header">
-        <div>
-          <p className="page-kicker">Documentation</p>
-          <h1 className="page-title">Documentation</h1>
-        </div>
-      </header>
-
-      <div className="docs-layout">
-        <aside className="docs-toc">
-          <div className="docs-toc-card">
-            <div className="toc-title">Pages</div>
-            <nav aria-label="Documentation sections">
-              {docPages.map((page) => (
-                <a key={page.id} className="toc-link" href={`#${page.id}`}>
-                  {page.label}
-                </a>
-              ))}
-            </nav>
-          </div>
-        </aside>
-
-        <article className="docs-content">
-          {docPages.map((page) => (
-            <section key={page.id} id={page.id} className="docs-section">
-              <div className="docs-section-header">
-                <h2>{page.label}</h2>
-                <Link className="button light" to={page.route}>
-                  Open Page
-                </Link>
-              </div>
-              {page.id === "patch-notes" ? patchNotesDoc : null}
-              {page.id === "option-chain" ? <OptionChainDocContent /> : null}
-              {page.id === "polymarket-history" ? polymarketHistoryDoc : null}
-              {page.id === "calibrate" ? <CalibrateDocContent /> : null}
-              {page.id === "markets" ? marketsDoc : null}
-              {page.id === "backtests" ? backtestsDoc : null}
-            </section>
-          ))}
-        </article>
-      </div>
-    </section>
-  );
-}

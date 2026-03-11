@@ -32,9 +32,10 @@ from app.services.process_runtime import (
     spawn_managed_process,
 )
 from app.services.run_csv_files import dedupe_merged_dataframe, get_run_csv_paths
+from app.services.script_entrypoints import POLYMARKET_MARKETS_REFRESH_SCRIPT
 
 BASE_DIR = Path(__file__).resolve().parents[5]
-SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "07-polymarket-markets-refresh-v1.0.py"
+SCRIPT_PATH = POLYMARKET_MARKETS_REFRESH_SCRIPT.path
 WEEKLY_HISTORY_DIR = BASE_DIR / "src" / "data" / "raw" / "polymarket" / "weekly_history"
 RUNS_DIR = WEEKLY_HISTORY_DIR / "runs"
 LATEST_POINTER_PATH = WEEKLY_HISTORY_DIR / "latest.json"

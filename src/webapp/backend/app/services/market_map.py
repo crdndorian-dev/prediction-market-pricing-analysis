@@ -21,9 +21,10 @@ from app.models.market_map import (
     MarketMapRunResponse,
 )
 from app.services.process_runtime import spawn_managed_process
+from app.services.script_entrypoints import POLYMARKET_MARKET_MAP_SCRIPT
 
 BASE_DIR = Path(__file__).resolve().parents[5]
-SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "02-polymarket-market-map-v1.0.py"
+SCRIPT_PATH = POLYMARKET_MARKET_MAP_SCRIPT.path
 SUBGRAPH_RUNS_DIR = BASE_DIR / "src" / "data" / "raw" / "polymarket" / "subgraph" / "runs"
 DEFAULT_OUT_PATH = BASE_DIR / "src" / "data" / "models" / "polymarket" / "dim_market.parquet"
 DEFAULT_OVERRIDES_PATH = BASE_DIR / "config" / "polymarket_market_overrides.csv"

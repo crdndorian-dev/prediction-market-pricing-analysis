@@ -30,10 +30,14 @@ from app.services.process_runtime import (
 )
 from app.services.polymarket_run_prn import find_run_local_prn_training_file
 from app.services.run_csv_files import PRESERVED_RUNTIME_CSVS
+from app.services.script_entrypoints import (
+    POLYMARKET_BUILD_FEATURES_SCRIPT,
+    POLYMARKET_WEEKLY_HISTORY_SCRIPT,
+)
 
 BASE_DIR = Path(__file__).resolve().parents[5]
-SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "02-polymarket-weekly-history-v1.0.py"
-FEATURES_SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "02-polymarket-build-features-v1.0.py"
+SCRIPT_PATH = POLYMARKET_WEEKLY_HISTORY_SCRIPT.path
+FEATURES_SCRIPT_PATH = POLYMARKET_BUILD_FEATURES_SCRIPT.path
 RUN_LOCAL_PRN_REFRESH_SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "08-polymarket-run-prn-refresh-v1.0.py"
 DEFAULT_OUT_DIR = BASE_DIR / "src" / "data" / "raw" / "polymarket" / "weekly_history"
 RUNS_DIR = DEFAULT_OUT_DIR / "runs"

@@ -41,7 +41,7 @@ import PipelineStatusCard from "../components/PipelineStatusCard";
 import PipelineProgressBar from "../components/PipelineProgressBar";
 import { useCalibrationJob } from "../contexts/calibrationJob";
 import { useAnyJobRunning } from "../contexts/jobGuard";
-import { CalibrateDocContent } from "./DocumentationPage";
+import { CalibrateDocContent } from "./DocumentationContent";
 import "katex/dist/katex.min.css";
 import "./CalibrateModelsPage.css";
 

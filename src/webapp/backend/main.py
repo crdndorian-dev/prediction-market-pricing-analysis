@@ -10,7 +10,11 @@ from app.api.market_map import router as market_map_router
 from app.api.bars import router as bars_router
 from app.api.markets import router as markets_router
 
-app = FastAPI(title="Polyedgetool Web App")
+app = FastAPI(
+    title="Polyedgetool Web App",
+    docs_url=None,
+    redoc_url=None,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

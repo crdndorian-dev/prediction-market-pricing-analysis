@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-02-polymarket-market-map-v1.0.py
+polymarket-market-map.py
 
 Build a stable Polymarket market identity map from the Graph subgraph.
 Outputs dim_market with ticker/threshold/expiry fields required for joins.
@@ -24,10 +24,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS_ROOT = REPO_ROOT / "src" / "scripts"
-if str(SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_ROOT))
+from support.script_paths import REPO_ROOT, SCRIPTS_ROOT, SRC_ROOT, prepend_sys_path
+
+prepend_sys_path(REPO_ROOT)
+prepend_sys_path(SRC_ROOT)
+prepend_sys_path(SCRIPTS_ROOT)
 
 from polymarket.prn_loader import find_latest_prn_dataset
 from polymarket.subgraph_client import SubgraphClient

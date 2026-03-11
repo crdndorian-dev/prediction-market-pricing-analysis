@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.services.job_guard import list_active_jobs
+from app.services.script_entrypoints import (
+    CALIBRATE_MODEL_SCRIPT,
+    OPTION_CHAIN_DATASET_SCRIPT,
+)
 
 BASE_DIR = Path(__file__).resolve().parents[5]
 DATA_DIR = BASE_DIR / "src" / "data"
@@ -597,8 +601,9 @@ def build_dashboard_payload() -> Dict[str, Any]:
             {
                 "title": "Ingestion snapshot",
                 "detail": (
-                    "01-option-chain-build-historic-dataset-v1.0.py"
-                    f" · {dataset_summary.get('fileName')} · {dataset_summary.get('rowCount', 0)} rows"
+                    f"{OPTION_CHAIN_DATASET_SCRIPT.public_name} · "
+                    f"{dataset_summary.get('fileName')} · "
+                    f"{dataset_summary.get('rowCount', 0)} rows"
                 ),
                 "status": "Ready",
                 "progress": 100,
@@ -618,7 +623,7 @@ def build_dashboard_payload() -> Dict[str, Any]:
         calibration = latest_meta.get("calibration", "unknown")
         features = latest_meta.get("features") or latest_meta.get("features_used")
         feature_count = len(features) if isinstance(features, list) else None
-        detail = f"03-calibrate-logit-model-v1.5.py · Calibration: {calibration}"
+        detail = f"{CALIBRATE_MODEL_SCRIPT.public_name} · Calibration: {calibration}"
         if feature_count is not None:
             detail = f"{detail} · {feature_count} features"
         readiness.append(

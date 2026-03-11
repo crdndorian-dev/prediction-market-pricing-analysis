@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-03-auto-calibrate-logit-model-v2.0.py
+auto-calibrate-logit-model.py
 
 Auto-calibration orchestrator that evaluates a curated grid of feature sets and
 hyperparameters under fixed user-provided splits. Selection defaults to
@@ -29,13 +29,13 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CALIBRATOR_SCRIPT = REPO_ROOT / "src" / "scripts" / "03-calibrate-logit-model-v2.0.py"
+from support.script_paths import REPO_ROOT, SCRIPTS_ROOT, SRC_ROOT, prepend_sys_path
 
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-if str(REPO_ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT / "src"))
+DEFAULT_CALIBRATOR_SCRIPT = REPO_ROOT / "src" / "scripts" / "entrypoints" / "calibrate-logit-model.py"
+
+prepend_sys_path(REPO_ROOT)
+prepend_sys_path(SRC_ROOT)
+prepend_sys_path(SCRIPTS_ROOT)
 
 from calibration.calibrate_v2_core import (
     CalibrationCache,
@@ -50,13 +50,9 @@ RISKY_FEATURES = {"prn_raw_gap", "had_fallback", "had_intrinsic_drop", "had_band
 
 DEFAULT_FEATURE_SETS = [
     [BASE_FEATURE],
-    [BASE_FEATURE, "rv5"],
-    [BASE_FEATURE, "rv10"],
     [BASE_FEATURE, "rv20"],
     [BASE_FEATURE, "abs_log_m_fwd"],
     [BASE_FEATURE, "rv20", "abs_log_m_fwd"],
-    [BASE_FEATURE, "rv20", "rv5_over_rv20"],
-    [BASE_FEATURE, "rv20", "rv10_over_rv20"],
     [BASE_FEATURE, "rv20", "abs_log_m_fwd", "log_rel_spread"],
 ]
 DEFAULT_C_VALUES = [0.003, 0.01, 0.03, 0.1, 0.3]

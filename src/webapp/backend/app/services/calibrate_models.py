@@ -55,6 +55,10 @@ from app.services.process_runtime import (
     spawn_managed_process,
     terminate_managed_process,
 )
+from app.services.script_entrypoints import (
+    AUTO_CALIBRATE_MODEL_SCRIPT,
+    CALIBRATE_MODEL_SCRIPT,
+)
 
 
 def _unique_dirs(paths: List[Path]) -> List[Path]:
@@ -70,8 +74,8 @@ def _unique_dirs(paths: List[Path]) -> List[Path]:
 
 
 BASE_DIR = Path(__file__).resolve().parents[5]
-SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "03-calibrate-logit-model-v2.0.py"
-AUTO_SCRIPT_PATH = BASE_DIR / "src" / "scripts" / "03-auto-calibrate-logit-model-v2.0.py"
+SCRIPT_PATH = CALIBRATE_MODEL_SCRIPT.path
+AUTO_SCRIPT_PATH = AUTO_CALIBRATE_MODEL_SCRIPT.path
 CALIBRATE_DATASET_DIRS = _unique_dirs(
     [
         BASE_DIR / "src" / "data" / "raw" / "option-chain-v3",
@@ -3553,7 +3557,7 @@ def cancel_calibration_job(job_id: str) -> CalibrationJobStatus:
 
 
 # v2.0 Model Training
-SCRIPT_V2_PATH = BASE_DIR / "src" / "scripts" / "03-calibrate-logit-model-v2.0.py"
+SCRIPT_V2_PATH = CALIBRATE_MODEL_SCRIPT.path
 
 
 def run_calibration_v2(payload) -> CalibrateModelRunResponse:

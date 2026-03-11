@@ -23,14 +23,11 @@ from scipy.stats import norm
 from urllib3.util.retry import Retry
 from zoneinfo import ZoneInfo
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-if str(REPO_ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT / "src"))
-SCRIPTS_ROOT = REPO_ROOT / "src" / "scripts"
-if str(SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_ROOT))
+from support.script_paths import REPO_ROOT, SCRIPTS_ROOT, SRC_ROOT, prepend_sys_path
+
+prepend_sys_path(REPO_ROOT)
+prepend_sys_path(SRC_ROOT)
+prepend_sys_path(SCRIPTS_ROOT)
 
 from calibration.calibrate_common import EPS, _logit
 from polymarket.snapshot_enrichment import (
@@ -53,9 +50,7 @@ CLOB_PRICES = "https://clob.polymarket.com/prices"  # POST [{"token_id": "...", 
 SCRIPT_VER = "1.5.1"
 SCHEMA_VERSION = "pPM_polymarket_snapshot_v1.0.1"
 DEFAULT_EXCHANGE_CALENDAR = "XNYS"
-DEFAULT_OUT_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "data", "raw", "polymarket", "snapshots")
-)
+DEFAULT_OUT_DIR = str((REPO_ROOT / "src" / "data" / "raw" / "polymarket" / "snapshots").resolve())
 
 
 # -----------------------------

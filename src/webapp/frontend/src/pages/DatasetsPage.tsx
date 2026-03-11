@@ -23,7 +23,7 @@ import {
 import PipelineStatusCard from "../components/PipelineStatusCard";
 import { useDatasetJob } from "../contexts/datasetJob";
 import { useAnyJobRunning } from "../contexts/jobGuard";
-import { OptionChainDocContent } from "./DocumentationPage";
+import { OptionChainDocContent } from "./DocumentationContent";
 import "./DatasetsPage.css";
 
 type DatasetFormState = {

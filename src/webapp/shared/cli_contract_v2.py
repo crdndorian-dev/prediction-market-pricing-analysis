@@ -1,10 +1,10 @@
 """
-CLI Contract for 03-calibrate-logit-model-v2.0.py
+CLI Contract for entrypoints/calibrate-logit-model.py
 
 This file defines the valid argument values and constraints for the v2.0 calibration script.
 It serves as the single source of truth for both frontend and backend validation.
 
-IMPORTANT: Keep this file in sync with src/scripts/03-calibrate-logit-model-v2.0.py argparse.
+IMPORTANT: Keep this file in sync with src/scripts/entrypoints/calibrate-logit-model.py argparse.
 Run `python ci/check_cli_contract_sync.py` to verify sync.
 """
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-02-polymarket-build-features-v1.0.py
+polymarket-build-features.py
 
 Build a time-safe decision dataset by combining Polymarket bars with
 pRN features. Enforces anti-leak checks.
@@ -23,10 +23,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS_ROOT = REPO_ROOT / "src" / "scripts"
-if str(SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_ROOT))
+from support.script_paths import REPO_ROOT, SCRIPTS_ROOT, SRC_ROOT, prepend_sys_path
+
+prepend_sys_path(REPO_ROOT)
+prepend_sys_path(SRC_ROOT)
+prepend_sys_path(SCRIPTS_ROOT)
 
 from polymarket.subgraph_client import SubgraphClient
 from polymarket.prn_loader import (

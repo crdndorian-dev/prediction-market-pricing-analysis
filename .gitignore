@@ -8,6 +8,7 @@ AGENTS.md
 /deadcode/
 /.obsidian/
 /.pytest_cache/
+/config/
 
 .env
 .env.*
@@ -29,10 +30,7 @@ AGENTS.md
 /documentation/
 /docs/.obsidian/*
 /docs/.obsidian/
-
 **/.DS_Store
-
-
 **/__pycache__/
 **/*.pyc
 **/*.pyo
@@ -49,3 +47,5 @@ src/data/analysis/
 src/data/cache/
 src/data/models/
 src/data/raw/
+src/data/raw/polymarket/
+src/data/raw/option-chain/
