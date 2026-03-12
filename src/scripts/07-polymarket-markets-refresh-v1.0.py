@@ -45,6 +45,8 @@ from polymarket.weekly_history_io import (
     build_bars_from_prices,
     clean_price_history,
     fetch_price_history,
+    resolve_bars_master_paths,
+    write_bars,
 )
 from app.services.polymarket_run_prn import (
     find_run_local_prn_training_file,
@@ -835,35 +837,7 @@ def attach_prn_groupwise(hourly_base: pd.DataFrame, prn_df: pd.DataFrame) -> pd.
 
 
 def write_bars_replace(bars: pd.DataFrame, bars_dir: Path, freq: str) -> int:
-    if bars.empty:
-        return 0
-
-    bars = bars.copy()
-    bars["timestamp_utc"] = pd.to_datetime(bars["timestamp_utc"], utc=True, errors="coerce")
-    bars = bars.dropna(subset=["timestamp_utc"])
-    bars["bar_date"] = bars["timestamp_utc"].dt.strftime("%Y-%m-%d")
-    bars["timestamp_utc"] = bars["timestamp_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    cols = [
-        "timestamp_utc",
-        "market_id",
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "trade_count",
-        "schema_version",
-    ]
-
-    count = 0
-    for (market_id, bar_date), part in bars.groupby(["market_id", "bar_date"]):
-        path = bars_dir / freq / f"market_id={market_id}" / f"date={bar_date}" / "bars.csv"
-        ensure_dir(path.parent)
-        part = part.reindex(columns=cols)
-        part.to_csv(path, index=False)
-        count += 1
-    return count
+    return write_bars(bars, bars_dir, freq)
 
 
 def append_snapshot_daily(snapshot: pd.DataFrame, snapshot_path: Path) -> int:
@@ -1150,14 +1124,18 @@ def main() -> None:
         end_dt=cutoff_utc,
     )
 
-    bar_partitions = 0
+    bar_rows_upserted = 0
+    bars_files = {
+        freq: str(path)
+        for freq, path in resolve_bars_master_paths(BARS_HISTORY_DIR, BAR_FREQS).items()
+    }
     if not args.dry_run and not price_hist.empty:
         price_yes = price_hist[price_hist["token_role"] == "yes"].copy()
         if not price_yes.empty:
             bars_source = price_yes[["timestamp_utc", "price", "market_id"]].copy()
             for freq in BAR_FREQS:
                 bars = build_bars_from_prices(bars_source, freq, schema_version=SCHEMA_VERSION_BARS)
-                bar_partitions += write_bars_replace(bars, BARS_HISTORY_DIR, freq)
+                bar_rows_upserted += write_bars_replace(bars, BARS_HISTORY_DIR, freq)
 
     # Load pRN dataset (option-chain snapshots)
     prn_path = prn_dataset_path
@@ -1675,7 +1653,10 @@ def main() -> None:
         "markets": len(markets_week),
         "price_rows_appended": price_history_appended,
         "prn_rows_appended": 0 if prn_out is None else len(prn_out),
-        "bars_partitions": bar_partitions,
+        "bars_dir": str(BARS_HISTORY_DIR),
+        "bars_storage": "master_csv",
+        "bars_files": bars_files,
+        "bar_rows_upserted": bar_rows_upserted,
         "despike_adjusted": despike_adjusted,
         "prn_dataset": str(prn_dataset_path) if prn_dataset_path else None,
         "prn_missing": prn_missing,

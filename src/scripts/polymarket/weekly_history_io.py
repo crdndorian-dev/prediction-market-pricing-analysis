@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import fcntl
 import os
+import shutil
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -16,6 +19,23 @@ FREQ_ALIASES = {
     "1d": "1D",
     "1D": "1D",
 }
+
+MASTER_BAR_FILE_NAMES = {
+    "1h": "hourly_master.csv",
+    "1d": "daily_master.csv",
+}
+
+BAR_STORAGE_COLUMNS = [
+    "timestamp_utc",
+    "market_id",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "trade_count",
+    "schema_version",
+]
 
 
 def ensure_dir(path: Path) -> None:
@@ -62,6 +82,204 @@ def normalize_threshold_series(values: pd.Series) -> pd.Series:
     vals = pd.to_numeric(values, errors="coerce")
     vals = vals.where(np.isfinite(vals), np.nan)
     return vals.round(6)
+
+
+def canonical_bar_freq(freq: str) -> str:
+    value = str(freq).strip().lower()
+    if value in {"60m", "1h", "hourly"}:
+        return "1h"
+    if value in {"1d", "1day", "1-day", "daily"}:
+        return "1d"
+    raise ValueError(f"Unsupported bars frequency: {freq}")
+
+
+def resolve_bars_master_path(bars_dir: Path, freq: str) -> Path:
+    return bars_dir / MASTER_BAR_FILE_NAMES[canonical_bar_freq(freq)]
+
+
+def resolve_bars_master_paths(
+    bars_dir: Path,
+    freqs: Optional[Iterable[str]] = None,
+) -> Dict[str, Path]:
+    selected = freqs if freqs is not None else MASTER_BAR_FILE_NAMES.keys()
+    out: Dict[str, Path] = {}
+    for freq in selected:
+        canonical = canonical_bar_freq(freq)
+        out[canonical] = resolve_bars_master_path(bars_dir, canonical)
+    return out
+
+
+def _empty_bars_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=BAR_STORAGE_COLUMNS)
+
+
+def _normalize_bars_for_storage(bars: pd.DataFrame) -> pd.DataFrame:
+    if bars.empty:
+        return _empty_bars_frame()
+    if "timestamp_utc" not in bars.columns or "market_id" not in bars.columns:
+        raise ValueError("Bars frame must include timestamp_utc and market_id.")
+
+    out = bars.copy()
+    out["timestamp_utc"] = pd.to_datetime(out["timestamp_utc"], utc=True, errors="coerce")
+    out = out.dropna(subset=["timestamp_utc"])
+    out["market_id"] = out["market_id"].astype(str).str.strip()
+    out = out[out["market_id"] != ""]
+    if out.empty:
+        return _empty_bars_frame()
+
+    out["timestamp_utc"] = out["timestamp_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    out = out.reindex(columns=BAR_STORAGE_COLUMNS)
+    out = out.drop_duplicates(subset=["market_id", "timestamp_utc"], keep="last")
+    out = out.sort_values(["market_id", "timestamp_utc"], kind="mergesort").reset_index(drop=True)
+    return out
+
+
+def _read_existing_master(path: Path) -> pd.DataFrame:
+    if not path.exists() or path.stat().st_size == 0:
+        return _empty_bars_frame()
+    return pd.read_csv(path, dtype={"market_id": str}).reindex(columns=BAR_STORAGE_COLUMNS)
+
+
+def _atomic_write_dataframe(df: pd.DataFrame, path: Path) -> None:
+    ensure_dir(path.parent)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    df.to_csv(tmp_path, index=False)
+    os.replace(tmp_path, path)
+
+
+@contextmanager
+def _locked_master_file(path: Path) -> Iterator[None]:
+    ensure_dir(path.parent)
+    lock_path = path.with_name(f".{path.name}.lock")
+    with lock_path.open("w") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def stage_bars(bars: pd.DataFrame, stage_path: Path) -> int:
+    staged = _normalize_bars_for_storage(bars)
+    if staged.empty:
+        return 0
+    ensure_dir(stage_path.parent)
+    header = not stage_path.exists() or stage_path.stat().st_size == 0
+    staged.to_csv(stage_path, mode="a", header=header, index=False)
+    return len(staged)
+
+
+
+
+def merge_staged_bars(stage_path: Path, bars_dir: Path, freq: str) -> int:
+    if not stage_path.exists() or stage_path.stat().st_size == 0:
+        return 0
+    staged = pd.read_csv(stage_path, dtype={"market_id": str})
+    return write_bars(staged, bars_dir, freq)
+
+
+def read_master_bars_filtered(
+    bars_dir: Path,
+    freq: str,
+    market_ids: Optional[List[str]],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    *,
+    chunksize: int = 100_000,
+) -> pd.DataFrame:
+    master_path = resolve_bars_master_path(bars_dir, freq)
+    if not master_path.exists():
+        return _empty_bars_frame()
+
+    market_filter = {str(m) for m in market_ids} if market_ids else None
+    frames: List[pd.DataFrame] = []
+    for chunk in pd.read_csv(master_path, chunksize=chunksize, dtype={"market_id": str}):
+        if chunk.empty:
+            continue
+        chunk = chunk.reindex(columns=BAR_STORAGE_COLUMNS)
+        if market_filter is not None:
+            chunk["market_id"] = chunk["market_id"].astype(str)
+            chunk = chunk[chunk["market_id"].isin(market_filter)]
+            if chunk.empty:
+                continue
+        if start_date or end_date:
+            dates = chunk["timestamp_utc"].astype(str).str[:10]
+            mask = pd.Series(True, index=chunk.index)
+            if start_date:
+                mask &= dates >= start_date
+            if end_date:
+                mask &= dates <= end_date
+            chunk = chunk[mask]
+            if chunk.empty:
+                continue
+        frames.append(chunk)
+
+    if not frames:
+        return _empty_bars_frame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def build_master_from_legacy_partitions(
+    bars_dir: Path,
+    freq: str,
+    *,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    canonical = canonical_bar_freq(freq)
+    legacy_root = bars_dir / canonical
+    master_path = resolve_bars_master_path(bars_dir, canonical)
+    files = sorted(legacy_root.glob("market_id=*/date=*/bars.csv"))
+
+    if master_path.exists() and not overwrite:
+        raise FileExistsError(f"Master bars file already exists: {master_path}")
+
+    if not files:
+        return {
+            "freq": canonical,
+            "legacy_root": str(legacy_root),
+            "legacy_files": 0,
+            "legacy_rows": 0,
+            "unique_rows": 0,
+            "master_path": str(master_path),
+        }
+
+    frames: List[pd.DataFrame] = []
+    legacy_rows = 0
+    for path in files:
+        frame = pd.read_csv(path, dtype={"market_id": str})
+        legacy_rows += len(frame)
+        if not frame.empty:
+            frames.append(frame)
+
+    combined = _normalize_bars_for_storage(
+        pd.concat(frames, ignore_index=True) if frames else _empty_bars_frame()
+    )
+    with _locked_master_file(master_path):
+        _atomic_write_dataframe(combined, master_path)
+
+    written = _normalize_bars_for_storage(_read_existing_master(master_path))
+    if len(written) != len(combined):
+        raise RuntimeError(
+            f"Migrated master row count mismatch for {canonical}: "
+            f"expected {len(combined)}, wrote {len(written)}."
+        )
+
+    return {
+        "freq": canonical,
+        "legacy_root": str(legacy_root),
+        "legacy_files": len(files),
+        "legacy_rows": legacy_rows,
+        "unique_rows": len(combined),
+        "master_path": str(master_path),
+    }
+
+
+def cleanup_legacy_partition_dirs(bars_dir: Path, freqs: Optional[Iterable[str]] = None) -> None:
+    selected = freqs if freqs is not None else MASTER_BAR_FILE_NAMES.keys()
+    for freq in selected:
+        legacy_root = bars_dir / canonical_bar_freq(freq)
+        if legacy_root.exists():
+            shutil.rmtree(legacy_root)
 
 
 def payload_to_history_df(payload: dict, token_id: str, schema_version: str) -> pd.DataFrame:
@@ -212,31 +430,14 @@ def build_bars_from_prices(
 
 
 def write_bars(bars: pd.DataFrame, bars_dir: Path, freq: str) -> int:
-    if bars.empty:
+    incoming = _normalize_bars_for_storage(bars)
+    if incoming.empty:
         return 0
 
-    bars = bars.copy()
-    bars["timestamp_utc"] = pd.to_datetime(bars["timestamp_utc"], utc=True, errors="coerce")
-    bars = bars.dropna(subset=["timestamp_utc"])
-    bars["bar_date"] = bars["timestamp_utc"].dt.strftime("%Y-%m-%d")
-    bars["timestamp_utc"] = bars["timestamp_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    cols = [
-        "timestamp_utc",
-        "market_id",
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "trade_count",
-        "schema_version",
-    ]
-
-    count = 0
-    for (market_id, bar_date), part in bars.groupby(["market_id", "bar_date"]):
-        path = bars_dir / freq / f"market_id={market_id}" / f"date={bar_date}" / "bars.csv"
-        part = part.reindex(columns=cols)
-        append_df_to_csv_with_schema(part, path)
-        count += 1
-    return count
+    master_path = resolve_bars_master_path(bars_dir, freq)
+    with _locked_master_file(master_path):
+        existing = _read_existing_master(master_path)
+        combined = pd.concat([existing, incoming], ignore_index=True) if not existing.empty else incoming
+        combined = _normalize_bars_for_storage(combined)
+        _atomic_write_dataframe(combined, master_path)
+    return len(incoming)

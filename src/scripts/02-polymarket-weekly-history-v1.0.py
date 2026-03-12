@@ -33,9 +33,12 @@ if str(SCRIPTS_ROOT) not in sys.path:
 from polymarket.weekly_history_io import (
     append_df_to_csv_with_schema,
     build_bars_from_prices,
+    canonical_bar_freq,
     clean_price_history,
     fetch_price_history,
-    write_bars,
+    merge_staged_bars,
+    resolve_bars_master_paths,
+    stage_bars,
 )
 from polymarket.trade_artifact import enrich_trades_for_run, write_run_trades_csv
 
@@ -947,6 +950,11 @@ def main() -> None:
         despike_jump=float(args.despike_jump),
         despike_revert=float(args.despike_revert),
     )
+    requested_bar_freqs: List[str] = []
+    for freq in cfg.bars_freqs:
+        canonical = canonical_bar_freq(freq)
+        if canonical not in requested_bar_freqs:
+            requested_bar_freqs.append(canonical)
 
     out_dir = Path(args.out_dir)
     bars_dir = Path(args.bars_dir)
@@ -1033,7 +1041,15 @@ def main() -> None:
     prices_path = run_dir / "price_history.csv"
     price_rows = 0
     despike_adjusted = 0
-    bar_partitions = 0
+    bar_rows_upserted = 0
+    bars_files = {
+        freq: str(path)
+        for freq, path in resolve_bars_master_paths(bars_dir, requested_bar_freqs).items()
+    }
+    bar_stage_paths = {
+        freq: run_dir / f".bars-stage-{freq}.csv"
+        for freq in requested_bar_freqs
+    }
 
     # Validation counters
     COMPLEMENT_TOLERANCE = 0.20
@@ -1183,13 +1199,13 @@ def main() -> None:
                 if token_role == "yes":
                     bars_in = history[["timestamp_utc", "price"]].copy()
                     bars_in["market_id"] = market_id
-                    for freq in cfg.bars_freqs:
+                    for freq in requested_bar_freqs:
                         bars = build_bars_from_prices(
                             bars_in,
                             freq,
                             schema_version=SCHEMA_VERSION_BARS,
                         )
-                        bar_partitions += write_bars(bars, bars_dir, freq)
+                        stage_bars(bars, bar_stage_paths[freq])
 
         print(
             f"[Weekly History] Market complete {idx + 1}/{markets_total} "
@@ -1218,6 +1234,12 @@ def main() -> None:
         print("[Weekly History] dry-run complete (no files written).")
         return
 
+    for freq, stage_path in bar_stage_paths.items():
+        if not stage_path.exists():
+            continue
+        bar_rows_upserted += merge_staged_bars(stage_path, bars_dir, freq)
+        stage_path.unlink()
+
     manifest = {
         "run_id": run_id,
         "script_version": SCRIPT_VERSION,
@@ -1243,8 +1265,10 @@ def main() -> None:
             "sparse_markets": validation_sparse_markets,
         },
         "bars_dir": str(bars_dir),
+        "bars_storage": "master_csv",
+        "bars_files": bars_files,
         "fact_trade_dir": str(fact_trade_dir),
-        "bar_partitions": bar_partitions,
+        "bar_rows_upserted": bar_rows_upserted,
         "dim_market": str(dim_market_out),
         "subgraph": subgraph_info,
         "trade_artifact": subgraph_info.get("trade_artifact"),
@@ -1254,7 +1278,7 @@ def main() -> None:
     print("[Weekly History] complete", flush=True)
     print(f"[Weekly History] run_dir={run_dir}", flush=True)
     print(f"[Weekly History] price_rows={price_rows}", flush=True)
-    print(f"[Weekly History] bar_partitions={bar_partitions}", flush=True)
+    print(f"[Weekly History] bar_rows_upserted={bar_rows_upserted}", flush=True)
     print(f"run_id={run_id}", flush=True)
 
 

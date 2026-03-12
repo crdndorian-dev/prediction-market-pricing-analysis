@@ -36,6 +36,7 @@ from polymarket.prn_loader import (
     load_prn_dataset,
     normalize_threshold,
 )
+from polymarket.weekly_history_io import read_master_bars_filtered
 
 SCRIPT_VERSION = "1.0.0"
 SCHEMA_VERSION = "pm_features_v1.0"
@@ -174,45 +175,6 @@ def _load_dim_market(path: Path) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
-def _parse_date_folder(path: Path) -> Optional[str]:
-    name = path.name
-    if name.startswith("date="):
-        return name.replace("date=", "")
-    return None
-
-
-def _iter_bar_files(
-    bars_dir: Path,
-    freq: str,
-    market_ids: Optional[List[str]],
-    start_date: Optional[str],
-    end_date: Optional[str],
-) -> List[Path]:
-    base = bars_dir / freq
-    if not base.exists():
-        return []
-
-    paths: List[Path] = []
-    if market_ids:
-        for market_id in market_ids:
-            glob = base.glob(f"market_id={market_id}/date=*/bars.csv")
-            paths.extend(list(glob))
-    else:
-        paths = list(base.glob("market_id=*/date=*/bars.csv"))
-
-    out: List[Path] = []
-    for path in sorted(paths):
-        date_part = _parse_date_folder(path.parent)
-        if not date_part:
-            continue
-        if start_date and date_part < start_date:
-            continue
-        if end_date and date_part > end_date:
-            continue
-        out.append(path)
-    return out
-
-
 def _load_bars(
     bars_dir: Path,
     freq: str,
@@ -220,45 +182,21 @@ def _load_bars(
     start_date: Optional[str],
     end_date: Optional[str],
 ) -> pd.DataFrame:
-    files = _iter_bar_files(bars_dir, freq, market_ids, start_date, end_date)
-    if not files:
+    df = read_master_bars_filtered(
+        bars_dir,
+        freq,
+        market_ids,
+        start_date,
+        end_date,
+    )
+    if df.empty:
         return pd.DataFrame()
 
-    frames: List[pd.DataFrame] = []
-    read_errors = 0
-    missing_cols = 0
     required_cols = {"timestamp_utc", "market_id", "close"}
-    for path in files:
-        try:
-            df = pd.read_csv(path)
-        except Exception as exc:
-            read_errors += 1
-            if read_errors <= 3:
-                print(f"[WARN] Failed to read bars file {path}: {exc}")
-            continue
-        if df.empty:
-            continue
-        missing = required_cols - set(df.columns)
-        if missing:
-            missing_cols += 1
-            if missing_cols <= 3:
-                print(f"[WARN] Bars file missing columns {sorted(missing)}: {path}")
-            continue
-        frames.append(df)
-
-    if not frames:
-        if read_errors:
-            print(f"[features] Skipped {read_errors} bars files due to read errors.")
-        if missing_cols:
-            print(f"[features] Skipped {missing_cols} bars files due to missing columns.")
+    missing = required_cols - set(df.columns)
+    if missing:
+        print(f"[WARN] Bars master missing columns {sorted(missing)}: {bars_dir}")
         return pd.DataFrame()
-
-    if read_errors:
-        print(f"[features] Skipped {read_errors} bars files due to read errors.")
-    if missing_cols:
-        print(f"[features] Skipped {missing_cols} bars files due to missing columns.")
-
-    df = pd.concat(frames, ignore_index=True)
     df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
     df = df.dropna(subset=["timestamp_utc"])
     df["open"] = pd.to_numeric(df.get("open"), errors="coerce")
