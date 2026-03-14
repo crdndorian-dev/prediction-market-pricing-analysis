@@ -33,6 +33,10 @@ export type PolymarketHistoryRunResponse = {
   features_built: boolean;
   features_path: string | null;
   features_manifest_path: string | null;
+  master_bar_artifacts: SharedArtifactSummary[];
+  artifact_groups: RunArtifactGroupSummary[];
+  shared_artifacts: SharedArtifactSummary[];
+  quality_summary?: PolymarketQualitySummary | null;
 };
 
 export type PolymarketRunFeaturesRequest = {
@@ -53,7 +57,148 @@ export type PolymarketRunFeaturesResponse = {
   command: string[];
 };
 
-export type PolymarketHistoryJobPhase = "history" | "features" | "finalizing";
+export type SharedArtifactSummary = {
+  name: string;
+  path: string;
+  frequency?: string | null;
+  size_bytes: number;
+  row_count?: number | null;
+  last_modified?: string | null;
+};
+
+export type RunArtifactSummary = {
+  name: string;
+  path: string;
+  size_bytes: number;
+  row_count?: number | null;
+  last_modified?: string | null;
+};
+
+export type RunArtifactGroupSummary = {
+  key: string;
+  label: string;
+  path: string;
+  files: RunArtifactSummary[];
+};
+
+export type PolymarketQualityBucketCounts = {
+  clean: number;
+  watch: number;
+  noisy: number;
+};
+
+export type PolymarketQualityFlagSummary = {
+  name: string;
+  count: number;
+  share?: number | null;
+};
+
+export type PolymarketQualityTickerSummary = {
+  ticker: string;
+  market_count: number;
+  flagged_market_count: number;
+  flagged_share?: number | null;
+  avg_issue_count?: number | null;
+  clean_share?: number | null;
+  watch_share?: number | null;
+  noisy_share?: number | null;
+};
+
+export type PolymarketQualitySummary = {
+  market_count: number;
+  flagged_market_count: number;
+  flagged_share: number;
+  bucket_counts: PolymarketQualityBucketCounts;
+  prn_coverage_counts: Record<string, number>;
+  top_flags: PolymarketQualityFlagSummary[];
+  top_problem_tickers: PolymarketQualityTickerSummary[];
+  snapshot_anchor?: string | null;
+  quality_columns?: string[];
+  quality_flag_columns?: string[];
+};
+
+export type PolymarketMarketQuality = {
+  market_id?: string | null;
+  ticker?: string | null;
+  threshold?: number | null;
+  week_friday?: string | null;
+  quality_issue_count?: number | null;
+  quality_bucket?: string | null;
+  active_flags: string[];
+  snapshot_date_used?: string | null;
+  snapshot_time_used?: string | null;
+  snapshot_coverage_status?: string | null;
+  snapshot_drop_reason?: string | null;
+  snapshot_pRN?: number | null;
+  snapshot_abs_log_m_fwd?: number | null;
+  yes_points?: number | null;
+  stale_ratio?: number | null;
+  max_stale_hours?: number | null;
+  midprice_cluster_ratio?: number | null;
+  max_jump?: number | null;
+  hours_since_last_yes_trade?: number | null;
+  gamma_volume?: number | null;
+  flag_not_relevant?: boolean | null;
+  flag_prn_missing?: boolean | null;
+  flag_pm_no_trade_history?: boolean | null;
+  flag_pm_no_recent_trade?: boolean | null;
+  flag_pm_stale_prices?: boolean | null;
+  flag_extreme_otm?: boolean | null;
+};
+
+export type PolymarketQualityMarketSample = {
+  market_id: string;
+  event_id?: string | null;
+  ticker: string;
+  threshold?: number | null;
+  week_friday: string;
+  quality_issue_count?: number | null;
+  quality_bucket?: string | null;
+  active_flags: string[];
+  snapshot_coverage_status?: string | null;
+  snapshot_drop_reason?: string | null;
+  hours_since_last_yes_trade?: number | null;
+  stale_ratio?: number | null;
+  max_stale_hours?: number | null;
+  midprice_cluster_ratio?: number | null;
+  max_jump?: number | null;
+  gamma_volume?: number | null;
+};
+
+export type PolymarketQualityWeekSummary = {
+  week_friday: string;
+  market_count: number;
+  flagged_market_count: number;
+  flagged_share?: number | null;
+  avg_issue_count?: number | null;
+  quality_bucket?: string | null;
+};
+
+export type PolymarketQualityAuditResponse = {
+  run_id: string;
+  available: boolean;
+  message?: string | null;
+  summary: PolymarketQualitySummary;
+  flag_distribution: PolymarketQualityFlagSummary[];
+  problem_tickers: PolymarketQualityTickerSummary[];
+  problem_markets: PolymarketQualityMarketSample[];
+  weekly_summary: PolymarketQualityWeekSummary[];
+  available_quality_flags: string[];
+};
+
+export type PolymarketQualityTelemetry = {
+  phase: "quality" | "complete";
+  total_markets: number;
+  completed_markets: number;
+  flagged_markets: number;
+  flagged_share: number;
+  bucket_counts: PolymarketQualityBucketCounts;
+  top_flags: PolymarketQualityFlagSummary[];
+  prn_coverage_counts: Record<string, number>;
+  top_problem_tickers: PolymarketQualityTickerSummary[];
+};
+
+export type PolymarketHistoryJobPhase = "history" | "prn" | "quality" | "features" | "finalizing";
 
 export type PipelineProgress = {
   total: number;
@@ -68,6 +213,7 @@ export type PolymarketHistoryJobStatus = {
   phase?: PolymarketHistoryJobPhase | null;
   progress?: PipelineProgress | null;
   features_progress?: PipelineProgress | null;
+  telemetry?: PolymarketQualityTelemetry | null;
   result: PolymarketHistoryRunResponse | null;
   error: string | null;
   started_at: string | null;
@@ -89,6 +235,17 @@ export const getPipelineRunFileUrl = (runId: string, filename: string): string =
   const params = new URLSearchParams({ filename });
   return `${API_BASE}/polymarket-history/runs/${encodeURIComponent(runId)}/file?${params.toString()}`;
 };
+
+export const getPipelineRunArtifactFileUrl = (runId: string, path: string): string => {
+  const params = new URLSearchParams({ path });
+  return `${API_BASE}/polymarket-history/runs/${encodeURIComponent(runId)}/artifacts/file?${params.toString()}`;
+};
+
+export const getMasterBarFileUrl = (freq: "1h" | "1d"): string =>
+  `${API_BASE}/polymarket-history/master-bars/${encodeURIComponent(freq)}/file`;
+
+export const getRunMasterBarFileUrl = (runId: string, freq: "1h" | "1d"): string =>
+  `${API_BASE}/polymarket-history/runs/${encodeURIComponent(runId)}/master-bars/${encodeURIComponent(freq)}/file`;
 
 export async function startPolymarketHistoryJob(
   payload: PolymarketHistoryRunRequest,
@@ -200,6 +357,72 @@ export async function previewPipelineRunCsv(
   return response.json();
 }
 
+export async function previewPipelineRunArtifactCsv(
+  runId: string,
+  path: string,
+  mode: "head" | "tail" = "head",
+  limit: number = 20,
+): Promise<CsvPreview> {
+  const params = new URLSearchParams({
+    path,
+    mode,
+    limit: String(limit),
+  });
+  const response = await fetch(
+    `${API_BASE}/polymarket-history/runs/${encodeURIComponent(runId)}/artifacts/csv-preview?${params.toString()}`,
+  );
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      `Run artifact CSV preview failed (${response.status}): ${detail || "unknown error"}`,
+    );
+  }
+  return response.json();
+}
+
+export async function previewMasterBarCsv(
+  freq: "1h" | "1d",
+  mode: "head" | "tail" = "head",
+  limit: number = 20,
+): Promise<CsvPreview> {
+  const params = new URLSearchParams({
+    mode,
+    limit: String(limit),
+  });
+  const response = await fetch(
+    `${API_BASE}/polymarket-history/master-bars/${encodeURIComponent(freq)}/csv-preview?${params.toString()}`,
+  );
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      `Master bars preview failed (${response.status}): ${detail || "unknown error"}`,
+    );
+  }
+  return response.json();
+}
+
+export async function previewRunMasterBarCsv(
+  runId: string,
+  freq: "1h" | "1d",
+  mode: "head" | "tail" = "head",
+  limit: number = 20,
+): Promise<CsvPreview> {
+  const params = new URLSearchParams({
+    mode,
+    limit: String(limit),
+  });
+  const response = await fetch(
+    `${API_BASE}/polymarket-history/runs/${encodeURIComponent(runId)}/master-bars/${encodeURIComponent(freq)}/csv-preview?${params.toString()}`,
+  );
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      `Run master bars preview failed (${response.status}): ${detail || "unknown error"}`,
+    );
+  }
+  return response.json();
+}
+
 export async function buildDecisionFeaturesForRun(
   runId: string,
   payload: PolymarketRunFeaturesRequest = {},
@@ -242,6 +465,9 @@ export type PipelineRunSummary = {
   markets: number | null;
   price_rows: number | null;
   features_built: boolean;
+  features_requested: boolean;
+  pending_phase?: string | null;
+  artifacts_accessible: boolean;
   pinned: boolean;
   is_active: boolean;
   artifact_count: number;
@@ -250,8 +476,12 @@ export type PipelineRunSummary = {
     size_bytes: number;
     row_count?: number | null;
   }[];
+  master_bar_artifacts: SharedArtifactSummary[];
+  artifact_groups: RunArtifactGroupSummary[];
+  shared_artifacts: SharedArtifactSummary[];
   size_bytes: number;
   error_summary: string | null;
+  quality_summary?: PolymarketQualitySummary | null;
 };
 
 export type StorageSummary = {
@@ -277,6 +507,19 @@ export async function listPipelineRuns(): Promise<PipelineRunsResponse> {
   if (!response.ok) {
     const detail = await response.text();
     throw new Error(`Failed to list runs (${response.status}): ${detail}`);
+  }
+  return response.json();
+}
+
+export async function getPipelineRunQualityAudit(
+  runId: string,
+): Promise<PolymarketQualityAuditResponse> {
+  const response = await fetch(
+    `${API_BASE}/polymarket-history/runs/${encodeURIComponent(runId)}/quality-audit`,
+  );
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`Failed to load quality audit (${response.status}): ${detail}`);
   }
   return response.json();
 }

@@ -116,6 +116,15 @@
   gap: 0.5rem;
 }
 
+.polymarket-panel-header > .polymarket-job-config-actions {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+}
+
 .polymarket-job-config-header {
   padding-block: var(--space-3);
 }
@@ -125,6 +134,20 @@
   font-size: clamp(1.7rem, 2.25vw, 2.15rem);
   line-height: 1.08;
   letter-spacing: -0.01em;
+}
+
+.polymarket-pipeline-page .config-summary {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  align-items: start;
+}
+
+.polymarket-pipeline-page .config-summary > div {
+  min-width: 0;
+  text-align: center;
+}
+
+.polymarket-pipeline-page .config-summary > div span:last-child {
+  word-break: break-word;
 }
 
 .polymarket-config-form {
@@ -139,8 +162,15 @@
   gap: var(--space-4);
 }
 
-.polymarket-config-panel .section-card,
-.polymarket-documentation-panel .section-card {
+.polymarket-pipeline-page .polymarket-basic-settings-card > h3 {
+  margin: 0;
+  font-size: var(--text-2xl);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-500);
+}
+
+.polymarket-config-panel .section-card {
   box-shadow: none;
 }
 
@@ -170,8 +200,80 @@
   line-height: 1.45;
 }
 
-.polymarket-selected-tickers {
-  overflow-wrap: anywhere;
+.polymarket-date-range-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+.polymarket-pipeline-page .polymarket-date-range-fields .field {
+  min-width: 0;
+}
+
+.polymarket-pipeline-page .input[type="date"] {
+  border-radius: var(--radius-md);
+  border: 1px solid var(--outline);
+  background: var(--surface-strong);
+  color: var(--ink-700);
+  font-family: var(--font-body);
+  font-variant-numeric: tabular-nums;
+  min-height: 2.7rem;
+  width: 100%;
+  transition: background-color 140ms ease, border-color 140ms ease,
+    color 140ms ease;
+}
+
+.polymarket-pipeline-page .input[type="date"].input-invalid,
+.polymarket-pipeline-page .input[type="date"][aria-invalid="true"] {
+  border-color: var(--color-error);
+  background: var(--surface-error-muted);
+  color: var(--ink-900);
+}
+
+.polymarket-pipeline-page .input[type="date"].input-invalid:hover,
+.polymarket-pipeline-page .input[type="date"].input-invalid:focus-visible,
+.polymarket-pipeline-page .input[type="date"][aria-invalid="true"]:hover,
+.polymarket-pipeline-page .input[type="date"][aria-invalid="true"]:focus-visible {
+  border-color: var(--color-error);
+  background: var(--surface-error-muted);
+}
+
+.polymarket-pipeline-page .input[type="date"]:hover {
+  background: var(--surface);
+  border-color: var(--accent);
+  color: var(--ink-900);
+}
+
+.polymarket-pipeline-page .input[type="date"]::-webkit-datetime-edit,
+.polymarket-pipeline-page .input[type="date"]::-webkit-datetime-edit-fields-wrapper {
+  color: inherit;
+  font-family: inherit;
+}
+
+.polymarket-pipeline-page .input[type="date"]::-webkit-datetime-edit-text {
+  color: var(--ink-500);
+}
+
+.polymarket-pipeline-page .input[type="date"]::-webkit-calendar-picker-indicator {
+  opacity: 0.78;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: 0.15rem;
+  transition: background-color 140ms ease, opacity 140ms ease;
+}
+
+.polymarket-pipeline-page .input[type="date"]:hover::-webkit-calendar-picker-indicator,
+.polymarket-pipeline-page .input[type="date"]:focus-visible::-webkit-calendar-picker-indicator {
+  opacity: 1;
+  background: var(--surface-wash);
+}
+
+.polymarket-pipeline-page .polymarket-date-range-hint {
+  margin-top: calc(-1 * var(--space-2));
+}
+
+.polymarket-pipeline-page .polymarket-date-range-hint.is-invalid {
+  color: var(--color-error);
 }
 
 .polymarket-pipeline-page .mono-inline {
@@ -407,6 +509,11 @@
   justify-content: center;
 }
 
+.polymarket-config-action-button {
+  width: 200px;
+  justify-content: center;
+}
+
 .polymarket-run-job-button {
   margin-left: auto;
 }
@@ -466,41 +573,27 @@
 
 .polymarket-active-run-panel .panel-body {
   min-height: 420px;
-}
-
-.polymarket-active-run-header-actions {
   display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  flex-wrap: wrap;
+  flex-direction: column;
 }
 
 .polymarket-active-run-shell {
-  display: grid;
-  grid-template-columns: minmax(300px, 420px) minmax(0, 1fr);
-  gap: var(--space-4);
-  align-items: start;
-}
-
-.polymarket-active-run-sidebar,
-.polymarket-active-run-main {
-  min-width: 0;
-}
-
-.run-output {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-5);
+  width: 100%;
 }
 
 .pipeline-run-monitor {
   border-radius: var(--radius-2xl);
   border: 1px solid var(--outline);
   background: var(--surface-panel);
-  padding: var(--space-5);
+  padding: var(--space-6);
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  box-shadow: none;
+  width: 100%;
 }
 
 .pipeline-run-monitor-header {
@@ -541,7 +634,7 @@
   padding-top: var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: var(--space-3);
 }
 
 .pipeline-run-monitor-progress-header {
@@ -552,16 +645,99 @@
   color: var(--ink-600);
 }
 
-.pipeline-run-monitor-note {
-  margin: 0;
-  font-size: var(--text-xs);
-  color: var(--ink-500);
-}
-
 .pipeline-progress-stack {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+}
+
+.polymarket-stop-run-button {
+  align-self: flex-end;
+  width: auto;
+}
+
+.polymarket-run-summary {
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--outline);
+  background: var(--surface-panel);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.polymarket-run-summary-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.polymarket-run-summary-title {
+  font-size: var(--text-lg);
+  color: var(--ink-900);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.polymarket-run-summary-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.polymarket-run-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--ink-700);
+}
+
+.polymarket-run-meta-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.polymarket-run-meta-grid > div > span:not(.meta-label) {
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.polymarket-quality-summary {
+  gap: var(--space-5);
+}
+
+.polymarket-quality-kpis {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.polymarket-quality-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-4);
+}
+
+.polymarket-quality-empty {
+  padding: var(--space-4);
+  border-radius: var(--radius-lg);
+  border: 1px dashed var(--outline);
+  background: var(--surface-soft);
+  color: var(--ink-600);
+}
+
+.polymarket-log-panel {
+  border-radius: var(--radius-2xl);
+  border: 1px solid var(--outline);
+  background: var(--surface-panel);
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
 }
 
 .progress-section {
@@ -700,21 +876,6 @@
   gap: var(--space-4);
 }
 
-.runs-storage-badge {
-  display: flex;
-  gap: 0.75rem;
-  font-size: var(--text-xs);
-  color: var(--ink-500);
-  flex-wrap: wrap;
-}
-
-.runs-storage-badge span {
-  padding: 0.25rem 0.6rem;
-  border-radius: var(--radius-full);
-  background: var(--surface);
-  border: 1px solid var(--outline);
-}
-
 .polymarket-runs-list {
   display: flex;
   flex-direction: column;
@@ -827,6 +988,12 @@
   color: #8f5a00;
 }
 
+.status-pill.pending {
+  background: rgba(245, 165, 36, 0.14);
+  border-color: rgba(245, 165, 36, 0.34);
+  color: #8f5a00;
+}
+
 .run-status-dot {
   display: inline-block;
   width: 10px;
@@ -840,6 +1007,10 @@
   background: #3ad29f;
 }
 
+.run-status-dot.running {
+  background: #2f9c95;
+}
+
 .run-status-dot.failed {
   background: #ec4e20;
 }
@@ -848,8 +1019,40 @@
   background: #f5a524;
 }
 
+.run-status-dot.pending {
+  background: #f5a524;
+}
+
 .run-status-dot.unknown {
   background: #94a3b8;
+}
+
+.polymarket-run-pending-notice {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(245, 165, 36, 0.3);
+  background: rgba(245, 165, 36, 0.08);
+}
+
+.polymarket-run-pending-notice h3,
+.polymarket-run-pending-notice p {
+  margin: 0;
+}
+
+.polymarket-run-pending-notice h3 {
+  font-size: var(--text-lg);
+  color: var(--ink-900);
+}
+
+.polymarket-run-pending-notice p {
+  margin-top: 0.35rem;
+  color: var(--ink-700);
+  line-height: 1.5;
+  max-width: 60ch;
 }
 
 .run-id-mono {
@@ -915,6 +1118,12 @@
   line-height: 1.35;
 }
 
+.polymarket-run-quality-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
 .polymarket-run-path {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
@@ -934,6 +1143,17 @@
   flex-wrap: wrap;
   align-items: flex-start;
   justify-content: flex-end;
+}
+
+.polymarket-quality-audit-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+}
+
+.polymarket-quality-audit-panel {
+  margin-top: 0;
 }
 
 .polymarket-history-panel .button.small {
@@ -990,6 +1210,46 @@
 
 .polymarket-run-files-drawer[hidden] {
   display: none;
+}
+
+.polymarket-artifact-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--outline);
+  background: var(--surface-panel);
+  padding: var(--space-4);
+}
+
+.polymarket-artifact-group-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.polymarket-artifact-group-header h3 {
+  margin: 0;
+  font-size: var(--text-lg);
+  color: var(--ink-900);
+}
+
+.polymarket-artifact-group-path {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--ink-500);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--outline);
+  background: var(--surface-soft);
+  padding: 0.2rem 0.55rem;
+}
+
+.polymarket-master-bars-card {
+  background: color-mix(in srgb, var(--accent-fill) 18%, white);
 }
 
 .polymarket-run-files {
@@ -1124,43 +1384,6 @@
   border-radius: var(--radius-lg);
   border: 1px dashed var(--outline);
   background: var(--surface);
-}
-
-.polymarket-documentation-body {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-}
-
-.polymarket-doc-section {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-
-.polymarket-doc-title {
-  margin: 0;
-  font-size: var(--text-2xl);
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--ink-500);
-}
-
-.polymarket-doc-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  color: var(--ink-700);
-}
-
-.polymarket-doc-list p {
-  margin: 0;
-  line-height: 1.55;
-}
-
-.polymarket-doc-list code {
-  font-family: var(--font-mono);
-  font-size: 0.9em;
 }
 
 .polymarket-features-modal-overlay {
@@ -1339,7 +1562,7 @@
   min-width: 180px;
 }
 
-.polymarket-delete-modal-overlay {
+.dataset-delete-modal-overlay {
   position: fixed;
   inset: 0;
   z-index: 1000;
@@ -1350,7 +1573,7 @@
   padding: var(--space-5);
 }
 
-.polymarket-delete-modal {
+.dataset-delete-modal {
   width: min(100%, 520px);
   border-radius: var(--radius-2xl);
   border: 1px solid var(--outline);
@@ -1362,25 +1585,25 @@
   padding: var(--space-5);
 }
 
-.polymarket-delete-modal-header {
+.dataset-delete-modal-header {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
 }
 
-.polymarket-delete-modal-header h3 {
+.dataset-delete-modal-header h3 {
   margin: 0;
   font-size: var(--text-xl);
   color: var(--ink-900);
 }
 
-.polymarket-delete-modal-header p {
+.dataset-delete-modal-header p {
   margin: 0;
   color: var(--ink-600);
   line-height: 1.45;
 }
 
-.polymarket-delete-modal-code {
+.dataset-delete-modal-code {
   display: inline-flex;
   align-items: center;
   border-radius: var(--radius-sm);
@@ -1392,53 +1615,43 @@
   padding: 0.1rem 0.35rem;
 }
 
-.polymarket-delete-modal-body {
+.dataset-delete-modal-body {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
 }
 
-.polymarket-delete-modal-body label {
+.dataset-delete-modal-body label {
   font-size: var(--text-sm);
   color: var(--ink-700);
   font-weight: 600;
 }
 
-.polymarket-delete-modal-actions {
+.dataset-delete-modal-actions {
   display: flex;
   justify-content: flex-end;
   gap: var(--space-3);
 }
 
-.polymarket-delete-modal-actions .button {
+.dataset-delete-modal-actions .button {
   min-width: 160px;
 }
 
-.polymarket-pipeline-page .button.polymarket-delete-modal-confirm {
-  background: #7f2929;
+.polymarket-pipeline-page .button.ghost.danger {
+  background: rgba(127, 41, 41, 0.06);
   border-color: #7f2929;
-  color: var(--surface);
+  color: #7f2929;
 }
 
-.polymarket-pipeline-page .button.polymarket-delete-modal-confirm:hover:not(:disabled) {
-  background: #6d2020;
+.polymarket-pipeline-page .button.ghost.danger:hover:not(:disabled) {
+  background: rgba(127, 41, 41, 0.1);
   border-color: #6d2020;
-  color: var(--surface);
-}
-
-.polymarket-pipeline-page .button.polymarket-delete-modal-confirm:disabled {
-  opacity: 0.55;
+  color: #6d2020;
 }
 
 @container (min-width: 900px) {
   .polymarket-pipeline-page .fields-grid {
     grid-template-columns: 1fr 1fr;
-  }
-}
-
-@container (max-width: 1100px) {
-  .polymarket-active-run-shell {
-    grid-template-columns: 1fr;
   }
 }
 
@@ -1473,6 +1686,28 @@
     font-size: var(--text-sm);
   }
 
+  .polymarket-pipeline-page .config-summary {
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  }
+
+  .polymarket-panel-header > .polymarket-job-config-actions {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .polymarket-config-action-button {
+    width: 100%;
+  }
+
+  .polymarket-run-pending-notice {
+    flex-direction: column;
+  }
+
+  .polymarket-run-pending-notice .button {
+    width: 100%;
+  }
+
   .polymarket-run-footer {
     grid-template-columns: 1fr;
   }
@@ -1494,11 +1729,22 @@
     justify-content: flex-start;
   }
 
-  .polymarket-delete-modal-actions {
+  .polymarket-run-summary-header,
+  .pipeline-run-monitor-header,
+  .pipeline-run-monitor-progress-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .polymarket-date-range-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .dataset-delete-modal-actions {
     flex-direction: column;
   }
 
-  .polymarket-delete-modal-actions .button {
+  .dataset-delete-modal-actions .button {
     width: 100%;
     min-width: 0;
   }

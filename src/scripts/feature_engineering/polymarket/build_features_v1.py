@@ -37,6 +37,7 @@ from polymarket.prn_loader import (
     load_prn_dataset,
     normalize_threshold,
 )
+from polymarket.master_bars import master_bar_path
 
 SCRIPT_VERSION = "1.0.0"
 SCHEMA_VERSION = "pm_features_v1.0"
@@ -45,6 +46,39 @@ DEFAULT_DIM_PATH = REPO_ROOT / "src" / "data" / "models" / "polymarket" / "dim_m
 DEFAULT_BARS_DIR = REPO_ROOT / "src" / "data" / "analysis" / "polymarket" / "bars"
 DEFAULT_BARS_HISTORY_DIR = REPO_ROOT / "src" / "data" / "analysis" / "polymarket" / "bars_history"
 DEFAULT_OUT_DIR = REPO_ROOT / "src" / "data" / "models" / "polymarket"
+RUN_LOCAL_PRN_DIRNAME = "prn_dataset"
+RUN_LOCAL_PRN_SOURCE = "run_local_theta_exact"
+LEGACY_PRN_SOURCE = "legacy_external_dataset"
+PRN_META_CANDIDATES = [
+    "coverage_status",
+    "drop_reason",
+    "rn_method",
+    "theta_quote_source",
+    "option_expiration_used",
+    "prn_config_hash",
+    "prn_version",
+    "schema_version",
+    "prn_quality_issue_count",
+    "prn_quality_bucket",
+]
+MARKET_QUALITY_FILENAME = "market_quality.csv"
+MARKET_QUALITY_EXPLICIT_COLUMNS = [
+    "quality_issue_count",
+    "quality_bucket",
+    "snapshot_date_used",
+    "snapshot_time_used",
+    "snapshot_coverage_status",
+    "snapshot_drop_reason",
+    "snapshot_pRN",
+    "snapshot_abs_log_m_fwd",
+    "yes_points",
+    "stale_ratio",
+    "max_stale_hours",
+    "midprice_cluster_ratio",
+    "max_jump",
+    "hours_since_last_yes_trade",
+    "gamma_volume",
+]
 
 
 # ----------------------------
@@ -175,45 +209,6 @@ def _load_dim_market(path: Path) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
-def _parse_date_folder(path: Path) -> Optional[str]:
-    name = path.name
-    if name.startswith("date="):
-        return name.replace("date=", "")
-    return None
-
-
-def _iter_bar_files(
-    bars_dir: Path,
-    freq: str,
-    market_ids: Optional[List[str]],
-    start_date: Optional[str],
-    end_date: Optional[str],
-) -> List[Path]:
-    base = bars_dir / freq
-    if not base.exists():
-        return []
-
-    paths: List[Path] = []
-    if market_ids:
-        for market_id in market_ids:
-            glob = base.glob(f"market_id={market_id}/date=*/bars.csv")
-            paths.extend(list(glob))
-    else:
-        paths = list(base.glob("market_id=*/date=*/bars.csv"))
-
-    out: List[Path] = []
-    for path in sorted(paths):
-        date_part = _parse_date_folder(path.parent)
-        if not date_part:
-            continue
-        if start_date and date_part < start_date:
-            continue
-        if end_date and date_part > end_date:
-            continue
-        out.append(path)
-    return out
-
-
 def _load_bars(
     bars_dir: Path,
     freq: str,
@@ -221,47 +216,58 @@ def _load_bars(
     start_date: Optional[str],
     end_date: Optional[str],
 ) -> pd.DataFrame:
-    files = _iter_bar_files(bars_dir, freq, market_ids, start_date, end_date)
-    if not files:
+    path = master_bar_path(bars_dir, freq)
+    if not path.exists():
         return pd.DataFrame()
 
     frames: List[pd.DataFrame] = []
     read_errors = 0
     missing_cols = 0
     required_cols = {"timestamp_utc", "market_id", "close"}
-    for path in files:
-        try:
-            df = pd.read_csv(path)
-        except Exception as exc:
-            read_errors += 1
-            if read_errors <= 3:
-                print(f"[WARN] Failed to read bars file {path}: {exc}")
-            continue
-        if df.empty:
-            continue
-        missing = required_cols - set(df.columns)
-        if missing:
-            missing_cols += 1
-            if missing_cols <= 3:
-                print(f"[WARN] Bars file missing columns {sorted(missing)}: {path}")
-            continue
-        frames.append(df)
+    market_filter = {str(market_id) for market_id in market_ids} if market_ids else None
+    try:
+        reader = pd.read_csv(path, dtype={"market_id": str}, chunksize=100_000, low_memory=False)
+        for df in reader:
+            if df.empty:
+                continue
+            missing = required_cols - set(df.columns)
+            if missing:
+                missing_cols += 1
+                if missing_cols <= 3:
+                    print(f"[WARN] Bars file missing columns {sorted(missing)}: {path}")
+                continue
+            if market_filter is not None:
+                df = df[df["market_id"].astype(str).isin(market_filter)]
+                if df.empty:
+                    continue
+            df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
+            df = df.dropna(subset=["timestamp_utc"])
+            if start_date:
+                df = df[df["timestamp_utc"] >= pd.Timestamp(start_date, tz="UTC")]
+            if end_date:
+                end_ts = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+                df = df[df["timestamp_utc"] <= end_ts]
+            if df.empty:
+                continue
+            frames.append(df)
+    except Exception as exc:
+        read_errors += 1
+        if read_errors <= 3:
+            print(f"[WARN] Failed to read bars file {path}: {exc}")
 
     if not frames:
         if read_errors:
-            print(f"[features] Skipped {read_errors} bars files due to read errors.")
+            print(f"[features] Skipped {read_errors} bar files due to read errors.")
         if missing_cols:
-            print(f"[features] Skipped {missing_cols} bars files due to missing columns.")
+            print(f"[features] Skipped {missing_cols} bar chunks due to missing columns.")
         return pd.DataFrame()
 
     if read_errors:
-        print(f"[features] Skipped {read_errors} bars files due to read errors.")
+        print(f"[features] Skipped {read_errors} bar files due to read errors.")
     if missing_cols:
-        print(f"[features] Skipped {missing_cols} bars files due to missing columns.")
+        print(f"[features] Skipped {missing_cols} bar chunks due to missing columns.")
 
     df = pd.concat(frames, ignore_index=True)
-    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
-    df = df.dropna(subset=["timestamp_utc"])
     df["open"] = pd.to_numeric(df.get("open"), errors="coerce")
     df["high"] = pd.to_numeric(df.get("high"), errors="coerce")
     df["low"] = pd.to_numeric(df.get("low"), errors="coerce")
@@ -416,18 +422,108 @@ def _attach_prn_features_daily(base: pd.DataFrame, prn: pd.DataFrame) -> pd.Data
         return base
 
     prn_cols = [c for c in PRN_COL_CANDIDATES if c in prn.columns]
-    keep_cols = ["ticker", "threshold", "expiry_date", "snapshot_date", "asof_time"] + prn_cols
-    prn = prn[keep_cols].rename(columns={"asof_time": "prn_asof_time"})
-    prn = prn.dropna(subset=["ticker", "threshold", "expiry_date", "snapshot_date", "prn_asof_time"])
+    prn_meta_cols = [c for c in PRN_META_CANDIDATES if c in prn.columns]
 
-    base = base.dropna(subset=["ticker", "threshold", "expiry_date", "decision_date"])
-    merged = base.merge(
-        prn,
+    if "market_id" in base.columns and "market_id" in prn.columns and prn["market_id"].notna().any():
+        market_keep_cols = ["market_id", "snapshot_date", "asof_time"] + prn_cols + prn_meta_cols
+        prn_market = prn[[c for c in market_keep_cols if c in prn.columns]].copy()
+        prn_market = prn_market.rename(columns={"asof_time": "prn_asof_time"})
+        prn_market["market_id"] = prn_market["market_id"].astype(str)
+        prn_market = prn_market.dropna(subset=["market_id", "snapshot_date", "prn_asof_time"])
+        prn_market = prn_market.sort_values(["market_id", "snapshot_date", "prn_asof_time"])
+        prn_market = prn_market.drop_duplicates(subset=["market_id", "snapshot_date"], keep="last")
+
+        base_market = base.dropna(subset=["market_id", "decision_date"]).copy()
+        base_market["market_id"] = base_market["market_id"].astype(str)
+        merged_market = base_market.merge(
+            prn_market,
+            left_on=["market_id", "decision_date"],
+            right_on=["market_id", "snapshot_date"],
+            how="inner",
+            validate="m:1",
+        )
+        if not merged_market.empty:
+            return merged_market
+
+    legacy_keep_cols = ["ticker", "threshold", "expiry_date", "snapshot_date", "asof_time"] + prn_cols + prn_meta_cols
+    prn_legacy = prn[[c for c in legacy_keep_cols if c in prn.columns]].copy()
+    prn_legacy = prn_legacy.rename(columns={"asof_time": "prn_asof_time"})
+    prn_legacy = prn_legacy.dropna(subset=["ticker", "threshold", "expiry_date", "snapshot_date", "prn_asof_time"])
+    prn_legacy = prn_legacy.sort_values(
+        ["ticker", "threshold", "expiry_date", "snapshot_date", "prn_asof_time"]
+    )
+    prn_legacy = prn_legacy.drop_duplicates(
+        subset=["ticker", "threshold", "expiry_date", "snapshot_date"],
+        keep="last",
+    )
+
+    base_legacy = base.dropna(subset=["ticker", "threshold", "expiry_date", "decision_date"])
+    return base_legacy.merge(
+        prn_legacy,
         left_on=["ticker", "threshold", "expiry_date", "decision_date"],
         right_on=["ticker", "threshold", "expiry_date", "snapshot_date"],
         how="inner",
+        validate="m:1",
     )
-    return merged
+
+
+def _load_market_quality(out_dir: Path) -> pd.DataFrame:
+    path = out_dir / MARKET_QUALITY_FILENAME
+    if not path.exists():
+        return pd.DataFrame()
+    quality = pd.read_csv(path)
+    if quality.empty:
+        return quality
+    if "market_id" in quality.columns:
+        quality["market_id"] = quality["market_id"].astype(str)
+    if "week_friday" in quality.columns:
+        quality["week_friday"] = pd.to_datetime(quality["week_friday"], errors="coerce").dt.date
+    if "threshold" in quality.columns:
+        quality["threshold"] = pd.to_numeric(quality["threshold"], errors="coerce").round(6)
+    return quality
+
+
+def _attach_market_quality(base: pd.DataFrame, quality: pd.DataFrame) -> pd.DataFrame:
+    if base.empty or quality.empty:
+        return base
+
+    quality_cols = [
+        col
+        for col in quality.columns
+        if col not in {"event_id", "week_monday", "event_endDate", "yes_token_id", "no_token_id"}
+    ]
+    if "market_id" in base.columns and "market_id" in quality.columns and "week_friday" in quality.columns:
+        quality_market = quality[[c for c in quality_cols if c in quality.columns]].copy()
+        quality_market = quality_market.dropna(subset=["market_id", "week_friday"])
+        quality_market = quality_market.sort_values(["market_id", "week_friday"])
+        quality_market = quality_market.drop_duplicates(subset=["market_id", "week_friday"], keep="last")
+        quality_market["market_id"] = quality_market["market_id"].astype(str)
+
+        base_market = base.dropna(subset=["market_id", "expiry_date"]).copy()
+        base_market["market_id"] = base_market["market_id"].astype(str)
+        merged_market = base_market.merge(
+            quality_market,
+            left_on=["market_id", "expiry_date"],
+            right_on=["market_id", "week_friday"],
+            how="left",
+            validate="m:1",
+        )
+        return merged_market
+
+    legacy_allowed = {"ticker", "threshold", "week_friday", *MARKET_QUALITY_EXPLICIT_COLUMNS}
+    quality_legacy = quality[
+        [c for c in quality_cols if c in legacy_allowed or c.startswith("flag_")]
+    ].copy()
+    quality_legacy = quality_legacy.dropna(subset=["ticker", "threshold", "week_friday"])
+    quality_legacy = quality_legacy.sort_values(["ticker", "threshold", "week_friday"])
+    quality_legacy = quality_legacy.drop_duplicates(subset=["ticker", "threshold", "week_friday"], keep="last")
+    return base.merge(
+        quality_legacy,
+        left_on=["ticker", "threshold", "expiry_date"],
+        right_on=["ticker", "threshold", "week_friday"],
+        how="left",
+        validate="m:1",
+    )
 
 
 def _load_pnl_conditions(run_dir: Optional[Path]) -> Optional[pd.DataFrame]:
@@ -613,13 +709,51 @@ def _build_label_map(dim_market: pd.DataFrame, pnl: Optional[pd.DataFrame], posi
     return label_map
 
 
-def _write_feature_manifest(df: pd.DataFrame, out_dir: Path) -> Path:
+def _detect_prn_source(prn_path: Optional[Path]) -> str:
+    if prn_path is None:
+        return LEGACY_PRN_SOURCE
+    if prn_path.parent.name == RUN_LOCAL_PRN_DIRNAME:
+        return RUN_LOCAL_PRN_SOURCE
+    return LEGACY_PRN_SOURCE
+
+
+def _find_run_local_prn_training_file(run_dir: Path) -> Optional[Path]:
+    prn_dir = run_dir / RUN_LOCAL_PRN_DIRNAME
+    target = prn_dir / f"training-{run_dir.name}-prn.csv"
+    if target.exists():
+        return target
+    candidates = sorted(prn_dir.glob("training-*.csv")) if prn_dir.exists() else []
+    return candidates[0] if candidates else None
+
+
+def _resolve_prn_dataset_path(cfg: Config) -> Optional[Path]:
+    if cfg.prn_dataset is not None and cfg.prn_dataset.exists():
+        return cfg.prn_dataset
+    local_prn = _find_run_local_prn_training_file(cfg.out_dir)
+    if local_prn is not None and local_prn.exists():
+        return local_prn
+    latest = find_latest_prn_dataset()
+    if latest is not None and latest.exists():
+        return latest
+    return None
+
+
+def _write_feature_manifest(df: pd.DataFrame, out_dir: Path, *, prn_path: Optional[Path]) -> Path:
     feature_cols = [c for c in df.columns if c.startswith("pm_") or c in PRN_COL_CANDIDATES]
+    prn_meta_cols = [c for c in PRN_META_CANDIDATES if c in df.columns]
+    quality_flag_cols = [c for c in df.columns if c.startswith("flag_")]
+    quality_cols = [c for c in MARKET_QUALITY_EXPLICIT_COLUMNS if c in df.columns]
+    quality_cols += [c for c in quality_flag_cols if c not in quality_cols]
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "created_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "decision_time_col": "timestamp_utc",
         "label_col": "label",
+        "prn_source": _detect_prn_source(prn_path),
+        "prn_dataset_path": str(prn_path) if prn_path is not None else None,
+        "prn_meta_columns": prn_meta_cols,
+        "quality_columns": quality_cols,
+        "quality_flag_columns": quality_flag_cols,
         "features": feature_cols,
         "categorical_features": ["ticker"],
         "numeric_features": [c for c in feature_cols if c not in {"ticker"}],
@@ -653,9 +787,15 @@ def _write_features_file(df: pd.DataFrame, out_dir: Path, prefer_path: Optional[
         return features_path
 
 
-def _write_outputs(df: pd.DataFrame, out_dir: Path, prefer_path: Optional[Path] = None) -> Tuple[Path, Path]:
+def _write_outputs(
+    df: pd.DataFrame,
+    out_dir: Path,
+    prefer_path: Optional[Path] = None,
+    *,
+    prn_path: Optional[Path] = None,
+) -> Tuple[Path, Path]:
     features_path = _write_features_file(df, out_dir, prefer_path)
-    manifest_path = _write_feature_manifest(df, out_dir)
+    manifest_path = _write_feature_manifest(df, out_dir, prn_path=prn_path)
     return features_path, manifest_path
 
 
@@ -752,7 +892,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dim-market", type=str, default=str(DEFAULT_DIM_PATH), help="dim_market path.")
     parser.add_argument("--bars-dir", type=str, default=str(DEFAULT_BARS_DIR), help="bars directory.")
     parser.add_argument("--out-dir", type=str, default=str(DEFAULT_OUT_DIR), help="Output directory.")
-    parser.add_argument("--prn-dataset", type=str, default=None, help="Path to pRN dataset CSV.")
+    parser.add_argument(
+        "--prn-dataset",
+        type=str,
+        default=None,
+        help="Optional pRN dataset CSV. Defaults to the run-local prn_dataset/training-*-prn.csv file.",
+    )
     parser.add_argument("--decision-freq", type=str, default="1d", help="Decision freq (daily only, use 1d).")
     parser.add_argument("--spread-bps", type=float, default=200.0, help="Spread proxy bps for bid/ask.")
     parser.add_argument("--vol-window", type=int, default=24, help="Volatility rolling window (bars).")
@@ -834,9 +979,9 @@ def main() -> None:
         stats.increment_count("dim_market_rows", len(dim_market))
     _progress(1, "dim_market_loaded", "dim_market")
 
-    prn_path = cfg.prn_dataset or find_latest_prn_dataset()
+    prn_path = _resolve_prn_dataset_path(cfg)
     if prn_path is None or not prn_path.exists():
-        raise ValueError("pRN dataset is required. Provide --prn-dataset.")
+        raise ValueError("No pRN dataset found. Expected a run-local training file or explicit --prn-dataset.")
 
     user_start = pd.to_datetime(cfg.start_date).date() if cfg.start_date else None
     user_end = pd.to_datetime(cfg.end_date).date() if cfg.end_date else None
@@ -900,7 +1045,27 @@ def main() -> None:
             f"pRN: {prn_min} -> {prn_max}."
         )
 
-    if cfg.bars_dir == DEFAULT_BARS_DIR and DEFAULT_BARS_HISTORY_DIR.exists():
+    run_local_bars_history_dir = cfg.out_dir / "bars_history"
+    if cfg.bars_dir == DEFAULT_BARS_DIR and run_local_bars_history_dir.exists():
+        print(f"[features] Using run-local bars_history for daily freq: {run_local_bars_history_dir}")
+        cfg = Config(
+            dim_market_path=cfg.dim_market_path,
+            bars_dir=run_local_bars_history_dir,
+            out_dir=cfg.out_dir,
+            prn_dataset=cfg.prn_dataset,
+            decision_freq=cfg.decision_freq,
+            spread_bps=cfg.spread_bps,
+            vol_window=cfg.vol_window,
+            vol_min=cfg.vol_min,
+            start_date=cfg.start_date,
+            end_date=cfg.end_date,
+            fail_on_leak=cfg.fail_on_leak,
+            prn_asof_tz=cfg.prn_asof_tz,
+            prn_asof_close_time=cfg.prn_asof_close_time,
+            profile=cfg.profile,
+            profile_output=cfg.profile_output,
+        )
+    elif cfg.bars_dir == DEFAULT_BARS_DIR and DEFAULT_BARS_HISTORY_DIR.exists():
         print(f"[features] Using bars_history for daily freq: {DEFAULT_BARS_HISTORY_DIR}")
         cfg = Config(
             dim_market_path=cfg.dim_market_path,
@@ -1002,6 +1167,11 @@ def main() -> None:
             "Check ticker/threshold/expiry alignment."
         )
 
+    market_quality = _load_market_quality(cfg.out_dir)
+    if not market_quality.empty:
+        with ProfileContext(stats, "attach_market_quality"):
+            base = _attach_market_quality(base, market_quality)
+
     with ProfileContext(stats, "fetch_labels"):
         pnl = _load_pnl_conditions(Path(args.pnl_run_dir)) if args.pnl_run_dir else None
         positions = _load_positions(Path(args.positions_run_dir)) if args.positions_run_dir else None
@@ -1070,7 +1240,12 @@ def main() -> None:
             print("[features] append mode: no existing decision_features found; writing fresh output.")
 
     with ProfileContext(stats, "write_outputs"):
-        features_path, manifest_path = _write_outputs(base, cfg.out_dir, prefer_path)
+        features_path, manifest_path = _write_outputs(
+            base,
+            cfg.out_dir,
+            prefer_path,
+            prn_path=prn_path,
+        )
     _progress(6, "outputs_written", "write_outputs")
 
     print("[features] rows=", len(base))

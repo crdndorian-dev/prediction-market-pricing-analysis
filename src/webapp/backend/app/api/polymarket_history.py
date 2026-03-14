@@ -10,6 +10,7 @@ from app.models.polymarket_history import (
     PolymarketRunFeaturesRequest,
     PolymarketRunFeaturesResponse,
 )
+from app.models.polymarket_quality import PolymarketQualityAuditResponse
 from app.services.polymarket_history import (
     get_polymarket_history_job,
     run_polymarket_history,
@@ -24,8 +25,15 @@ from app.services.polymarket_history import (
     get_runs_storage_summary,
     get_latest_pointer,
     get_pipeline_run_file_path,
+    get_pipeline_run_artifact_file_path,
     get_run_csv_preview,
+    get_run_artifact_csv_preview,
+    get_run_master_bar_file_path,
+    get_run_master_bar_csv_preview,
+    get_master_bar_file_path,
+    get_master_bar_csv_preview,
     build_run_decision_features,
+    get_run_quality_audit,
 )
 from app.services.job_guard import ensure_no_active_jobs
 
@@ -127,9 +135,52 @@ def get_run_file(run_id: str, filename: str = Query(...)) -> FileResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     media_type = "text/csv" if file_path.suffix.lower() == ".csv" else "application/octet-stream"
     return FileResponse(file_path, media_type=media_type, filename=file_path.name)
+
+
+@router.get("/runs/{run_id}/artifacts/file")
+def get_run_artifact_file(run_id: str, path: str = Query(...)) -> FileResponse:
+    try:
+        file_path = get_pipeline_run_artifact_file_path(run_id, path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    media_type = "text/csv" if file_path.suffix.lower() == ".csv" else "application/octet-stream"
+    return FileResponse(file_path, media_type=media_type, filename=file_path.name)
+
+
+@router.get("/master-bars/{freq}/file")
+def get_master_bar_file(freq: str) -> FileResponse:
+    try:
+        file_path = get_master_bar_file_path(freq)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return FileResponse(file_path, media_type="text/csv", filename=file_path.name)
+
+
+@router.get("/runs/{run_id}/master-bars/{freq}/file")
+def get_run_master_bar_file(run_id: str, freq: str) -> FileResponse:
+    try:
+        file_path = get_run_master_bar_file_path(run_id, freq)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return FileResponse(file_path, media_type="text/csv", filename=file_path.name)
 
 
 @router.get("/runs/{run_id}/csv-preview/{filename}")
@@ -146,6 +197,64 @@ def get_run_csv_preview_endpoint(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/artifacts/csv-preview")
+def get_run_artifact_csv_preview_endpoint(
+    run_id: str,
+    path: str = Query(...),
+    limit: int = 20,
+    mode: Literal["head", "tail"] = Query("head"),
+) -> Dict[str, Any]:
+    try:
+        return get_run_artifact_csv_preview(run_id, path, limit=limit, mode=mode)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/quality-audit", response_model=PolymarketQualityAuditResponse)
+def get_run_quality_audit_endpoint(run_id: str) -> PolymarketQualityAuditResponse:
+    try:
+        return get_run_quality_audit(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/master-bars/{freq}/csv-preview")
+def get_master_bar_csv_preview_endpoint(
+    freq: str,
+    limit: int = 20,
+    mode: Literal["head", "tail"] = Query("head"),
+) -> Dict[str, Any]:
+    try:
+        return get_master_bar_csv_preview(freq, limit=limit, mode=mode)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/master-bars/{freq}/csv-preview")
+def get_run_master_bar_csv_preview_endpoint(
+    run_id: str,
+    freq: str,
+    limit: int = 20,
+    mode: Literal["head", "tail"] = Query("head"),
+) -> Dict[str, Any]:
+    try:
+        return get_run_master_bar_csv_preview(run_id, freq, limit=limit, mode=mode)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/runs/{run_id}/build-features", response_model=PolymarketRunFeaturesResponse)

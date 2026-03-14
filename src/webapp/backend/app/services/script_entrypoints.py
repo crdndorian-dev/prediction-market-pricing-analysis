@@ -28,6 +28,10 @@ OPTION_CHAIN_DATASET_SCRIPT = _entrypoint(
     "option-chain-build-historic-dataset.py",
     "Option-chain historic dataset builder",
 )
+OPTION_CHAIN_CLEANUP_SCRIPT = _entrypoint(
+    "option-chain-clean-training-dataset.py",
+    "Option-chain training dataset cleanup",
+)
 CALIBRATE_MODEL_SCRIPT = _entrypoint(
     "calibrate-logit-model.py",
     "Calibration model trainer",
@@ -56,9 +60,14 @@ POLYMARKET_MARKETS_REFRESH_SCRIPT = _entrypoint(
     "polymarket-markets-refresh.py",
     "Polymarket markets refresh pipeline",
 )
+POLYMARKET_RUN_PRN_REFRESH_SCRIPT = _entrypoint(
+    "polymarket-run-prn-refresh.py",
+    "Polymarket run-local pRN refresh",
+)
 
 CANONICAL_SCRIPT_ENTRYPOINTS = (
     OPTION_CHAIN_DATASET_SCRIPT,
+    OPTION_CHAIN_CLEANUP_SCRIPT,
     CALIBRATE_MODEL_SCRIPT,
     AUTO_CALIBRATE_MODEL_SCRIPT,
     POLYMARKET_WEEKLY_HISTORY_SCRIPT,
@@ -66,4 +75,5 @@ CANONICAL_SCRIPT_ENTRYPOINTS = (
     POLYMARKET_MARKET_MAP_SCRIPT,
     POLYMARKET_FETCH_SNAPSHOT_SCRIPT,
     POLYMARKET_MARKETS_REFRESH_SCRIPT,
+    POLYMARKET_RUN_PRN_REFRESH_SCRIPT,
 )

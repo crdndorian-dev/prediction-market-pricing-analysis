@@ -155,7 +155,6 @@ export type CalibrateModelRunRequest = {
   autoDropNearConstant?: boolean;
   randomState?: number;
   metricsTopTickers?: number;
-  enableXAbsM?: boolean;
   groupReweight?: "none" | "chain" | "chain_snapshot";
   maxAbsLogm?: number;
   dropPrnExtremes?: boolean;
@@ -440,7 +439,6 @@ export async function runCalibration(
       auto_drop_near_constant: payload.autoDropNearConstant,
       metrics_top_tickers: payload.metricsTopTickers,
       random_state: payload.randomState,
-      enable_x_abs_m: payload.enableXAbsM,
       group_reweight: payload.groupReweight,
       max_abs_logm: payload.maxAbsLogm,
       drop_prn_extremes: payload.dropPrnExtremes,
@@ -553,7 +551,6 @@ export type AutoSearchConfig = {
   tradingUniverseUpweight: number[];
   foundationWeight: number[];
   tickerIntercepts: Array<"off" | "on">;
-  allowRiskyFeatures?: boolean;
   advancedInteractions?: boolean;
   maxTrials?: number;
   selectionRule?: "one_se" | "epsilon";
@@ -643,7 +640,6 @@ export async function runAutoModelSelection(
             trading_universe_upweight: payload.search.tradingUniverseUpweight,
             foundation_weight: payload.search.foundationWeight,
             ticker_intercepts: payload.search.tickerIntercepts,
-            allow_risky_features: payload.search.allowRiskyFeatures,
             advanced_interactions: payload.search.advancedInteractions,
             max_trials: payload.search.maxTrials,
             selection_rule: payload.search.selectionRule,
@@ -747,7 +743,6 @@ const serializeCalibrationPayload = (payload: CalibrateModelRunRequest) => ({
   auto_drop_near_constant: payload.autoDropNearConstant,
   metrics_top_tickers: payload.metricsTopTickers,
   random_state: payload.randomState,
-  enable_x_abs_m: payload.enableXAbsM,
   group_reweight: payload.groupReweight,
   max_abs_logm: payload.maxAbsLogm,
   drop_prn_extremes: payload.dropPrnExtremes,
@@ -854,7 +849,6 @@ export async function startAutoCalibrationJob(
             trading_universe_upweight: payload.search.tradingUniverseUpweight,
             foundation_weight: payload.search.foundationWeight,
             ticker_intercepts: payload.search.tickerIntercepts,
-            allow_risky_features: payload.search.allowRiskyFeatures,
             advanced_interactions: payload.search.advancedInteractions,
             max_trials: payload.search.maxTrials,
             selection_rule: payload.search.selectionRule,
@@ -1114,9 +1108,20 @@ export type RegimeInfo = {
   is_daily: boolean | null;
 };
 
+export type SelectableFeatureDescriptor = {
+  name: string;
+  label: string;
+  kind: "numeric" | "categorical";
+  group: string;
+  order: number;
+  default_selected: boolean;
+  mutex_group?: string | null;
+};
+
 export type DatasetFeaturesResponse = {
   dataset: string;
   available_columns: string[];
+  selectable_features: SelectableFeatureDescriptor[];
   feature_stats: Record<string, FeatureStat>;
   regime_info: RegimeInfo;
 };

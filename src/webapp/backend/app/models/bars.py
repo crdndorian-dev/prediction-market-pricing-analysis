@@ -1,6 +1,8 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 
+from app.models.polymarket_quality import PolymarketMarketQuality
+
 
 class BarsRequest(BaseModel):
     """Request parameters for fetching bar history data."""
@@ -83,6 +85,7 @@ class StrikeSeries(BaseModel):
     midprice_cluster_ratio: Optional[float] = Field(None, description="Fraction of bars with price in [0.40, 0.60] — high values suggest empty orderbook")
     max_jump: Optional[float] = Field(None, description="Largest single-bar price jump (absolute)")
     quality: Optional[str] = Field(None, description="Quality tier: good, low_volume, suspect, or stale")
+    market_quality: Optional[PolymarketMarketQuality] = None
 
 
 class ByStrikeResponse(BaseModel):

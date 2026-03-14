@@ -30,6 +30,27 @@ PRN_COL_CANDIDATES = [
     "dividend_yield",
 ]
 
+PRN_OPTIONAL_IDENTITY_COLUMNS = [
+    "market_id",
+    "event_id",
+    "week_monday",
+    "week_friday",
+    "event_endDate",
+]
+
+PRN_OPTIONAL_META_COLUMNS = [
+    "coverage_status",
+    "drop_reason",
+    "rn_method",
+    "theta_quote_source",
+    "option_expiration_used",
+    "prn_config_hash",
+    "prn_version",
+    "schema_version",
+    "prn_quality_issue_count",
+    "prn_quality_bucket",
+]
+
 
 def _safe_zoneinfo(tz_name: str) -> ZoneInfo:
     try:
@@ -264,6 +285,8 @@ def load_prn_dataset(
         usecols = {"ticker", "K", expiry_col}
         usecols.update(asof_cols)
         usecols.update([c for c in PRN_COL_CANDIDATES if c in cols])
+        usecols.update([c for c in PRN_OPTIONAL_IDENTITY_COLUMNS if c in cols])
+        usecols.update([c for c in PRN_OPTIONAL_META_COLUMNS if c in cols])
     else:
         expiry_col = None
         usecols = None
@@ -331,6 +354,9 @@ def load_prn_dataset(
         return df
 
     keep_cols = ["ticker", "threshold", "expiry_date", "asof_time", "snapshot_date"]
+    for col in PRN_OPTIONAL_IDENTITY_COLUMNS + PRN_OPTIONAL_META_COLUMNS:
+        if col in df.columns:
+            keep_cols.append(col)
     for col in PRN_COL_CANDIDATES:
         if col in df.columns:
             keep_cols.append(col)
@@ -338,9 +364,13 @@ def load_prn_dataset(
     df = df[keep_cols]
     df = df.dropna(subset=["ticker", "threshold", "expiry_date", "asof_time"])
 
-    key_cols = ["ticker", "threshold", "expiry_date", "snapshot_date"]
+    key_cols = (
+        ["market_id", "snapshot_date"]
+        if "market_id" in df.columns
+        else ["ticker", "threshold", "expiry_date", "snapshot_date"]
+    )
     if not df.empty and df.duplicated(subset=key_cols).any():
-        print("[WARN] pRN dataset has duplicate rows for the same (ticker, threshold, expiry_date, snapshot_date).")
+        print(f"[WARN] pRN dataset has duplicate rows for the same {tuple(key_cols)}.")
         df = df.sort_values(key_cols + ["asof_time"]).drop_duplicates(subset=key_cols, keep="last")
 
     return df

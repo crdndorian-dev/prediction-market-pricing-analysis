@@ -109,7 +109,7 @@ export function DatasetJobProvider({
     };
 
     poll();
-    const id = setInterval(poll, 2000);
+    const id = setInterval(poll, 1000);
     return () => {
       cancelled = true;
       clearInterval(id);

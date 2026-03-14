@@ -28,13 +28,13 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-if str(REPO_ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT / "src"))
+from support.script_paths import REPO_ROOT, SCRIPTS_ROOT, SRC_ROOT, prepend_sys_path
 
-from calibration.calibrate_common import (
+prepend_sys_path(REPO_ROOT)
+prepend_sys_path(SRC_ROOT)
+prepend_sys_path(SCRIPTS_ROOT)
+
+from support.calibrate_common import (
     EPS,
     FinalModelBundle,
     apply_platt,
@@ -43,20 +43,16 @@ from calibration.calibrate_common import (
     ensure_engineered_features,
     fit_platt_on_logits,
 )
+from support.option_chain_feature_registry import (
+    OPTION_CHAIN_BASE_FEATURE,
+    OPTION_CHAIN_DEFAULT_FEATURES,
+    validate_option_chain_feature_selection,
+)
 
 SCRIPT_VERSION = "v2.0.0"
 
 # Default feature sets
-DEFAULT_PRN_FEATURES = [
-    "pRN",
-    "x_logit_prn",
-    "log_m_fwd",
-    "abs_log_m_fwd",
-    "T_days",
-    "rv20",
-    "rv20_sqrtT",
-    "rel_spread_median",
-]
+DEFAULT_PRN_FEATURES = list(OPTION_CHAIN_DEFAULT_FEATURES)
 PRN_ASOF_DATE_CANDIDATES = ["asof_date", "asof_target", "asof_ts", "asof_time", "asof_datetime"]
 PRN_EXPIRY_CANDIDATES = ["expiry_close_date_used", "option_expiration_used", "option_expiration_requested", "expiry_date"]
 PRN_STRIKE_CANDIDATES = ["K", "threshold"]
@@ -108,6 +104,38 @@ class RunResult:
     exit_code: int
     out_dir: Path
     metrics_rows: List[Dict[str, Any]]
+
+
+def _resolve_requested_feature_lists(
+    args: argparse.Namespace,
+    available_columns: List[str],
+    *,
+    numeric_features: Optional[List[str]] = None,
+    categorical_features: Optional[List[str]] = None,
+) -> Tuple[List[str], List[str]]:
+    if numeric_features is None:
+        numeric_features = [f.strip() for f in str(args.features).split(",") if f.strip()]
+    else:
+        numeric_features = [f.strip() for f in numeric_features if str(f).strip()]
+    if not numeric_features:
+        numeric_features = list(OPTION_CHAIN_DEFAULT_FEATURES)
+    elif OPTION_CHAIN_BASE_FEATURE not in numeric_features:
+        numeric_features = [OPTION_CHAIN_BASE_FEATURE, *numeric_features]
+
+    if categorical_features is None:
+        categorical_features = [
+            f.strip()
+            for f in (args.categorical_features or "").split(",")
+            if f.strip() and f.strip().lower() not in {"none", "null", "false"}
+        ]
+    else:
+        categorical_features = [f.strip() for f in categorical_features if str(f).strip()]
+
+    return validate_option_chain_feature_selection(
+        numeric_features=numeric_features,
+        categorical_features=categorical_features,
+        available_columns=available_columns,
+    )
 
 
 def _file_fingerprint(path: Path) -> Dict[str, Any]:
@@ -740,7 +768,6 @@ def _apply_config_json_overrides(args: argparse.Namespace, payload: Dict[str, An
         ("strict_args", "strict_args"),
         ("add_interactions", "add_interactions"),
         ("drop_prn_extremes", "drop_prn_extremes"),
-        ("enable_x_abs_m", "enable_x_abs_m"),
         ("ticker_x_interactions", "ticker_x_interactions"),
         ("group_equalization", "group_equalization"),
         ("split_timeline", "split_timeline"),
@@ -884,7 +911,6 @@ def _canonicalize_arg_value(attr: str, value: Any) -> Any:
         "strict_args",
         "add_interactions",
         "drop_prn_extremes",
-        "enable_x_abs_m",
         "ticker_x_interactions",
         "group_equalization",
         "split_timeline",
@@ -1007,7 +1033,6 @@ def _collect_requested_arg_expectations(payload: Dict[str, Any]) -> Dict[str, Di
         ("strict_args", "strict_args"),
         ("add_interactions", "add_interactions"),
         ("drop_prn_extremes", "drop_prn_extremes"),
-        ("enable_x_abs_m", "enable_x_abs_m"),
         ("ticker_x_interactions", "ticker_x_interactions"),
         ("group_equalization", "group_equalization"),
         ("split_timeline", "split_timeline"),
@@ -1961,21 +1986,12 @@ def build_calibration_cache(
         fast_trial = bool(getattr(args, "fast_trial", False))
     fast_trial = bool(fast_trial)
 
-    # Parse feature lists (for engineered feature prep only).
-    if numeric_features is None:
-        numeric_features = [f.strip() for f in str(args.features).split(",") if f.strip()]
-    else:
-        numeric_features = [f.strip() for f in numeric_features if str(f).strip()]
-    if bool(getattr(args, "enable_x_abs_m", False)) and "x_abs_m" not in numeric_features:
-        numeric_features.append("x_abs_m")
-    if categorical_features is None:
-        categorical_features = [
-            f.strip()
-            for f in (args.categorical_features or "").split(",")
-            if f.strip() and f.strip().lower() not in {"none", "null", "false"}
-        ]
-    else:
-        categorical_features = [f.strip() for f in categorical_features if str(f).strip()]
+    numeric_features, categorical_features = _resolve_requested_feature_lists(
+        args,
+        list(df.columns),
+        numeric_features=numeric_features,
+        categorical_features=categorical_features,
+    )
 
     ticker_col = args.ticker_col
     foundation_set = {t.strip().upper() for t in str(args.foundation_tickers).split(",") if t.strip()}
@@ -2408,15 +2424,10 @@ def run_calibration_from_cache(
     walk_forward_folds = cache.walk_forward_folds
     val_split_info = cache.val_split_info
 
-    numeric_features = [f.strip() for f in str(args.features).split(",") if f.strip()]
-    if bool(getattr(args, "enable_x_abs_m", False)) and "x_abs_m" not in numeric_features:
-        numeric_features.append("x_abs_m")
-    enable_x_abs_m_effective = "x_abs_m" in numeric_features
-    categorical_features = [
-        f.strip()
-        for f in (args.categorical_features or "").split(",")
-        if f.strip() and f.strip().lower() not in {"none", "null", "false"}
-    ]
+    numeric_features, categorical_features = _resolve_requested_feature_lists(
+        args,
+        list(train_df.columns),
+    )
 
     train_df = cache.train_df
     test_df = cache.test_df
@@ -3356,7 +3367,6 @@ def run_calibration_from_cache(
         "filters": active_filters,
         "optional_filters": active_filters,
         "group_reweight": group_reweight_mode,
-        "enable_x_abs_m": enable_x_abs_m_effective,
         "ticker_x_interactions": bool(args.ticker_x_interactions),
         "ticker_interaction_cols": interaction_cols_added,
         "n_bins": n_bins,
@@ -3541,11 +3551,7 @@ def _build_calibration_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--features",
-        default=(
-            "x_logit_prn,log_m_fwd,abs_log_m_fwd,"
-            "rv20,rv20_sqrtT,log_m_fwd_over_volT,log_rel_spread,"
-            "had_fallback,had_intrinsic_drop,had_band_clip,prn_raw_gap,dividend_yield"
-        ),
+        default=",".join(OPTION_CHAIN_DEFAULT_FEATURES),
     )
     parser.add_argument("--categorical-features", default="")
     parser.add_argument("--target-col", default=None)
@@ -3616,7 +3622,6 @@ def _build_calibration_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prn-eps", type=float, default=None)
     parser.add_argument("--prn-below", type=float, default=None)
     parser.add_argument("--prn-above", type=float, default=None)
-    parser.add_argument("--enable-x-abs-m", action="store_true")
     parser.add_argument("--auto-drop-near-constant", action="store_true")
     parser.add_argument("--no-auto-drop-near-constant", action="store_true")
     parser.add_argument("--fallback-to-baseline-if-worse", action="store_true")

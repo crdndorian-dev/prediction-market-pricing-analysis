@@ -166,8 +166,10 @@ class DatasetRunResponse(BaseModel):
     ok: bool
     out_dir: str
     out_name: str
+    run_dir: Optional[str] = None
     output_file: Optional[str]
     drops_file: Optional[str]
+    training_file: Optional[str] = None
     stdout: str
     stderr: str
     duration_s: float
@@ -206,6 +208,50 @@ class DatasetBackfillResponse(BaseModel):
     duration_s: float
 
 
+class DatasetCleanupCriteria(BaseModel):
+    quality_buckets: List[Literal["clean", "watch", "noisy"]] = Field(
+        default_factory=lambda: ["noisy"],
+    )
+    min_quality_issue_count: Optional[int] = 3
+    flag_columns: List[str] = Field(default_factory=list)
+    flag_match_mode: Optional[Literal["any", "all"]] = "any"
+    min_rel_spread_median: Optional[float] = None
+    max_n_chain_used: Optional[float] = None
+
+
+class DatasetCleanupRequest(BaseModel):
+    run_dir: str = Field(..., description="Option chain dataset run directory.")
+    criteria: DatasetCleanupCriteria = Field(
+        default_factory=DatasetCleanupCriteria,
+        description="Rules used to drop noisy rows from the selected training dataset.",
+    )
+    allow_defaults: bool = Field(
+        default=False,
+        description="Allow cleanup to use default weighting settings when build metadata is missing.",
+    )
+
+
+class DatasetCleanupPreviewResponse(BaseModel):
+    run_dir: str
+    training_file: str
+    rows_before: int
+    rows_to_drop: int
+    rows_after: int
+    drop_share: float
+    used_defaults: bool = False
+    would_drop_all: bool = False
+    dropped_bucket_counts: Dict[str, int] = Field(default_factory=dict)
+    matched_flag_counts: List["DatasetAuditFlagSummary"] = Field(default_factory=list)
+    sample_rows: List["DatasetAuditRow"] = Field(default_factory=list)
+    message: str
+
+
+class DatasetCleanupResponse(DatasetCleanupPreviewResponse):
+    ok: bool
+    cleaned_run_dir: str
+    cleaned_file: str
+
+
 class DatasetFileSummary(BaseModel):
     name: str
     path: str
@@ -221,6 +267,8 @@ class DatasetRunSummary(BaseModel):
     training_file: Optional[DatasetFileSummary] = None
     files: List[DatasetFileSummary] = Field(default_factory=list)
     last_modified: Optional[str]
+    status: Literal["ready", "creating"] = "ready"
+    job_id: Optional[str] = None
 
 
 class DatasetRunRenameRequest(BaseModel):
@@ -245,6 +293,150 @@ class DatasetPreviewResponse(BaseModel):
     limit: int
 
 
+class DatasetAuditFlagSummary(BaseModel):
+    name: str
+    count: int
+    share: float
+
+
+class DatasetAuditDistribution(BaseModel):
+    name: str
+    min: Optional[float] = None
+    p05: Optional[float] = None
+    p50: Optional[float] = None
+    p95: Optional[float] = None
+    max: Optional[float] = None
+
+
+class DatasetAuditTickerSummary(BaseModel):
+    ticker: str
+    row_count: int
+    snapshot_count: Optional[int] = None
+    avg_issue_count: Optional[float] = None
+    flagged_share: Optional[float] = None
+    fallback_share: Optional[float] = None
+    wide_spread_share: Optional[float] = None
+    clean_share: Optional[float] = None
+    watch_share: Optional[float] = None
+    noisy_share: Optional[float] = None
+
+
+class DatasetAuditTimelinePoint(BaseModel):
+    asof_date: str
+    row_count: int
+    snapshot_count: Optional[int] = None
+    avg_issue_count: Optional[float] = None
+    flagged_share: Optional[float] = None
+
+
+class DatasetAuditRow(BaseModel):
+    row_id: Optional[str] = None
+    ticker: Optional[str] = None
+    asof_date: Optional[str] = None
+    expiry_date: Optional[str] = None
+    K: Optional[float] = None
+    pRN: Optional[float] = None
+    quality_issue_count: Optional[float] = None
+    rel_spread_median: Optional[float] = None
+    n_chain_used: Optional[float] = None
+    flags: List[str] = Field(default_factory=list)
+
+
+class DatasetAuditHeatmapCell(BaseModel):
+    ticker: str
+    asof_date: str
+    row_count: int
+    flagged_share: Optional[float] = None
+    avg_issue_count: Optional[float] = None
+    quality_bucket: Optional[str] = None
+
+
+class DatasetAuditRvBucketSummary(BaseModel):
+    label: Literal["low", "mid", "high"]
+    value_min: Optional[float] = None
+    value_max: Optional[float] = None
+    row_count: int
+    row_share: Optional[float] = None
+    avg_issue_count: Optional[float] = None
+    flagged_share: Optional[float] = None
+
+
+class DatasetAuditRvFeatureAudit(BaseModel):
+    feature: str
+    finite_row_count: int
+    finite_row_share: Optional[float] = None
+    buckets: List[DatasetAuditRvBucketSummary] = Field(default_factory=list)
+
+
+class DatasetRowDetailResponse(BaseModel):
+    file: DatasetFileSummary
+    row_id: str
+    row: Dict[str, Optional[str]]
+
+
+class DatasetAuditResponse(BaseModel):
+    file: DatasetFileSummary
+    row_count: int
+    column_count: int
+    ticker_count: Optional[int] = None
+    snapshot_count: Optional[int] = None
+    group_count: Optional[int] = None
+    date_start: Optional[str] = None
+    date_end: Optional[str] = None
+    expiry_start: Optional[str] = None
+    expiry_end: Optional[str] = None
+    available_rv_features: List[str] = Field(default_factory=list)
+    available_quality_flags: List[str] = Field(default_factory=list)
+    quality_flags: List[DatasetAuditFlagSummary] = Field(default_factory=list)
+    numeric_distributions: List[DatasetAuditDistribution] = Field(default_factory=list)
+    rv_feature_audit: List[DatasetAuditRvFeatureAudit] = Field(default_factory=list)
+    top_problem_tickers: List[DatasetAuditTickerSummary] = Field(default_factory=list)
+    timeline: List[DatasetAuditTimelinePoint] = Field(default_factory=list)
+    heatmap_dates: List[str] = Field(default_factory=list)
+    heatmap_cells: List[DatasetAuditHeatmapCell] = Field(default_factory=list)
+    noisiest_rows: List[DatasetAuditRow] = Field(default_factory=list)
+
+
+class DatasetJobGroupChecks(BaseModel):
+    asof_close_fallback: int = 0
+    expiry_close_fallback: int = 0
+    expiry_saturday_fallback: int = 0
+    quote_close_fallback: int = 0
+    low_chain_used: int = 0
+    wide_rel_spread: int = 0
+
+
+class DatasetJobTickerTelemetry(BaseModel):
+    ticker: str
+    completed_jobs: int = 0
+    planned_jobs: int = 0
+    kept_groups: int = 0
+    rows: int = 0
+    issue_count_sum: float = 0
+    flagged_rows: int = 0
+    fallback_rows: int = 0
+    wide_spread_rows: int = 0
+    clean_rows: int = 0
+    watch_rows: int = 0
+    noisy_rows: int = 0
+    drop_reasons: Dict[str, int] = Field(default_factory=dict)
+
+
+class DatasetJobTelemetry(BaseModel):
+    phase: Literal[
+        "planning",
+        "preloading_stock",
+        "preloading_dividends",
+        "building",
+        "finalizing",
+        "writing_outputs",
+        "finished",
+    ] = "planning"
+    drop_reasons: Dict[str, int] = Field(default_factory=dict)
+    group_checks: DatasetJobGroupChecks = Field(default_factory=DatasetJobGroupChecks)
+    tickers: List[DatasetJobTickerTelemetry] = Field(default_factory=list)
+
+
 class DatasetJobProgress(BaseModel):
     done: int
     total: int
@@ -259,9 +451,18 @@ class DatasetJobStatus(BaseModel):
     job_id: str
     status: Literal["queued", "running", "finished", "failed", "cancelled"]
     progress: Optional[DatasetJobProgress]
+    telemetry: Optional[DatasetJobTelemetry] = None
     stdout: List[str]
     stderr: List[str]
     result: Optional[DatasetRunResponse]
     error: Optional[str]
     started_at: Optional[datetime]
     finished_at: Optional[datetime]
+
+
+for _model in (DatasetCleanupPreviewResponse, DatasetCleanupResponse):
+    _rebuild = getattr(_model, "model_rebuild", None)
+    if callable(_rebuild):
+        _rebuild()
+    else:
+        _model.update_forward_refs()

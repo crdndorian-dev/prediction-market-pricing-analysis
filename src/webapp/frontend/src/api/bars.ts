@@ -3,6 +3,7 @@
  */
 
 import { apiFetch } from "./http";
+import type { PolymarketMarketQuality } from "./polymarketHistory";
 
 export type ViewMode = "decision_time" | "full_history";
 
@@ -107,6 +108,7 @@ export interface StrikeSeries {
   midprice_cluster_ratio?: number | null;
   max_jump?: number | null;
   quality?: "good" | "low_volume" | "suspect" | "stale" | null;
+  market_quality?: PolymarketMarketQuality | null;
 }
 
 export interface ByStrikeResponse {

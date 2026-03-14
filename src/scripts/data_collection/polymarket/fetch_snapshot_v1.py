@@ -29,7 +29,7 @@ prepend_sys_path(REPO_ROOT)
 prepend_sys_path(SRC_ROOT)
 prepend_sys_path(SCRIPTS_ROOT)
 
-from calibration.calibrate_common import EPS, _logit
+from support.calibrate_common import EPS, _logit
 from polymarket.snapshot_enrichment import (
     compute_forward_price,
     enrich_snapshot_features,

@@ -95,6 +95,19 @@ const formatLocalLabel = (ms: number): string =>
     minute: "2-digit",
   });
 
+const getMarketQualityBadges = (series: StrikeSeries): string[] => {
+  const quality = series.market_quality;
+  if (!quality) return [];
+  const badges: string[] = [];
+  if (quality.flag_not_relevant) badges.push("Not relevant");
+  if (quality.flag_prn_missing) badges.push("pRN missing");
+  if (quality.flag_pm_no_trade_history) badges.push("No trade");
+  if (quality.flag_pm_no_recent_trade) badges.push("Stale trade");
+  if (quality.flag_pm_stale_prices) badges.push("Stale");
+  if (quality.flag_extreme_otm) badges.push("Extreme OTM");
+  return badges.slice(0, 3);
+};
+
 /** Two-line label for the SVG x-axis tick (displayed in UTC). */
 function formatXTick(ms: number): { weekday: string; dateLine: string } {
   const date = new Date(ms);
@@ -585,6 +598,7 @@ function StrikeCard({
   const prnSourceChip = hasPrnDots
     ? `pRN source: ${overlaySource}`
     : null;
+  const marketQualityBadges = getMarketQualityBadges(series);
 
   return (
     <div className="mdc-wrap">
@@ -649,6 +663,11 @@ function StrikeCard({
           {series.quality === "stale" && (
             <span className="chip chip-warn">Stale prices — {((series.stale_ratio ?? 0) * 100).toFixed(0)}% identical</span>
           )}
+          {marketQualityBadges.map((badge) => (
+            <span key={badge} className="chip chip-warn">
+              {badge}
+            </span>
+          ))}
         </div>
         <div className="mdc-footer-meta">
           {pointsCount.toLocaleString()} pts · Market {series.market_id ?? "--"}
@@ -656,6 +675,38 @@ function StrikeCard({
           {dropped > 0 ? ` · ${dropped} invalid dropped` : ""}
         </div>
       </div>
+      {series.market_quality ? (
+        <div className="strike-quality-card">
+          <div className="strike-quality-card-header">
+            <strong>Market quality</strong>
+            <span>
+              {series.market_quality.quality_bucket ?? "--"} · {series.market_quality.quality_issue_count ?? 0} issues
+            </span>
+          </div>
+          <div className="strike-quality-card-grid">
+            <div>
+              <span className="meta-label">Snapshot</span>
+              <span>{series.market_quality.snapshot_date_used ?? "--"}</span>
+            </div>
+            <div>
+              <span className="meta-label">Coverage</span>
+              <span>{series.market_quality.snapshot_coverage_status ?? "--"}</span>
+            </div>
+            <div>
+              <span className="meta-label">Last trade gap</span>
+              <span>
+                {series.market_quality.hours_since_last_yes_trade != null
+                  ? `${series.market_quality.hours_since_last_yes_trade.toFixed(1)}h`
+                  : "--"}
+              </span>
+            </div>
+            <div>
+              <span className="meta-label">Issue flags</span>
+              <span>{series.market_quality.active_flags.slice(0, 4).join(", ") || "--"}</span>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {series.market_id && (
         <div className="strike-market-meta">
           <span className="strike-market-id-label">
@@ -736,6 +787,11 @@ export default function BacktestsPage() {
 
   // Quality filters
   const [hideSuspect, setHideSuspect] = useState<boolean>(false);
+  const [hideNotRelevant, setHideNotRelevant] = useState<boolean>(false);
+  const [hideNoTrade, setHideNoTrade] = useState<boolean>(false);
+  const [hideStaleMarkets, setHideStaleMarkets] = useState<boolean>(false);
+  const [hidePrnMissing, setHidePrnMissing] = useState<boolean>(false);
+  const [hideExtremeOtm, setHideExtremeOtm] = useState<boolean>(false);
   const [minVolumeFilter, setMinVolumeFilter] = useState<number>(0);
 
   const hasAnyVolume = useMemo(
@@ -744,13 +800,38 @@ export default function BacktestsPage() {
   );
 
   const filteredStrikes = useMemo(() => {
-    if (!hideSuspect && minVolumeFilter <= 0) return availableStrikes;
+    if (
+      !hideSuspect &&
+      !hideNotRelevant &&
+      !hideNoTrade &&
+      !hideStaleMarkets &&
+      !hidePrnMissing &&
+      !hideExtremeOtm &&
+      minVolumeFilter <= 0
+    ) {
+      return availableStrikes;
+    }
     return availableStrikes.filter((s) => {
+      const marketQuality = s.market_quality;
       if (hideSuspect && (s.quality === "low_volume" || s.quality === "suspect" || s.quality === "stale")) return false;
+      if (hideNotRelevant && marketQuality?.flag_not_relevant) return false;
+      if (hideNoTrade && (marketQuality?.flag_pm_no_trade_history || marketQuality?.flag_pm_no_recent_trade)) return false;
+      if (hideStaleMarkets && marketQuality?.flag_pm_stale_prices) return false;
+      if (hidePrnMissing && marketQuality?.flag_prn_missing) return false;
+      if (hideExtremeOtm && marketQuality?.flag_extreme_otm) return false;
       if (minVolumeFilter > 0 && s.gamma_volume != null && s.gamma_volume < minVolumeFilter) return false;
       return true;
     });
-  }, [availableStrikes, hideSuspect, minVolumeFilter]);
+  }, [
+    availableStrikes,
+    hideSuspect,
+    hideNotRelevant,
+    hideNoTrade,
+    hideStaleMarkets,
+    hidePrnMissing,
+    hideExtremeOtm,
+    minVolumeFilter,
+  ]);
 
   const hiddenStrikesCount = availableStrikes.length - filteredStrikes.length;
 
@@ -761,6 +842,30 @@ export default function BacktestsPage() {
     }
     return count;
   }, [availableStrikes]);
+
+  const notRelevantCount = useMemo(
+    () => availableStrikes.filter((s) => s.market_quality?.flag_not_relevant).length,
+    [availableStrikes],
+  );
+  const noTradeCount = useMemo(
+    () =>
+      availableStrikes.filter(
+        (s) => s.market_quality?.flag_pm_no_trade_history || s.market_quality?.flag_pm_no_recent_trade,
+      ).length,
+    [availableStrikes],
+  );
+  const staleMarketCount = useMemo(
+    () => availableStrikes.filter((s) => s.market_quality?.flag_pm_stale_prices).length,
+    [availableStrikes],
+  );
+  const prnMissingCount = useMemo(
+    () => availableStrikes.filter((s) => s.market_quality?.flag_prn_missing).length,
+    [availableStrikes],
+  );
+  const extremeOtmCount = useMemo(
+    () => availableStrikes.filter((s) => s.market_quality?.flag_extreme_otm).length,
+    [availableStrikes],
+  );
 
   const hasHistoryRuns = barRunsStatus === "ready" && barRuns.length > 0;
   const noHistoryRuns = barRunsStatus === "ready" && barRuns.length === 0;
@@ -1303,6 +1408,71 @@ export default function BacktestsPage() {
                         )}
                       </span>
                     </label>
+                    <label className="strike-filter-toggle" title="Hide strikes flagged as not relevant for backtests">
+                      <input
+                        type="checkbox"
+                        checked={hideNotRelevant}
+                        onChange={(e) => setHideNotRelevant(e.target.checked)}
+                      />
+                      <span>
+                        Hide not relevant
+                        {notRelevantCount > 0 && (
+                          <span className="strike-filter-count">{notRelevantCount}</span>
+                        )}
+                      </span>
+                    </label>
+                    <label className="strike-filter-toggle" title="Hide markets with no trade history or no recent trades at the snapshot anchor">
+                      <input
+                        type="checkbox"
+                        checked={hideNoTrade}
+                        onChange={(e) => setHideNoTrade(e.target.checked)}
+                      />
+                      <span>
+                        Hide no trade
+                        {noTradeCount > 0 && (
+                          <span className="strike-filter-count">{noTradeCount}</span>
+                        )}
+                      </span>
+                    </label>
+                    <label className="strike-filter-toggle" title="Hide markets flagged for stale price history">
+                      <input
+                        type="checkbox"
+                        checked={hideStaleMarkets}
+                        onChange={(e) => setHideStaleMarkets(e.target.checked)}
+                      />
+                      <span>
+                        Hide stale
+                        {staleMarketCount > 0 && (
+                          <span className="strike-filter-count">{staleMarketCount}</span>
+                        )}
+                      </span>
+                    </label>
+                    <label className="strike-filter-toggle" title="Hide markets with missing exact pRN coverage">
+                      <input
+                        type="checkbox"
+                        checked={hidePrnMissing}
+                        onChange={(e) => setHidePrnMissing(e.target.checked)}
+                      />
+                      <span>
+                        Hide pRN missing
+                        {prnMissingCount > 0 && (
+                          <span className="strike-filter-count">{prnMissingCount}</span>
+                        )}
+                      </span>
+                    </label>
+                    <label className="strike-filter-toggle" title="Hide extreme out-of-the-money markets">
+                      <input
+                        type="checkbox"
+                        checked={hideExtremeOtm}
+                        onChange={(e) => setHideExtremeOtm(e.target.checked)}
+                      />
+                      <span>
+                        Hide extreme OTM
+                        {extremeOtmCount > 0 && (
+                          <span className="strike-filter-count">{extremeOtmCount}</span>
+                        )}
+                      </span>
+                    </label>
                   </div>
                   <div className="strike-filter-vol">
                     <label htmlFor="min-vol-select" className="strike-filter-vol-label">
@@ -1362,7 +1532,10 @@ export default function BacktestsPage() {
                     {filteredStrikes.map((series) => {
                       const seriesKey = buildStrikeKey(series);
                       const isActive = selectedStrike === seriesKey;
-                      const isSuspect = series.quality !== "good" && series.quality != null;
+                      const marketQualityBadges = getMarketQualityBadges(series);
+                      const isSuspect =
+                        (series.quality !== "good" && series.quality != null) ||
+                        (series.market_quality?.quality_issue_count ?? 0) > 0;
                       const qualityLabel =
                         series.quality === "low_volume" ? "Low Vol"
                         : series.quality === "suspect" ? "Suspect"
@@ -1406,6 +1579,11 @@ export default function BacktestsPage() {
                               {qualityLabel}
                             </span>
                           )}
+                          {marketQualityBadges.map((badge) => (
+                            <span key={badge} className="strike-pill-quality-badge market-quality">
+                              {badge}
+                            </span>
+                          ))}
                         </button>
                       );
                     })}

@@ -21,7 +21,10 @@ BACKTESTS_DIR = DATA_DIR / "analysis" / "backtests"
 SIGNALS_DIR = DATA_DIR / "analysis" / "signals"
 POLYMARKET_MODELS_DIR = MODELS_DIR / "polymarket"
 MIXED_MODELS_DIR = MODELS_DIR / "mixed"
-BARS_DIR = DATA_DIR / "analysis" / "polymarket" / "bars"
+BARS_DIR = DATA_DIR / "analysis" / "polymarket" / "bars_history"
+POLYMARKET_HISTORY_DIR = RAW_DIR / "polymarket" / "weekly_history"
+POLYMARKET_HISTORY_RUNS_DIR = POLYMARKET_HISTORY_DIR / "runs"
+POLYMARKET_HISTORY_LATEST = POLYMARKET_HISTORY_DIR / "latest.json"
 DIM_MARKET_PATHS = (
     POLYMARKET_MODELS_DIR / "dim_market.parquet",
     POLYMARKET_MODELS_DIR / "dim_market.csv",
@@ -262,25 +265,43 @@ def _summarize_market_map() -> Optional[Dict[str, Any]]:
 
 
 def _summarize_bars() -> Optional[Dict[str, Any]]:
-    if not BARS_DIR.exists():
+    latest_pointer = _load_json(POLYMARKET_HISTORY_LATEST) or {}
+    latest_run_id = latest_pointer.get("run_id") if isinstance(latest_pointer, dict) else None
+
+    run_dir: Optional[Path] = None
+    if latest_run_id:
+        candidate = POLYMARKET_HISTORY_RUNS_DIR / str(latest_run_id)
+        if candidate.exists() and candidate.is_dir():
+            run_dir = candidate
+
+    if run_dir is None and POLYMARKET_HISTORY_RUNS_DIR.exists():
+        run_dirs = [item for item in POLYMARKET_HISTORY_RUNS_DIR.iterdir() if item.is_dir()]
+        if run_dirs:
+            run_dir = max(run_dirs, key=lambda item: item.stat().st_mtime)
+
+    if run_dir is None:
+        return None
+
+    bars_dir = run_dir / "bars_history"
+    if not bars_dir.exists():
         return None
     freqs: Dict[str, int] = {}
     latest_mtime: Optional[float] = None
     has_files = False
-    for freq in ["1m", "5m", "1h"]:
-        files = list((BARS_DIR / freq).glob("market_id=*/date=*/bars.csv"))
-        if files:
+    for freq in ["1h", "1d"]:
+        path = bars_dir / f"{freq}.csv"
+        if path.exists():
             has_files = True
-        total = 0
-        for path in files:
-            total += _count_csv_rows(path)
+            freqs[freq] = _count_csv_rows(path)
             if latest_mtime is None or path.stat().st_mtime > latest_mtime:
                 latest_mtime = path.stat().st_mtime
-        freqs[freq] = total
+        else:
+            freqs[freq] = 0
     if not has_files:
         return None
     return {
-        "barsDir": str(BARS_DIR.relative_to(BASE_DIR)),
+        "barsDir": str(bars_dir.relative_to(BASE_DIR)),
+        "runId": run_dir.name,
         "freqs": freqs,
         "lastModified": _iso_from_mtime(latest_mtime) if latest_mtime else None,
     }

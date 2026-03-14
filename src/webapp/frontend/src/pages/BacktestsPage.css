@@ -509,6 +509,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-4);
+  flex-wrap: wrap;
 }
 
 .strike-filter-toggle {
@@ -622,6 +623,46 @@
   border-radius: var(--radius-full);
   background: rgba(255, 179, 0, 0.25);
   color: #b06500;
+}
+
+.strike-pill-quality-badge.market-quality {
+  background: rgba(16, 185, 129, 0.16);
+  color: #0f766e;
+}
+
+.strike-quality-card {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--outline);
+  background: var(--surface-soft);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.strike-quality-card-header {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  font-size: var(--text-sm);
+  color: var(--ink-600);
+}
+
+.strike-quality-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--space-3);
+}
+
+.strike-quality-card-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-700);
 }
 
 /* Spinner */

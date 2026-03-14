@@ -3,10 +3,22 @@
 A local webapp and research pipeline for comparing Polymarket-style binary prices to option-implied benchmarks.
 Run the full data ingestion, calibration, and analysis workflow on your machine with reproducible outputs.
 
-Author : Dorian Cardon  
-Year : 2025-2026  
+## Project team
+
+Replace the collaborator placeholders below with the final details when ready.
+
+**Lead author**  
+Name : Dorian Cardon  
+Role : Project lead  
+Year : 2025-current  
 Contact : crdn.dorian@gmail.com  
 GitHub : https://github.com/crdndorian-dev
+
+**Collaborator**  
+Name : Paul Mieussens 
+Joined : March 2026  
+Contact : 
+GitHub : https://github/paulmatthewmieussens
 
 # Abstract
 
@@ -62,9 +74,13 @@ The project places particular emphasis on dataset design, temporal consistency, 
 - `POLYMARKET_SUBGRAPH_ID`, `ORDERBOOK_SUBGRAPH_ID`, `PNL_SUBGRAPH_ID`, `POLYMARKET_SUBGRAPH_URL`: subgraph routing overrides.
 - `THETA_TERMINAL_CMD`, `THETA_TERMINAL_JAR`, `THETA_TERMINAL_WORKDIR`, `THETA_TERMINAL_CREDS`, `THETA_TERMINAL_LOG`, `THETA_TERMINAL_STARTUP_WAIT`: optional Theta Terminal launcher settings.
 
+# Script layout
+
+- Maintained CLIs live under `src/scripts/entrypoints/`, with implementations grouped by stage under `src/scripts/`.
+- Temporary or one-off scripts are archived under `deadcode/src/scripts/` instead of staying at `src/scripts/` root.
+
 # Future work
 
 Future work includes : 
 - expanding backtests page (right now, no real backtest can be performed).
 - 2-staged hyperparameter search to improve calibration metrics (micro-adjustments of regularization coefficient : after evaluating initial log-spaced C grid and determining best candidate, test points around this value to assess existence of better value of C in surroundings)
-

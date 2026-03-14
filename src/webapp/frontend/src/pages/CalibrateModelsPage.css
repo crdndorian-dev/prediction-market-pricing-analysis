@@ -188,6 +188,13 @@
   gap: var(--space-6);
 }
 
+.calibrate-info-hint {
+  display: block;
+  width: 100%;
+  text-align: center;
+  white-space: nowrap;
+}
+
 .run-mode-toggle {
   display: inline-flex;
   align-items: center;
@@ -245,6 +252,9 @@
   background: var(--surface);
   color: var(--ink-700);
   padding: 0.45rem 0.95rem;
+  font-size: var(--text-base);
+  font-weight: 600;
+  line-height: 1.2;
   margin: 0;
   cursor: pointer;
   user-select: none;
@@ -287,6 +297,27 @@
 
 .dataset-summary-grid > div span:last-child {
   word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.calibrate-info-card-grid > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  justify-content: center;
+}
+
+.calibrate-info-card-grid > div .meta-label,
+.calibrate-info-card-grid > div span:last-child {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.calibrate-info-card-grid-wide {
+  grid-template-columns: repeat(7, minmax(0, 1fr));
 }
 
 .feature-chip-grid {
@@ -1514,6 +1545,19 @@
 
   .calibrate-page .config-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .calibrate-info-hint {
+    white-space: normal;
+  }
+
+  .calibrate-info-card-grid-wide {
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  }
+
+  .calibrate-info-card-grid > div .meta-label,
+  .calibrate-info-card-grid > div span:last-child {
+    white-space: normal;
   }
 }
 

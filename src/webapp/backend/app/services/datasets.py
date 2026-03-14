@@ -13,22 +13,39 @@ import time
 import queue
 import threading
 import logging
+import numpy as np
+import pandas as pd
 from collections import deque
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Set, Tuple
+from typing import Any, Deque, Dict, List, Optional, Sequence, Set, Tuple
 from uuid import uuid4
 from urllib.parse import urlparse
 
 from app.models.datasets import (
+    DatasetAuditDistribution,
+    DatasetAuditFlagSummary,
+    DatasetAuditHeatmapCell,
+    DatasetAuditRvBucketSummary,
+    DatasetAuditRvFeatureAudit,
+    DatasetAuditResponse,
+    DatasetAuditRow,
+    DatasetAuditTickerSummary,
+    DatasetAuditTimelinePoint,
     DatasetBackfillRange,
     DatasetBackfillRequest,
     DatasetBackfillResponse,
+    DatasetCleanupCriteria,
+    DatasetCleanupPreviewResponse,
+    DatasetCleanupRequest,
+    DatasetCleanupResponse,
     DatasetFileSummary,
     DatasetJobProgress,
     DatasetJobStatus,
+    DatasetJobTelemetry,
     DatasetListResponse,
     DatasetPreviewResponse,
+    DatasetRowDetailResponse,
     DatasetRunRequest,
     DatasetRunResponse,
     DatasetRunSummary,
@@ -83,6 +100,23 @@ except Exception:
     drop_weight_columns = None
     WEIGHTING_VERSION = "v3"
 
+from option_chain.quality_flags import counted_quality_flag_columns
+
+try:
+    from dataset_building.option_chain.clean_training_dataset_v1_0 import (
+        CleanupApplyResult as ScriptCleanupApplyResult,
+        CleanupCriteria as ScriptCleanupCriteria,
+        CleanupPreviewResult as ScriptCleanupPreviewResult,
+        apply_cleanup as apply_training_cleanup,
+        build_cleanup_preview as build_training_cleanup_preview,
+    )
+except Exception:
+    ScriptCleanupApplyResult = None
+    ScriptCleanupCriteria = None
+    ScriptCleanupPreviewResult = None
+    apply_training_cleanup = None
+    build_training_cleanup_preview = None
+
 
 def _unique_dirs(paths: List[Path]) -> List[Path]:
     seen = set()
@@ -120,6 +154,13 @@ def _resolve_project_path(path_value: str) -> Path:
     return path
 
 
+def _path_to_api_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(BASE_DIR))
+    except ValueError:
+        return str(path)
+
+
 def _write_build_meta(
     run_dir: Path,
     payload: DatasetRunRequest,
@@ -153,9 +194,16 @@ def _read_build_meta(run_dir: Path) -> Optional[Dict[str, Any]]:
     return payload
 
 
+def _is_cleaned_training_variant(path: Path) -> bool:
+    return bool(
+        path.suffix.lower() == ".csv"
+        and re.search(r"-cleaned(?:-\d+)?$", path.stem, flags=re.IGNORECASE)
+    )
+
+
 def _find_training_file_path(run_dir: Path) -> Optional[Path]:
     for tf in sorted(run_dir.glob("training-*.csv")):
-        if tf.is_file():
+        if tf.is_file() and not _is_cleaned_training_variant(tf):
             return tf
     legacy_target = run_dir / f"{run_dir.name}.csv"
     if legacy_target.exists() and _is_csv_file(legacy_target):
@@ -313,6 +361,142 @@ def _reweight_training_df(df, params: Dict[str, object]):
         trade_focus_beta=float(params["trade_focus_beta"]),
         trade_focus_tickers=params.get("trade_focus_tickers"),
         strict=True,
+    )
+
+
+def _require_cleanup_module() -> None:
+    if (
+        ScriptCleanupCriteria is None
+        or build_training_cleanup_preview is None
+        or apply_training_cleanup is None
+    ):
+        raise RuntimeError("Dataset cleanup script is unavailable.")
+
+
+def _cleanup_criteria_to_script(criteria: DatasetCleanupCriteria) -> ScriptCleanupCriteria:
+    _require_cleanup_module()
+    return ScriptCleanupCriteria(
+        quality_buckets=list(criteria.quality_buckets),
+        min_quality_issue_count=criteria.min_quality_issue_count,
+        flag_columns=list(criteria.flag_columns),
+        flag_match_mode=criteria.flag_match_mode or "any",
+        min_rel_spread_median=criteria.min_rel_spread_median,
+        max_n_chain_used=criteria.max_n_chain_used,
+    )
+
+
+def _resolve_cleanup_weighting_params(
+    run_dir: Path,
+    *,
+    allow_defaults: bool = False,
+) -> Tuple[Dict[str, object], bool]:
+    meta = _read_build_meta(run_dir)
+    base_payload: Optional[DatasetRunRequest] = None
+    meta_cmd: Optional[List[str]] = None
+    used_defaults = False
+
+    if meta and isinstance(meta.get("payload"), dict):
+        try:
+            base_payload = DatasetRunRequest(**meta["payload"])
+        except Exception:
+            base_payload = None
+    if meta and isinstance(meta.get("command"), list):
+        meta_cmd = [str(item) for item in meta["command"]]
+
+    if base_payload is None and meta_cmd is None:
+        if not allow_defaults:
+            raise ValueError(
+                "Dataset build metadata is missing. Enable 'Allow defaults if build metadata is missing' to proceed."
+            )
+        used_defaults = True
+
+    return _resolve_weighting_params(base_payload, meta_cmd), used_defaults
+
+
+def _cleanup_flag_summaries(
+    items: Sequence[object],
+) -> List[DatasetAuditFlagSummary]:
+    summaries: List[DatasetAuditFlagSummary] = []
+    for item in items:
+        name = getattr(item, "name", None)
+        count = getattr(item, "count", None)
+        share = getattr(item, "share", None)
+        if name is None or count is None:
+            continue
+        summaries.append(
+            DatasetAuditFlagSummary(
+                name=str(name),
+                count=int(count),
+                share=round(float(share or 0.0), 6),
+            )
+        )
+    return summaries
+
+
+def _cleanup_sample_rows(
+    items: Sequence[object],
+) -> List[DatasetAuditRow]:
+    rows: List[DatasetAuditRow] = []
+    for item in items:
+        rows.append(
+            DatasetAuditRow(
+                row_id=getattr(item, "row_id", None),
+                ticker=getattr(item, "ticker", None),
+                asof_date=getattr(item, "asof_date", None),
+                expiry_date=getattr(item, "expiry_date", None),
+                K=_safe_float(getattr(item, "K", None)),
+                pRN=_safe_float(getattr(item, "pRN", None)),
+                quality_issue_count=_safe_float(
+                    getattr(item, "quality_issue_count", None)
+                ),
+                rel_spread_median=_safe_float(
+                    getattr(item, "rel_spread_median", None)
+                ),
+                n_chain_used=_safe_float(getattr(item, "n_chain_used", None)),
+                flags=list(getattr(item, "flags", []) or []),
+            )
+        )
+    return rows
+
+
+def _cleanup_preview_response_from_result(
+    run_dir: Path,
+    result: ScriptCleanupPreviewResult,
+) -> DatasetCleanupPreviewResponse:
+    return DatasetCleanupPreviewResponse(
+        run_dir=_path_to_api_path(run_dir),
+        training_file=_path_to_api_path(result.training_path),
+        rows_before=int(result.rows_before),
+        rows_to_drop=int(result.rows_to_drop),
+        rows_after=int(result.rows_after),
+        drop_share=round(float(result.drop_share), 6),
+        used_defaults=bool(result.used_defaults),
+        would_drop_all=bool(result.would_drop_all),
+        dropped_bucket_counts={
+            str(bucket): int(count)
+            for bucket, count in (result.dropped_bucket_counts or {}).items()
+        },
+        matched_flag_counts=_cleanup_flag_summaries(result.matched_flag_counts),
+        sample_rows=_cleanup_sample_rows(result.sample_rows),
+        message=str(result.message),
+    )
+
+
+def _cleanup_apply_response_from_result(
+    run_dir: Path,
+    result: ScriptCleanupApplyResult,
+) -> DatasetCleanupResponse:
+    preview_payload_model = _cleanup_preview_response_from_result(run_dir, result)
+    preview_payload = (
+        preview_payload_model.model_dump()
+        if hasattr(preview_payload_model, "model_dump")
+        else preview_payload_model.dict()
+    )
+    return DatasetCleanupResponse(
+        ok=True,
+        **preview_payload,
+        cleaned_run_dir=_path_to_api_path(result.cleaned_run_dir),
+        cleaned_file=_path_to_api_path(result.cleaned_path),
     )
 
 
@@ -493,6 +677,20 @@ def _to_kebab_case(value: str) -> str:
     return raw.strip('-').lower()
 
 
+def _resolve_output_base_dir(payload: DatasetRunRequest, *, dataset_name: str) -> Path:
+    configured = (payload.out_dir or "").strip()
+    if configured:
+        out_dir = _resolve_project_path(configured)
+    elif dataset_name:
+        out_dir = _resolve_project_path(DEFAULT_OUT_DIR)
+    else:
+        out_name = payload.out_name or DEFAULT_OUT_NAME
+        out_dir = _resolve_project_path(str(Path(DEFAULT_OUT_DIR) / Path(out_name).stem))
+    _find_dataset_base_for_path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
 def _validate_payload(payload: DatasetRunRequest) -> Tuple[str, str]:
     if not SCRIPT_PATH.exists():
         raise RuntimeError(f"Dataset script not found at {SCRIPT_PATH}")
@@ -531,18 +729,13 @@ def _build_dataset_command(payload: DatasetRunRequest) -> Tuple[List[str], Path,
     start_value, end_value = _validate_payload(payload)
 
     dataset_name = _to_kebab_case(payload.dataset_name or "")
-
+    out_dir = _resolve_output_base_dir(payload, dataset_name=dataset_name)
     if dataset_name:
         out_name = f"legacy-{dataset_name}.csv"
         drops_name = f"drops-{dataset_name}.csv"
-        out_dir = _resolve_project_path(DEFAULT_OUT_DIR)
-        out_dir.mkdir(parents=True, exist_ok=True)
     else:
         out_name = payload.out_name or DEFAULT_OUT_NAME
         drops_name = payload.drops_name or f"{Path(out_name).stem}-drops.csv"
-        dataset_dir = Path(DEFAULT_OUT_DIR) / Path(out_name).stem
-        dataset_dir.mkdir(parents=True, exist_ok=True)
-        out_dir = _resolve_project_path(str(dataset_dir))
 
     theta_url = payload.theta_base_url or "http://127.0.0.1:25503/v3"
     _ensure_theta_running(theta_url)
@@ -660,9 +853,18 @@ def _build_run_response(
     duration_s: float,
     command: List[str],
     write_drops: bool,
+    run_dir: Optional[Path] = None,
 ) -> DatasetRunResponse:
-    output_path = out_dir / out_name
-    drops_path = out_dir / drops_name if write_drops else None
+    resolved_run_dir: Optional[Path] = None
+    if run_dir is not None:
+        try:
+            resolved_run_dir = run_dir.resolve()
+        except Exception:
+            resolved_run_dir = run_dir
+    output_base = resolved_run_dir if resolved_run_dir is not None else out_dir
+    output_path = output_base / out_name
+    drops_path = output_base / drops_name if write_drops else None
+    training_path = _find_training_file_path(output_base) if output_base.exists() and output_base.is_dir() else None
     output_file = (
         str(output_path.relative_to(BASE_DIR)) if output_path.exists() else None
     )
@@ -671,13 +873,26 @@ def _build_run_response(
         if drops_path and drops_path.exists()
         else None
     )
+    training_file = (
+        str(training_path.relative_to(BASE_DIR))
+        if training_path and training_path.exists()
+        else None
+    )
+    run_dir_value = None
+    if output_base.exists() and output_base.is_dir():
+        try:
+            run_dir_value = str(output_base.relative_to(BASE_DIR))
+        except Exception:
+            run_dir_value = None
 
     return DatasetRunResponse(
         ok=ok,
         out_dir=str(out_dir.relative_to(BASE_DIR)),
         out_name=out_name,
+        run_dir=run_dir_value,
         output_file=output_file,
         drops_file=drops_file,
+        training_file=training_file,
         stdout=stdout,
         stderr=stderr,
         duration_s=duration_s,
@@ -689,16 +904,47 @@ def _file_summary(path: Path) -> DatasetFileSummary:
     mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
     return DatasetFileSummary(
         name=path.name,
-        path=str(path.relative_to(BASE_DIR)),
+        path=_path_to_api_path(path),
         size_bytes=path.stat().st_size,
         last_modified=mtime,
     )
+
+
+def _isoformat_utc(value: Optional[datetime]) -> Optional[str]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
 
 
 _PROGRESS_RE = re.compile(
     r"\[PROGRESS\]\s+(\d+)\/(\d+)\s+jobs\s+\|\s+groups_kept=(\d+)\s+\|\s+rows=(\d+)\s+\|\s+last=([A-Za-z0-9._-]+)\s+week=([0-9-]+)\s+asof_target=([0-9-]+)"
 )
 _OUT_LINE_RE = re.compile(r"\[OUT\]\s+base=(\S+)\s+run_dir=(\S+)")
+_LIVE_RE = re.compile(r"^\[LIVE\]\s+(\{.*\})$")
+
+
+def _parse_live_telemetry_line(line: str) -> Optional[DatasetJobTelemetry]:
+    match = _LIVE_RE.match(line.strip())
+    if not match:
+        return None
+    try:
+        payload = json.loads(match.group(1))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    validator = getattr(DatasetJobTelemetry, "model_validate", None)
+    if callable(validator):
+        try:
+            return validator(payload)
+        except Exception:
+            return None
+    try:
+        return DatasetJobTelemetry.parse_obj(payload)
+    except Exception:
+        return None
 
 
 def _extract_run_dir_from_output(stdout: str) -> Optional[Path]:
@@ -735,7 +981,7 @@ def _resolve_training_candidate(
 ) -> Optional[Path]:
     # New convention: training-*.csv
     for tf in sorted(run_dir.glob("training-*.csv")):
-        if tf.is_file():
+        if tf.is_file() and not _is_cleaned_training_variant(tf):
             return tf
     # Legacy fallback
     train_view_name = (payload.train_view_name or "train_view.csv").strip() or "train_view.csv"
@@ -819,7 +1065,7 @@ def _select_training_file(
 ) -> Optional[DatasetFileSummary]:
     # New convention: training-*.csv
     for tf in sorted(run_dir.glob("training-*.csv")):
-        if tf.is_file():
+        if tf.is_file() and not _is_cleaned_training_variant(tf):
             return _file_summary(tf)
     # Legacy: {run_dir.name}.csv
     target = run_dir / _training_target_name(run_dir)
@@ -867,10 +1113,21 @@ def _collect_run_files(
     return dataset_file, drops_file, training_file, files
 
 
-def _run_summary_from_dir(run_dir: Path) -> DatasetRunSummary:
-    dataset_file, drops_file, training_file, files = _collect_run_files(run_dir)
-    last_modified = datetime.fromtimestamp(run_dir.stat().st_mtime, tz=timezone.utc).isoformat()
-    relative_path = str(run_dir.relative_to(BASE_DIR))
+def _run_summary_from_dir(
+    run_dir: Path,
+    *,
+    status: str = "ready",
+    job_id: Optional[str] = None,
+    last_modified: Optional[str] = None,
+) -> DatasetRunSummary:
+    dataset_file: Optional[DatasetFileSummary] = None
+    drops_file: Optional[DatasetFileSummary] = None
+    training_file: Optional[DatasetFileSummary] = None
+    files: List[DatasetFileSummary] = []
+    if run_dir.exists() and run_dir.is_dir():
+        dataset_file, drops_file, training_file, files = _collect_run_files(run_dir)
+        last_modified = datetime.fromtimestamp(run_dir.stat().st_mtime, tz=timezone.utc).isoformat()
+    relative_path = _path_to_api_path(run_dir)
     return DatasetRunSummary(
         id=relative_path,
         run_dir=relative_path,
@@ -879,6 +1136,8 @@ def _run_summary_from_dir(run_dir: Path) -> DatasetRunSummary:
         training_file=training_file,
         files=files,
         last_modified=last_modified,
+        status=status,
+        job_id=job_id,
     )
 
 
@@ -912,8 +1171,23 @@ def _iter_run_dirs() -> List[Path]:
 
 def list_dataset_runs() -> DatasetListResponse:
     run_dirs = _iter_run_dirs()
-    runs = [_run_summary_from_dir(run_dir) for run_dir in run_dirs]
-    runs.sort(key=lambda entry: entry.last_modified or "", reverse=True)
+    runs_by_id = {summary.id: summary for summary in (_run_summary_from_dir(run_dir) for run_dir in run_dirs)}
+    for summary in JOB_MANAGER.list_run_summaries():
+        existing = runs_by_id.get(summary.id)
+        if existing is None:
+            runs_by_id[summary.id] = summary
+            continue
+        existing.status = summary.status
+        existing.job_id = summary.job_id
+        if summary.last_modified and (
+            not existing.last_modified or summary.last_modified > existing.last_modified
+        ):
+            existing.last_modified = summary.last_modified
+    runs = list(runs_by_id.values())
+    runs.sort(
+        key=lambda entry: (1 if entry.status == "creating" else 0, entry.last_modified or ""),
+        reverse=True,
+    )
     base_dir_path = _dataset_display_base_dir()
     return DatasetListResponse(
         base_dir=str(base_dir_path.relative_to(BASE_DIR)),
@@ -1217,15 +1491,503 @@ def preview_dataset_file(
     )
 
 
+_AUDIT_RV_COLUMNS = [
+    "rv5",
+    "rv10",
+    "rv20",
+    "rv5_over_rv10",
+    "rv5_over_rv20",
+    "rv10_over_rv20",
+]
+_AUDIT_NUMERIC_COLUMNS = [
+    "pRN",
+    "K",
+    "rel_spread_median",
+    "n_chain_used",
+    "used_max_abs_logm",
+    "quality_issue_count",
+    "rv5",
+    "rv10",
+    "rv20",
+    "rv5_over_rv10",
+    "rv5_over_rv20",
+    "rv10_over_rv20",
+]
+
+
+def _coerce_bool_series(df, column: str):
+    series = df[column]
+    if str(series.dtype) == "bool":
+        return series.fillna(False)
+    normalized = (
+        series.astype("string")
+        .str.strip()
+        .str.lower()
+        .map({"true": True, "false": False, "1": True, "0": False, "yes": True, "no": False})
+    )
+    if normalized.notna().any():
+        return normalized.fillna(False).astype(bool)
+    numeric = pd.to_numeric(series, errors="coerce")
+    return numeric.fillna(0).astype(float).ne(0.0)
+
+
+def _safe_float(value: object) -> Optional[float]:
+    try:
+        numeric = float(value)
+    except Exception:
+        return None
+    if not np.isfinite(numeric):
+        return None
+    return numeric
+
+
+def _safe_iso_date(series) -> tuple[Optional[str], Optional[str]]:
+    parsed = pd.to_datetime(series, errors="coerce")
+    parsed = parsed.dropna()
+    if parsed.empty:
+        return None, None
+    return parsed.min().date().isoformat(), parsed.max().date().isoformat()
+
+
+def _quality_bucket_from_issue_count(value: object) -> str:
+    numeric = _safe_float(value)
+    if numeric is None or numeric <= 0:
+        return "clean"
+    if numeric <= 2:
+        return "watch"
+    return "noisy"
+
+
+def _derive_rv_ratio(df: pd.DataFrame, numerator_col: str, denominator_col: str) -> pd.Series:
+    numerator = pd.to_numeric(df[numerator_col], errors="coerce")
+    denominator = pd.to_numeric(df[denominator_col], errors="coerce").replace(0, np.nan)
+    return numerator / denominator
+
+
+def _ensure_ascending_rv_ratio_columns(df: pd.DataFrame) -> pd.DataFrame:
+    required_pairs = (
+        ("rv5_over_rv10", "rv5", "rv10"),
+        ("rv5_over_rv20", "rv5", "rv20"),
+        ("rv10_over_rv20", "rv10", "rv20"),
+    )
+    present_columns = set(df.columns)
+    if not any(
+        ratio not in present_columns and numerator in present_columns and denominator in present_columns
+        for ratio, numerator, denominator in required_pairs
+    ):
+        return df
+    out = df.copy()
+    for ratio, numerator, denominator in required_pairs:
+        if ratio in out.columns:
+            continue
+        if numerator in out.columns and denominator in out.columns:
+            out[ratio] = _derive_rv_ratio(out, numerator, denominator)
+    return out
+
+
+def _build_rv_feature_audit(
+    df: pd.DataFrame,
+    rv_columns: Sequence[str],
+    issue_count: pd.Series,
+    flagged_any: pd.Series,
+    row_count: int,
+) -> List[DatasetAuditRvFeatureAudit]:
+    rv_feature_audit: List[DatasetAuditRvFeatureAudit] = []
+    if row_count <= 0:
+        return rv_feature_audit
+
+    for feature in rv_columns:
+        numeric = pd.to_numeric(df[feature], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        finite_mask = numeric.notna()
+        finite_row_count = int(finite_mask.sum())
+        feature_audit = DatasetAuditRvFeatureAudit(
+            feature=feature,
+            finite_row_count=finite_row_count,
+            finite_row_share=round((finite_row_count / row_count), 6) if row_count else 0.0,
+            buckets=[],
+        )
+        if finite_row_count < 3:
+            rv_feature_audit.append(feature_audit)
+            continue
+
+        work = pd.DataFrame(
+            {
+                "feature_value": numeric.loc[finite_mask],
+                "issue_count": pd.to_numeric(issue_count.loc[finite_mask], errors="coerce").fillna(0.0),
+                "flagged_any": flagged_any.loc[finite_mask].astype(bool),
+            }
+        ).sort_values("feature_value", kind="mergesort")
+        for label, positions in zip(("low", "mid", "high"), np.array_split(np.arange(len(work)), 3)):
+            if len(positions) == 0:
+                continue
+            bucket = work.iloc[positions]
+            feature_audit.buckets.append(
+                DatasetAuditRvBucketSummary(
+                    label=label,
+                    value_min=round(float(bucket["feature_value"].min()), 6),
+                    value_max=round(float(bucket["feature_value"].max()), 6),
+                    row_count=int(len(bucket)),
+                    row_share=round((len(bucket) / row_count), 6) if row_count else 0.0,
+                    avg_issue_count=round(float(bucket["issue_count"].mean()), 4),
+                    flagged_share=round(float(bucket["flagged_any"].mean()), 6),
+                )
+            )
+        rv_feature_audit.append(feature_audit)
+
+    return rv_feature_audit
+
+
+def audit_dataset_file(path_value: str) -> DatasetAuditResponse:
+    path = get_dataset_file_path(path_value)
+    if path.suffix.lower() != ".csv":
+        raise ValueError("Dataset audit currently supports CSV files only.")
+
+    df = pd.read_csv(path, low_memory=False)
+    df = _ensure_ascending_rv_ratio_columns(df)
+    row_count = int(len(df))
+    column_count = int(len(df.columns))
+    columns = set(df.columns)
+
+    flag_columns = sorted([column for column in df.columns if column.startswith("flag_")])
+    quality_flag_columns = counted_quality_flag_columns(flag_columns)
+    rv_columns = [column for column in _AUDIT_RV_COLUMNS if column in columns]
+
+    if "quality_issue_count" in columns:
+        issue_count = pd.to_numeric(df["quality_issue_count"], errors="coerce").fillna(0.0)
+    elif quality_flag_columns:
+        issue_count = pd.DataFrame(
+            {
+                column: _coerce_bool_series(df, column).astype(int)
+                for column in quality_flag_columns
+            }
+        ).sum(axis=1)
+    else:
+        issue_count = pd.Series([0.0] * row_count)
+
+    flagged_any = issue_count.gt(0)
+
+    quality_flags: List[DatasetAuditFlagSummary] = []
+    for column in flag_columns:
+        active = _coerce_bool_series(df, column)
+        count = int(active.sum())
+        quality_flags.append(
+            DatasetAuditFlagSummary(
+                name=column,
+                count=count,
+                share=round((count / row_count) if row_count else 0.0, 6),
+            )
+        )
+    quality_flags.sort(key=lambda item: (-item.count, item.name))
+
+    numeric_distributions: List[DatasetAuditDistribution] = []
+    for column in _AUDIT_NUMERIC_COLUMNS:
+        if column not in columns:
+            continue
+        numeric = pd.to_numeric(df[column], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+        if numeric.empty:
+            continue
+        numeric_distributions.append(
+            DatasetAuditDistribution(
+                name=column,
+                min=round(float(numeric.min()), 6),
+                p05=round(float(numeric.quantile(0.05)), 6),
+                p50=round(float(numeric.quantile(0.50)), 6),
+                p95=round(float(numeric.quantile(0.95)), 6),
+                max=round(float(numeric.max()), 6),
+                )
+            )
+
+    rv_feature_audit = _build_rv_feature_audit(df, rv_columns, issue_count, flagged_any, row_count)
+
+    ticker_count = int(df["ticker"].nunique()) if "ticker" in columns else None
+    if "group_id" in columns:
+        group_count = int(df["group_id"].nunique())
+    elif "cluster_snapshot" in columns:
+        group_count = int(df["cluster_snapshot"].nunique())
+    else:
+        group_count = None
+
+    if "group_id" in columns:
+        snapshot_count = int(df["group_id"].nunique())
+    elif {"ticker", "asof_date", "expiry_date"}.issubset(columns):
+        snapshot_count = int(df[["ticker", "asof_date", "expiry_date"]].drop_duplicates().shape[0])
+    else:
+        snapshot_count = None
+
+    date_start = date_end = None
+    for candidate in ["asof_date", "snapshot_date", "asof_target"]:
+        if candidate in columns:
+            date_start, date_end = _safe_iso_date(df[candidate])
+            if date_start or date_end:
+                break
+
+    expiry_start = expiry_end = None
+    for candidate in ["expiry_date", "option_expiration_used", "week_friday"]:
+        if candidate in columns:
+            expiry_start, expiry_end = _safe_iso_date(df[candidate])
+            if expiry_start or expiry_end:
+                break
+
+    top_problem_tickers: List[DatasetAuditTickerSummary] = []
+    if "ticker" in columns and row_count > 0:
+        work = pd.DataFrame({"ticker": df["ticker"].astype("string"), "issue_count": issue_count, "flagged_any": flagged_any})
+        if "group_id" in columns:
+            work["group_id"] = df["group_id"].astype("string")
+        if "flag_asof_close_fallback" in columns and "flag_expiry_close_fallback" in columns:
+            work["fallback_any"] = _coerce_bool_series(df, "flag_asof_close_fallback") | _coerce_bool_series(df, "flag_expiry_close_fallback")
+        elif "asof_fallback_days" in columns and "expiry_fallback_days" in columns:
+            work["fallback_any"] = (
+                pd.to_numeric(df["asof_fallback_days"], errors="coerce").fillna(0).gt(0)
+                | pd.to_numeric(df["expiry_fallback_days"], errors="coerce").fillna(0).gt(0)
+            )
+        else:
+            work["fallback_any"] = False
+        if "flag_wide_rel_spread" in columns:
+            work["wide_spread"] = _coerce_bool_series(df, "flag_wide_rel_spread")
+        elif "rel_spread_median" in columns:
+            work["wide_spread"] = pd.to_numeric(df["rel_spread_median"], errors="coerce").fillna(0).gt(0.25)
+        else:
+            work["wide_spread"] = False
+
+        grouped = work.groupby("ticker", dropna=False).agg(
+            row_count=("ticker", "size"),
+            snapshot_count=("group_id", "nunique") if "group_id" in work.columns else ("ticker", "size"),
+            avg_issue_count=("issue_count", "mean"),
+            flagged_share=("flagged_any", "mean"),
+            fallback_share=("fallback_any", "mean"),
+            wide_spread_share=("wide_spread", "mean"),
+            clean_share=("issue_count", lambda s: float((pd.to_numeric(s, errors="coerce").fillna(0.0) <= 0).mean())),
+            watch_share=("issue_count", lambda s: float(((pd.to_numeric(s, errors="coerce").fillna(0.0) > 0) & (pd.to_numeric(s, errors="coerce").fillna(0.0) <= 2)).mean())),
+            noisy_share=("issue_count", lambda s: float((pd.to_numeric(s, errors="coerce").fillna(0.0) > 2).mean())),
+        ).reset_index()
+        grouped = grouped.sort_values(
+            ["avg_issue_count", "flagged_share", "wide_spread_share", "row_count"],
+            ascending=[False, False, False, False],
+        ).head(12)
+        for _, row in grouped.iterrows():
+            top_problem_tickers.append(
+                DatasetAuditTickerSummary(
+                    ticker=str(row["ticker"]),
+                    row_count=int(row["row_count"]),
+                    snapshot_count=int(row["snapshot_count"]) if pd.notna(row["snapshot_count"]) else None,
+                    avg_issue_count=round(float(row["avg_issue_count"]), 4) if pd.notna(row["avg_issue_count"]) else None,
+                    flagged_share=round(float(row["flagged_share"]), 6) if pd.notna(row["flagged_share"]) else None,
+                    fallback_share=round(float(row["fallback_share"]), 6) if pd.notna(row["fallback_share"]) else None,
+                    wide_spread_share=round(float(row["wide_spread_share"]), 6) if pd.notna(row["wide_spread_share"]) else None,
+                    clean_share=round(float(row["clean_share"]), 6) if pd.notna(row["clean_share"]) else None,
+                    watch_share=round(float(row["watch_share"]), 6) if pd.notna(row["watch_share"]) else None,
+                    noisy_share=round(float(row["noisy_share"]), 6) if pd.notna(row["noisy_share"]) else None,
+                )
+            )
+
+    timeline: List[DatasetAuditTimelinePoint] = []
+    heatmap_dates: List[str] = []
+    heatmap_cells: List[DatasetAuditHeatmapCell] = []
+    timeline_date_col = next((candidate for candidate in ["asof_date", "snapshot_date", "asof_target"] if candidate in columns), None)
+    if timeline_date_col and row_count > 0:
+        work = pd.DataFrame(
+            {
+                "audit_date": pd.to_datetime(df[timeline_date_col], errors="coerce").dt.date,
+                "issue_count": issue_count,
+                "flagged_any": flagged_any,
+            }
+        )
+        if "group_id" in columns:
+            work["group_id"] = df["group_id"].astype("string")
+        elif {"ticker", "expiry_date"}.issubset(columns):
+            work["group_id"] = (
+                df["ticker"].astype("string")
+                + "|"
+                + df["expiry_date"].astype("string")
+                + "|"
+                + df[timeline_date_col].astype("string")
+            )
+        work = work.dropna(subset=["audit_date"])
+        grouped = work.groupby("audit_date", dropna=False).agg(
+            row_count=("audit_date", "size"),
+            snapshot_count=("group_id", "nunique") if "group_id" in work.columns else ("audit_date", "size"),
+            avg_issue_count=("issue_count", "mean"),
+            flagged_share=("flagged_any", "mean"),
+        ).reset_index().sort_values("audit_date")
+        for _, row in grouped.iterrows():
+            timeline.append(
+                DatasetAuditTimelinePoint(
+                    asof_date=row["audit_date"].isoformat(),
+                    row_count=int(row["row_count"]),
+                    snapshot_count=int(row["snapshot_count"]) if pd.notna(row["snapshot_count"]) else None,
+                    avg_issue_count=round(float(row["avg_issue_count"]), 4) if pd.notna(row["avg_issue_count"]) else None,
+                    flagged_share=round(float(row["flagged_share"]), 6) if pd.notna(row["flagged_share"]) else None,
+                )
+            )
+
+        heatmap_source = work.copy()
+        heatmap_source["ticker"] = df["ticker"].astype("string") if "ticker" in columns else "UNKNOWN"
+        available_dates = sorted({item.isoformat() for item in heatmap_source["audit_date"].dropna().tolist()})
+        heatmap_dates = available_dates[-40:]
+        if heatmap_dates:
+            heatmap_filtered = heatmap_source[
+                heatmap_source["audit_date"].astype("string").isin(heatmap_dates)
+            ].copy()
+            heatmap_grouped = heatmap_filtered.groupby(["ticker", "audit_date"], dropna=False).agg(
+                row_count=("ticker", "size"),
+                flagged_share=("flagged_any", "mean"),
+                avg_issue_count=("issue_count", "mean"),
+            ).reset_index()
+            for _, row in heatmap_grouped.iterrows():
+                avg_issue_count = round(float(row["avg_issue_count"]), 4) if pd.notna(row["avg_issue_count"]) else None
+                quality_bucket = _quality_bucket_from_issue_count(avg_issue_count)
+                heatmap_cells.append(
+                    DatasetAuditHeatmapCell(
+                        ticker=str(row["ticker"]),
+                        asof_date=row["audit_date"].isoformat(),
+                        row_count=int(row["row_count"]),
+                        flagged_share=round(float(row["flagged_share"]), 6) if pd.notna(row["flagged_share"]) else None,
+                        avg_issue_count=avg_issue_count,
+                        quality_bucket=quality_bucket,
+                    )
+                )
+
+    noisiest_rows: List[DatasetAuditRow] = []
+    if row_count > 0:
+        work = df.copy()
+        work["__issue_count"] = issue_count
+        if "rel_spread_median" in columns:
+            work["__rel_spread_median"] = pd.to_numeric(work["rel_spread_median"], errors="coerce").fillna(-1.0)
+        else:
+            work["__rel_spread_median"] = -1.0
+        if "n_chain_used" in columns:
+            work["__n_chain_used"] = pd.to_numeric(work["n_chain_used"], errors="coerce").fillna(1e9)
+        else:
+            work["__n_chain_used"] = 1e9
+        for column in flag_columns:
+            work[column] = _coerce_bool_series(work, column)
+        work = work.sort_values(
+            ["__issue_count", "__rel_spread_median", "__n_chain_used"],
+            ascending=[False, False, True],
+        ).head(12)
+        for _, row in work.iterrows():
+            active_flags = [column for column in flag_columns if bool(row.get(column, False))]
+            noisiest_rows.append(
+                DatasetAuditRow(
+                    row_id=str(row["row_id"]) if "row_id" in columns and pd.notna(row["row_id"]) else None,
+                    ticker=str(row["ticker"]) if "ticker" in columns and pd.notna(row["ticker"]) else None,
+                    asof_date=str(row["asof_date"]) if "asof_date" in columns and pd.notna(row["asof_date"]) else None,
+                    expiry_date=str(row["expiry_date"]) if "expiry_date" in columns and pd.notna(row["expiry_date"]) else None,
+                    K=_safe_float(row["K"]) if "K" in columns else None,
+                    pRN=_safe_float(row["pRN"]) if "pRN" in columns else None,
+                    quality_issue_count=_safe_float(row["__issue_count"]),
+                    rel_spread_median=_safe_float(row["__rel_spread_median"]),
+                    n_chain_used=_safe_float(row["__n_chain_used"]),
+                    flags=active_flags,
+                )
+            )
+
+    return DatasetAuditResponse(
+        file=_file_summary(path),
+        row_count=row_count,
+        column_count=column_count,
+        ticker_count=ticker_count,
+        snapshot_count=snapshot_count,
+        group_count=group_count,
+        date_start=date_start,
+        date_end=date_end,
+        expiry_start=expiry_start,
+        expiry_end=expiry_end,
+        available_rv_features=rv_columns,
+        available_quality_flags=flag_columns,
+        quality_flags=quality_flags,
+        numeric_distributions=numeric_distributions,
+        rv_feature_audit=rv_feature_audit,
+        top_problem_tickers=top_problem_tickers,
+        timeline=timeline,
+        heatmap_dates=heatmap_dates,
+        heatmap_cells=heatmap_cells,
+        noisiest_rows=noisiest_rows,
+    )
+
+
+def get_dataset_row_detail(path_value: str, row_id: str) -> DatasetRowDetailResponse:
+    path = get_dataset_file_path(path_value)
+    if path.suffix.lower() != ".csv":
+        raise ValueError("Dataset row detail currently supports CSV files only.")
+    target_row_id = str(row_id).strip()
+    if not target_row_id:
+        raise ValueError("row_id is required.")
+
+    try:
+        with path.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            headers = reader.fieldnames or []
+            if "row_id" not in headers:
+                raise ValueError("Dataset does not contain a row_id column.")
+            for row in reader:
+                if str(row.get("row_id") or "").strip() == target_row_id:
+                    normalized = {key: row.get(key) for key in headers}
+                    return DatasetRowDetailResponse(
+                        file=_file_summary(path),
+                        row_id=target_row_id,
+                        row=normalized,
+                    )
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to inspect dataset row: {exc}") from exc
+
+    raise FileNotFoundError(f"row_id not found: {target_row_id}")
+
+
+def preview_dataset_cleanup(
+    payload: DatasetCleanupRequest,
+) -> DatasetCleanupPreviewResponse:
+    _require_cleanup_module()
+    run_dir = _resolve_dataset_directory(payload.run_dir)
+    training_path = _find_training_file_path(run_dir)
+    if training_path is None:
+        raise ValueError("Training dataset not found in the selected run directory.")
+    weighting_params, used_defaults = _resolve_cleanup_weighting_params(
+        run_dir,
+        allow_defaults=payload.allow_defaults,
+    )
+    _ = weighting_params
+    result = build_training_cleanup_preview(
+        training_path,
+        _cleanup_criteria_to_script(payload.criteria),
+        used_defaults=used_defaults,
+    )
+    return _cleanup_preview_response_from_result(run_dir, result)
+
+
+def apply_dataset_cleanup(
+    payload: DatasetCleanupRequest,
+) -> DatasetCleanupResponse:
+    _require_cleanup_module()
+    run_dir = _resolve_dataset_directory(payload.run_dir)
+    training_path = _find_training_file_path(run_dir)
+    if training_path is None:
+        raise ValueError("Training dataset not found in the selected run directory.")
+    weighting_params, used_defaults = _resolve_cleanup_weighting_params(
+        run_dir,
+        allow_defaults=payload.allow_defaults,
+    )
+    result = apply_training_cleanup(
+        run_dir,
+        training_path,
+        _cleanup_criteria_to_script(payload.criteria),
+        weighting_params,
+        used_defaults=used_defaults,
+    )
+    return _cleanup_apply_response_from_result(run_dir, result)
+
+
 def run_dataset(payload: DatasetRunRequest) -> DatasetRunResponse:
     cmd, out_dir, out_name, drops_name = _build_dataset_command(payload)
 
     start = time.monotonic()
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     duration_s = round(time.monotonic() - start, 3)
+    run_dir = _extract_run_dir_from_output(result.stdout)
 
     if result.returncode == 0:
-        run_dir = _extract_run_dir_from_output(result.stdout)
         if run_dir and run_dir.exists():
             _write_training_selection(run_dir, payload, out_name)
             _write_build_meta(run_dir, payload, cmd, out_name, drops_name)
@@ -1240,6 +2002,7 @@ def run_dataset(payload: DatasetRunRequest) -> DatasetRunResponse:
         duration_s=duration_s,
         command=cmd,
         write_drops=bool(payload.write_drops),
+        run_dir=run_dir,
     )
 
 
@@ -1402,8 +2165,10 @@ class DatasetJob:
     def __init__(self, job_id: str, payload: DatasetRunRequest):
         self.job_id = job_id
         self.payload = payload
+        self.created_at = datetime.now(timezone.utc)
         self.status = "queued"
         self.progress: Optional[DatasetJobProgress] = None
+        self.telemetry: Optional[DatasetJobTelemetry] = None
         self.stdout_lines: Deque[str] = deque(maxlen=self.LOG_LIMIT)
         self.stderr_lines: Deque[str] = deque(maxlen=self.LOG_LIMIT)
         self.result: Optional[DatasetRunResponse] = None
@@ -1477,12 +2242,27 @@ class DatasetJob:
             job_id=self.job_id,
             status=self.status,
             progress=self.progress,
+            telemetry=self.telemetry,
             stdout=list(self.stdout_lines),
             stderr=list(self.stderr_lines),
             result=self.result,
             error=self.error,
             started_at=self.started_at,
             finished_at=self.finished_at,
+        )
+
+    def to_run_summary(self) -> Optional[DatasetRunSummary]:
+        if self.status not in {"queued", "running"}:
+            return None
+        run_dir = self.run_dir_path or self._predicted_run_dir()
+        if run_dir is None:
+            return None
+        last_modified = _isoformat_utc(self.started_at or self.created_at)
+        return _run_summary_from_dir(
+            run_dir,
+            status="creating",
+            job_id=self.job_id,
+            last_modified=last_modified,
         )
 
     def _run(self) -> None:
@@ -1564,6 +2344,7 @@ class DatasetJob:
                 duration_s=duration_s,
                 command=cmd,
                 write_drops=bool(self.payload.write_drops),
+                run_dir=self.run_dir_path,
             )
             self.finished_at = datetime.utcnow()
 
@@ -1590,6 +2371,10 @@ class DatasetJob:
         target = self.stdout_lines if kind == "stdout" else self.stderr_lines
         target.append(line)
         clean_line = line.strip()
+        if kind == "stdout":
+            telemetry = _parse_live_telemetry_line(clean_line)
+            if telemetry is not None:
+                self.telemetry = telemetry
         self._parse_progress(clean_line)
         self._capture_run_dir(clean_line)
 
@@ -1660,13 +2445,11 @@ class DatasetJob:
                 run_basename = Path(run_name).name.strip()
                 if not run_basename:
                     return None
-                return (_resolve_project_path(DEFAULT_OUT_DIR) / run_basename).resolve()
+                base_dir = _resolve_output_base_dir(self.payload, dataset_name=dataset_name)
+                return (base_dir / run_basename).resolve()
 
             out_name = self.payload.out_name or DEFAULT_OUT_NAME
-            if self.payload.out_dir:
-                out_dir = _resolve_project_path(str(self.payload.out_dir))
-            else:
-                out_dir = _resolve_project_path(str(Path(DEFAULT_OUT_DIR) / Path(out_name).stem))
+            out_dir = _resolve_output_base_dir(self.payload, dataset_name=dataset_name)
             run_name = (self.payload.run_dir_name or "").strip()
             if run_name:
                 return (out_dir / Path(run_name).name).resolve()
@@ -1695,6 +2478,16 @@ class DatasetJobManager:
     def list_jobs(self) -> List[DatasetJobStatus]:
         with self._lock:
             return [job.to_status() for job in self._jobs.values()]
+
+    def list_run_summaries(self) -> List[DatasetRunSummary]:
+        with self._lock:
+            jobs = list(self._jobs.values())
+        summaries: List[DatasetRunSummary] = []
+        for job in jobs:
+            summary = job.to_run_summary()
+            if summary is not None:
+                summaries.append(summary)
+        return summaries
 
     def cancel_job(self, job_id: str) -> DatasetJobStatus:
         job = self._get_job(job_id)

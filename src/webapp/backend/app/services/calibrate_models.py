@@ -74,6 +74,7 @@ def _unique_dirs(paths: List[Path]) -> List[Path]:
 
 
 BASE_DIR = Path(__file__).resolve().parents[5]
+SCRIPTS_DIR = BASE_DIR / "src" / "scripts"
 SCRIPT_PATH = CALIBRATE_MODEL_SCRIPT.path
 AUTO_SCRIPT_PATH = AUTO_CALIBRATE_MODEL_SCRIPT.path
 CALIBRATE_DATASET_DIRS = _unique_dirs(
@@ -101,13 +102,21 @@ DELETE_TERM_TIMEOUT_S = 5.0
 DELETE_KILL_TIMEOUT_S = 5.0
 DELETE_QUIET_WINDOW_S = 1.0
 
-# Import CLI contract constants for validation
-import sys
+# Import shared calibration contracts.
 if str(BASE_DIR / "src" / "webapp") not in sys.path:
     sys.path.insert(0, str(BASE_DIR / "src" / "webapp"))
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 from shared.cli_contract_v2 import (
     validate_payload,
     ValidationError,
+)
+from support.option_chain_feature_registry import (
+    OPTION_CHAIN_AUTO_FEATURE_SETS,
+    OPTION_CHAIN_BASE_FEATURE,
+    OPTION_CHAIN_DEFAULT_FEATURES,
+    option_chain_selectable_feature_payloads,
+    validate_option_chain_feature_selection,
 )
 
 
@@ -408,76 +417,9 @@ def get_dataset_features(dataset_path: str) -> "DatasetFeaturesResponse":
         if df.empty:
             raise ValueError(f"Dataset {path.name} is empty")
 
-        # Get column names
+        # Keep available_columns as the literal dataset schema.
         available_columns = df.columns.tolist()
-
-        # Also include engineered features that can be derived from raw columns
-        # (e.g. x_logit_prn from pRN, log_m_fwd from K+forward_price, etc.)
-        raw_cols = set(available_columns)
-        derived: list = []
-        if "pRN" in raw_cols and "x_logit_prn" not in raw_cols:
-            derived.append("x_logit_prn")
-        has_forward = "forward_price" in raw_cols or (
-            "K" in raw_cols and "S_asof_close" in raw_cols
-            and "r" in raw_cols and "dividend_yield" in raw_cols
-        )
-        if has_forward:
-            if "log_m_fwd" not in raw_cols:
-                derived.append("log_m_fwd")
-            if "abs_log_m_fwd" not in raw_cols:
-                derived.append("abs_log_m_fwd")
-        elif "log_m_fwd" in raw_cols and "abs_log_m_fwd" not in raw_cols:
-            derived.append("abs_log_m_fwd")
-        if "T_days" in raw_cols and "sqrt_T_years" not in raw_cols:
-            derived.append("sqrt_T_years")
-        if "rv20" in raw_cols and ("T_days" in raw_cols or "sqrt_T_years" in raw_cols):
-            if "rv20_sqrtT" not in raw_cols:
-                derived.append("rv20_sqrtT")
-        if "rv5" in raw_cols and "rv20" in raw_cols and "rv5_over_rv20" not in raw_cols:
-            derived.append("rv5_over_rv20")
-        if "rv5" in raw_cols and "rv10" in raw_cols and "rv5_over_rv10" not in raw_cols:
-            derived.append("rv5_over_rv10")
-        if "rv10" in raw_cols and "rv20" in raw_cols and "rv10_over_rv20" not in raw_cols:
-            derived.append("rv10_over_rv20")
-        has_log_m_fwd = "log_m_fwd" in raw_cols or has_forward
-        if has_log_m_fwd and "rv20" in raw_cols and "T_days" in raw_cols:
-            if "log_m_fwd_over_volT" not in raw_cols:
-                derived.append("log_m_fwd_over_volT")
-        if "rel_spread_median" in raw_cols and "log_rel_spread" not in raw_cols:
-            derived.append("log_rel_spread")
-        if (
-            "asof_fallback_days" in raw_cols
-            and "expiry_fallback_days" in raw_cols
-            and "had_fallback" not in raw_cols
-        ):
-            derived.append("had_fallback")
-        if (
-            (
-                "dropped_intrinsic" in raw_cols
-                and "n_chain_raw" in raw_cols
-            )
-            or "drop_intrinsic_frac" in raw_cols
-        ):
-            if "had_intrinsic_drop" not in raw_cols:
-                derived.append("had_intrinsic_drop")
-        if (
-            (
-                "n_band_inside" in raw_cols
-                and "n_band_raw" in raw_cols
-            )
-            or "band_inside_frac" in raw_cols
-        ):
-            if "had_band_clip" not in raw_cols:
-                derived.append("had_band_clip")
-        if "pRN" in raw_cols and "pRN_raw" in raw_cols and "prn_raw_gap" not in raw_cols:
-            derived.append("prn_raw_gap")
-        has_x_logit = "x_logit_prn" in raw_cols or "pRN" in raw_cols
-        if has_x_logit and has_log_m_fwd:
-            if "x_m" not in raw_cols:
-                derived.append("x_m")
-            if "x_abs_m" not in raw_cols:
-                derived.append("x_abs_m")
-        available_columns = available_columns + derived
+        selectable_features = option_chain_selectable_feature_payloads(available_columns)
 
         # Compute feature statistics
         feature_stats: Dict[str, "FeatureStat"] = {}
@@ -509,6 +451,7 @@ def get_dataset_features(dataset_path: str) -> "DatasetFeaturesResponse":
         return DatasetFeaturesResponse(
             dataset=dataset_path,
             available_columns=available_columns,
+            selectable_features=selectable_features,
             feature_stats=feature_stats,
             regime_info=regime_info,
         )
@@ -1257,6 +1200,88 @@ def _parse_optional_int(val: Optional[str]) -> Optional[int]:
         return int(float(val))
     except (TypeError, ValueError):
         return None
+
+
+def _read_dataset_columns(path: Path) -> List[str]:
+    if path.suffix.lower() == ".parquet":
+        try:
+            import pyarrow.parquet as pq  # type: ignore
+
+            return list(pq.ParquetFile(path).schema.names)
+        except Exception:
+            df = pd.read_parquet(path)
+            return list(df.columns)
+    return pd.read_csv(path, nrows=0).columns.tolist()
+
+
+def _split_csv_list(value: Optional[str]) -> List[str]:
+    if value in (None, ""):
+        return []
+    return [token.strip() for token in str(value).split(",") if token.strip()]
+
+
+def _resolve_option_chain_feature_lists(
+    *,
+    features_value: Optional[str],
+    categorical_value: Optional[str],
+    dataset_columns: List[str],
+    include_defaults_when_empty: bool,
+) -> Tuple[List[str], List[str]]:
+    numeric_features = _split_csv_list(features_value)
+    if include_defaults_when_empty and not numeric_features:
+        numeric_features = list(OPTION_CHAIN_DEFAULT_FEATURES)
+    elif OPTION_CHAIN_BASE_FEATURE not in numeric_features:
+        numeric_features = [OPTION_CHAIN_BASE_FEATURE, *numeric_features]
+    categorical_features = _split_csv_list(categorical_value)
+    return validate_option_chain_feature_selection(
+        numeric_features=numeric_features,
+        categorical_features=categorical_features,
+        available_columns=dataset_columns,
+    )
+
+
+def _normalize_option_chain_feature_csvs(
+    *,
+    features_value: Optional[str],
+    categorical_value: Optional[str],
+    dataset_path: Path,
+    include_defaults_when_empty: bool,
+) -> Tuple[Optional[str], Optional[str]]:
+    dataset_columns = _read_dataset_columns(dataset_path)
+    numeric_features, categorical_features = _resolve_option_chain_feature_lists(
+        features_value=features_value,
+        categorical_value=categorical_value,
+        dataset_columns=dataset_columns,
+        include_defaults_when_empty=include_defaults_when_empty,
+    )
+    features_csv = ",".join(numeric_features) if numeric_features else None
+    categorical_csv = ",".join(categorical_features) if categorical_features else None
+    return features_csv, categorical_csv
+
+
+def _normalize_auto_feature_sets(
+    feature_sets: Optional[List[List[str]]],
+    *,
+    dataset_path: Path,
+) -> List[List[str]]:
+    dataset_columns = _read_dataset_columns(dataset_path)
+    requested_sets = feature_sets or [list(feature_set) for feature_set in OPTION_CHAIN_AUTO_FEATURE_SETS]
+    normalized_sets: List[List[str]] = []
+    seen: set[Tuple[str, ...]] = set()
+    for raw in requested_sets:
+        numeric_features, _ = validate_option_chain_feature_selection(
+            numeric_features=raw,
+            categorical_features=[],
+            available_columns=dataset_columns,
+        )
+        if OPTION_CHAIN_BASE_FEATURE not in numeric_features:
+            numeric_features = [OPTION_CHAIN_BASE_FEATURE, *numeric_features]
+        key = tuple(numeric_features)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized_sets.append(numeric_features)
+    return normalized_sets
 
 
 def _parse_fold_deltas(path: Path) -> Optional[Dict[str, Any]]:
@@ -2603,6 +2628,9 @@ def _build_config_payload(
     dataset_path: Path,
     out_dir: Path,
 ) -> Dict[str, Any]:
+    if payload.enable_x_abs_m is not None:
+        raise ValueError("enable_x_abs_m is no longer supported for option-chain calibration.")
+
     split_cfg = payload.split
     reg_cfg = payload.regularization
     structure_cfg = payload.model_structure
@@ -2697,6 +2725,12 @@ def _build_config_payload(
         effective_group_reweight = group_reweight
 
     strict_args = bool(payload.strict_args)
+    features_csv, categorical_features_csv = _normalize_option_chain_feature_csvs(
+        features_value=payload.features,
+        categorical_value=payload.categorical_features,
+        dataset_path=dataset_path,
+        include_defaults_when_empty=True,
+    )
 
     return {
         "config_schema_version": 2,
@@ -2717,8 +2751,8 @@ def _build_config_payload(
         "train_tickers": effective_train_tickers,
         "tdays_allowed": tdays_allowed_arg,
         "asof_dow_allowed": payload.asof_dow_allowed,
-        "features": payload.features,
-        "categorical_features": payload.categorical_features,
+        "features": features_csv,
+        "categorical_features": categorical_features_csv,
         "add_interactions": payload.add_interactions,
         "calibrate": effective_calibrate,
         "c_grid": effective_c_grid,
@@ -2740,7 +2774,6 @@ def _build_config_payload(
         "allow_iid_bootstrap": bool(effective_allow_iid_bootstrap),
         "fallback_to_baseline_if_worse": payload.fallback_to_baseline_if_worse,
         "auto_drop_near_constant": payload.auto_drop_near_constant,
-        "enable_x_abs_m": payload.enable_x_abs_m,
         "group_reweight": effective_group_reweight,
         "max_abs_logm": payload.max_abs_logm,
         "drop_prn_extremes": payload.drop_prn_extremes,
@@ -2895,6 +2928,11 @@ def _prepare_auto_run(payload: AutoModelRunRequest) -> Tuple[List[str], Path, st
     )
 
     search_payload = payload.search.dict() if payload.search else {}
+    search_payload["feature_sets"] = _normalize_auto_feature_sets(
+        payload.search.feature_sets if payload.search else None,
+        dataset_path=dataset_path,
+    )
+    search_payload.pop("allow_risky_features", None)
     auto_config_payload = {
         "base_config": base_config_payload,
         "search": search_payload,

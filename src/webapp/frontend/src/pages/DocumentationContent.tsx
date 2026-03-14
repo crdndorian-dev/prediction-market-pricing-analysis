@@ -44,7 +44,7 @@ export const optionChainDoc = (
             pRN view, legacy, optional drops file).
           </li>
           <li>
-            Run metadata: stdout/stderr logs, the exact command used, and timing.
+            Run metadata: live build insights, critical stderr, the exact command used, and timing.
           </li>
         </ul>
       </div>
@@ -78,7 +78,7 @@ export const optionChainDoc = (
         Run job tab: a Configuration panel (dates, tickers, outputs, advanced settings) with Reset config at the top and Run job at the bottom.
       </li>
       <li>
-        Active Run panel replaces Configuration after a run starts and shows status, progress, stop controls, and stdout/stderr log toggles (hidden until selected).
+        Active Run panel replaces Configuration after a run starts and shows status, progress, stop controls, build insights, and critical stderr when needed.
       </li>
       <li>
         Run directory tab: browse, preview, rename, and delete past runs.
@@ -91,7 +91,7 @@ export const optionChainDoc = (
       <li>Name the dataset and choose which CSV outputs to write.</li>
       <li>Adjust schedule and advanced settings if needed.</li>
       <li>Click Run job to switch from Configuration to Active Run and monitor progress.</li>
-      <li>Select stdout or stderr to inspect logs (click again to hide the log view).</li>
+      <li>Use Build insights to track current phase, build yield, warnings, and quick audit checks while the job runs.</li>
       <li>When the run finishes, click New job to return to Configuration or switch to Run directory to inspect exports.</li>
       <li>Use the training CSV for calibration or export it elsewhere.</li>
     </ol>
@@ -255,8 +255,7 @@ export const optionChainDoc = (
         written, and the last ticker/week/as-of processed.
       </li>
       <li>
-        A progress bar updates while running; progress updates are echoed in stdout
-        every 100 jobs.
+        A progress bar updates while running; the page also renders structured live telemetry for per-ticker progress, drop pressure, and audit checks.
       </li>
       <li>
         Stop run is available only while a job is queued or running.
@@ -266,7 +265,7 @@ export const optionChainDoc = (
         and the drops file path if enabled.
       </li>
       <li>
-        Tabs let you switch between stdout and stderr. Failed runs default to stderr.
+        Critical errors continue to surface from stderr, but stdout is no longer the primary UI surface.
       </li>
       <li>
         The Command used drawer shows the exact CLI invocation for the last run.
@@ -1778,30 +1777,27 @@ const calibrateDoc = (
     <h3>Feature Selection</h3>
     <p>
       Feature selection is now an explicit subsection in <code>Run Job</code>. The base feature
-      <code>x_logit_prn</code> is always included, and optional features are selected with dependency
-      and exclusivity guardrails.
+      <code>x_logit_prn</code> is always included, and every optional feature exposed in the UI maps
+      directly to a column in the option-chain training CSV.
     </p>
     <ul>
       <li>
-        Optional features are grouped by category (Moneyness, Volatility, Market Quality, Coverage and Sanity, Interactions).
+        Optional features are returned by the backend feature registry and only appear when the selected
+        dataset actually contains the matching CSV column.
       </li>
       <li>
-        Optional features are loaded from dataset metadata so unavailable fields are not selectable.
+        Numeric optional features are grouped as Moneyness, Volatility, Pricing, and Quality and Flags.
       </li>
       <li>
-        Time-only optional features (<code>T_days</code> and <code>sqrt_T_years</code>) are intentionally excluded.
+        Categorical optional features are listed separately and follow the same CSV-backed contract.
       </li>
       <li>
-        Mutual-exclusion rules are enforced (for example, only one of <code>log_m_fwd</code> and <code>abs_log_m_fwd</code>;
-        only one of <code>x_m</code> and <code>x_abs_m</code>).
+        Mutual-exclusion rules are limited to <code>log_m</code> vs <code>abs_log_m</code> and
+        <code>log_m_fwd</code> vs <code>abs_log_m_fwd</code>.
       </li>
       <li>
-        Dependency rules are enforced (for example, <code>x_m</code> requires <code>log_m_fwd</code> and
-        <code>x_abs_m</code> requires <code>abs_log_m_fwd</code>).
-      </li>
-      <li>
-        Required flags are wired from the feature set (for example, selecting <code>x_abs_m</code> enables
-        the matching trainer flag automatically).
+        Legacy engineered optional features are no longer part of the active option-chain
+        calibration contract.
       </li>
     </ul>
 

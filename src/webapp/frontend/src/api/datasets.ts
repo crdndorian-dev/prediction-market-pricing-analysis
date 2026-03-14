@@ -68,8 +68,10 @@ export type DatasetRunResponse = {
   ok: boolean;
   out_dir: string;
   out_name: string;
+  run_dir?: string | null;
   output_file: string | null;
   drops_file: string | null;
+  training_file?: string | null;
   stdout: string;
   stderr: string;
   duration_s: number;
@@ -86,10 +88,50 @@ export type DatasetJobProgress = {
   lastAsof: string;
 };
 
+export type DatasetJobGroupChecks = {
+  asof_close_fallback: number;
+  expiry_close_fallback: number;
+  expiry_saturday_fallback: number;
+  quote_close_fallback: number;
+  low_chain_used: number;
+  wide_rel_spread: number;
+};
+
+export type DatasetJobTickerTelemetry = {
+  ticker: string;
+  completed_jobs: number;
+  planned_jobs: number;
+  kept_groups: number;
+  rows: number;
+  issue_count_sum: number;
+  flagged_rows: number;
+  fallback_rows: number;
+  wide_spread_rows: number;
+  clean_rows: number;
+  watch_rows: number;
+  noisy_rows: number;
+  drop_reasons: Record<string, number>;
+};
+
+export type DatasetJobTelemetry = {
+  phase:
+    | "planning"
+    | "preloading_stock"
+    | "preloading_dividends"
+    | "building"
+    | "finalizing"
+    | "writing_outputs"
+    | "finished";
+  drop_reasons: Record<string, number>;
+  group_checks: DatasetJobGroupChecks;
+  tickers: DatasetJobTickerTelemetry[];
+};
+
 export type DatasetJobStatus = {
   job_id: string;
   status: "queued" | "running" | "finished" | "failed" | "cancelled";
   progress: DatasetJobProgress | null;
+  telemetry?: DatasetJobTelemetry | null;
   stdout: string[];
   stderr: string[];
   result: DatasetRunResponse | null;
@@ -113,6 +155,8 @@ export type DatasetRunSummary = {
   training_file?: DatasetFileSummary | null;
   files?: DatasetFileSummary[] | null;
   last_modified?: string | null;
+  status?: "ready" | "creating";
+  job_id?: string | null;
 };
 
 export type DatasetBackfillRange = {
@@ -156,6 +200,146 @@ export type DatasetPreviewResponse = {
   row_count?: number | null;
   mode: "head" | "tail";
   limit: number;
+};
+
+export type DatasetAuditFlagSummary = {
+  name: string;
+  count: number;
+  share: number;
+};
+
+export type DatasetAuditDistribution = {
+  name: string;
+  min?: number | null;
+  p05?: number | null;
+  p50?: number | null;
+  p95?: number | null;
+  max?: number | null;
+};
+
+export type DatasetAuditTickerSummary = {
+  ticker: string;
+  row_count: number;
+  snapshot_count?: number | null;
+  avg_issue_count?: number | null;
+  flagged_share?: number | null;
+  fallback_share?: number | null;
+  wide_spread_share?: number | null;
+  clean_share?: number | null;
+  watch_share?: number | null;
+  noisy_share?: number | null;
+};
+
+export type DatasetAuditTimelinePoint = {
+  asof_date: string;
+  row_count: number;
+  snapshot_count?: number | null;
+  avg_issue_count?: number | null;
+  flagged_share?: number | null;
+};
+
+export type DatasetAuditRow = {
+  row_id?: string | null;
+  ticker?: string | null;
+  asof_date?: string | null;
+  expiry_date?: string | null;
+  K?: number | null;
+  pRN?: number | null;
+  quality_issue_count?: number | null;
+  rel_spread_median?: number | null;
+  n_chain_used?: number | null;
+  flags: string[];
+};
+
+export type DatasetAuditHeatmapCell = {
+  ticker: string;
+  asof_date: string;
+  row_count: number;
+  flagged_share?: number | null;
+  avg_issue_count?: number | null;
+  quality_bucket?: string | null;
+};
+
+export type DatasetAuditRvBucketSummary = {
+  label: "low" | "mid" | "high";
+  value_min?: number | null;
+  value_max?: number | null;
+  row_count: number;
+  row_share?: number | null;
+  avg_issue_count?: number | null;
+  flagged_share?: number | null;
+};
+
+export type DatasetAuditRvFeatureAudit = {
+  feature: string;
+  finite_row_count: number;
+  finite_row_share?: number | null;
+  buckets: DatasetAuditRvBucketSummary[];
+};
+
+export type DatasetRowDetailResponse = {
+  file: DatasetFileSummary;
+  row_id: string;
+  row: Record<string, string | null>;
+};
+
+export type DatasetAuditResponse = {
+  file: DatasetFileSummary;
+  row_count: number;
+  column_count: number;
+  ticker_count?: number | null;
+  snapshot_count?: number | null;
+  group_count?: number | null;
+  date_start?: string | null;
+  date_end?: string | null;
+  expiry_start?: string | null;
+  expiry_end?: string | null;
+  available_rv_features: string[];
+  available_quality_flags: string[];
+  quality_flags: DatasetAuditFlagSummary[];
+  numeric_distributions: DatasetAuditDistribution[];
+  rv_feature_audit: DatasetAuditRvFeatureAudit[];
+  top_problem_tickers: DatasetAuditTickerSummary[];
+  timeline: DatasetAuditTimelinePoint[];
+  heatmap_dates: string[];
+  heatmap_cells: DatasetAuditHeatmapCell[];
+  noisiest_rows: DatasetAuditRow[];
+};
+
+export type DatasetCleanupCriteria = {
+  qualityBuckets?: Array<"clean" | "watch" | "noisy">;
+  minQualityIssueCount?: number;
+  flagColumns?: string[];
+  flagMatchMode?: "any" | "all";
+  minRelSpreadMedian?: number;
+  maxNChainUsed?: number;
+};
+
+export type DatasetCleanupRequest = {
+  runDir: string;
+  criteria?: DatasetCleanupCriteria;
+  allowDefaults?: boolean;
+};
+
+export type DatasetCleanupPreviewResponse = {
+  run_dir: string;
+  training_file: string;
+  rows_before: number;
+  rows_to_drop: number;
+  rows_after: number;
+  drop_share: number;
+  used_defaults: boolean;
+  would_drop_all: boolean;
+  dropped_bucket_counts: Record<string, number>;
+  matched_flag_counts: DatasetAuditFlagSummary[];
+  sample_rows: DatasetAuditRow[];
+  message: string;
+};
+
+export type DatasetCleanupResponse = DatasetCleanupPreviewResponse & {
+  ok: boolean;
+  cleaned_run_dir: string;
+  cleaned_file: string;
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
@@ -320,6 +504,56 @@ export async function backfillOptionChainDataset(
   return response.json();
 }
 
+const datasetCleanupRequestBody = (payload: DatasetCleanupRequest) => ({
+  run_dir: payload.runDir,
+  criteria: {
+    quality_buckets: payload.criteria?.qualityBuckets ?? [],
+    min_quality_issue_count:
+      payload.criteria && "minQualityIssueCount" in payload.criteria
+        ? payload.criteria.minQualityIssueCount ?? null
+        : null,
+    flag_columns: payload.criteria?.flagColumns ?? [],
+    flag_match_mode: payload.criteria?.flagMatchMode,
+    min_rel_spread_median: payload.criteria?.minRelSpreadMedian,
+    max_n_chain_used: payload.criteria?.maxNChainUsed,
+  },
+  allow_defaults: payload.allowDefaults ?? false,
+});
+
+export async function previewDatasetCleanup(
+  payload: DatasetCleanupRequest,
+): Promise<DatasetCleanupPreviewResponse> {
+  const response = await fetch(`${API_BASE}/datasets/runs/cleanup/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(datasetCleanupRequestBody(payload)),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      `Dataset cleanup preview failed (${response.status}): ${detail || "unknown error"}`,
+    );
+  }
+  return response.json();
+}
+
+export async function applyDatasetCleanup(
+  payload: DatasetCleanupRequest,
+): Promise<DatasetCleanupResponse> {
+  const response = await fetch(`${API_BASE}/datasets/runs/cleanup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(datasetCleanupRequestBody(payload)),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      `Dataset cleanup failed (${response.status}): ${detail || "unknown error"}`,
+    );
+  }
+  return response.json();
+}
+
 export async function previewDatasetFile(
   path: string,
   mode: "head" | "tail",
@@ -337,6 +571,39 @@ export async function previewDatasetFile(
     const detail = await response.text();
     throw new Error(
       `Dataset preview failed (${response.status}): ${detail || "unknown error"}`,
+    );
+  }
+  return response.json();
+}
+
+export async function auditDatasetFile(
+  path: string,
+): Promise<DatasetAuditResponse> {
+  const params = new URLSearchParams({ path });
+  const response = await fetch(
+    `${API_BASE}/datasets/runs/audit?${params.toString()}`,
+  );
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      `Dataset audit failed (${response.status}): ${detail || "unknown error"}`,
+    );
+  }
+  return response.json();
+}
+
+export async function getDatasetRowDetail(
+  path: string,
+  rowId: string,
+): Promise<DatasetRowDetailResponse> {
+  const params = new URLSearchParams({ path, row_id: rowId });
+  const response = await fetch(
+    `${API_BASE}/datasets/runs/row?${params.toString()}`,
+  );
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      `Dataset row lookup failed (${response.status}): ${detail || "unknown error"}`,
     );
   }
   return response.json();

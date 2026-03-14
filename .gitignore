@@ -6,6 +6,12 @@ AGENTS.md
 /.vscode/
 !/.vscode/extensions.json
 /deadcode/
+!/deadcode/
+/deadcode/*
+!/deadcode/src/
+!/deadcode/src/scripts/
+!/deadcode/src/scripts/01-option-chain-backfill-rv-features-v1.0.py
+!/deadcode/src/scripts/backfill_gamma_volume.py
 /.obsidian/
 /.pytest_cache/
 /config/
@@ -30,6 +36,8 @@ AGENTS.md
 /documentation/
 /docs/.obsidian/*
 /docs/.obsidian/
+/docs/*
+/docs/
 **/.DS_Store
 **/__pycache__/
 **/*.pyc
@@ -42,7 +50,7 @@ src/webapp/frontend/dist/
 src/webapp/frontend/dist-ssr/
 
 # src/data/ 
-
+src/archived_data/
 src/data/analysis/
 src/data/cache/
 src/data/models/

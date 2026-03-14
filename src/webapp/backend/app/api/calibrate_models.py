@@ -84,7 +84,8 @@ def get_dataset_features_route(dataset: str) -> DatasetFeaturesResponse:
     - dataset: Relative path to dataset (e.g., "src/data/raw/option-chain/dataset.csv")
 
     Returns:
-    - available_columns: List of all column names
+    - available_columns: Literal dataset column names
+    - selectable_features: Ordered registry-backed optional features present in the dataset
     - feature_stats: Statistics per column (missing %, dtype, unique count)
     - regime_info: Regime detection (weekly vs 1DTE/daily)
     """

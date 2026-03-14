@@ -1,4 +1,5 @@
 import { apiFetch } from "./http";
+import type { PolymarketMarketQuality } from "./polymarketHistory";
 
 export type MarketsProgress = {
   stage?: string | null;
@@ -77,6 +78,7 @@ export type MarketsSeriesResponse = {
   event_id?: string | null;
   points: MarketsSeriesPoint[];
   metadata?: Record<string, unknown> | null;
+  market_quality?: PolymarketMarketQuality | null;
 };
 
 export type MarketsSeriesByTickerResponse = {
@@ -85,6 +87,7 @@ export type MarketsSeriesByTickerResponse = {
   week_friday: string;
   strikes: MarketsSeriesResponse[];
   metadata?: Record<string, unknown> | null;
+  market_quality?: Record<string, PolymarketMarketQuality> | null;
 };
 
 async function handleResponse(response: Response) {

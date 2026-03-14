@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -7,14 +8,24 @@ import {
 } from "react";
 
 import {
+  applyDatasetCleanup,
+  auditDatasetFile,
   deleteDatasetRun,
   getDatasetFileUrl,
   killDatasetJob,
   listDatasetRuns,
+  previewDatasetCleanup,
   previewDatasetFile,
   renameDatasetRun,
   startDatasetJob,
+  type DatasetAuditDistribution,
+  type DatasetAuditResponse,
+  type DatasetAuditTickerSummary,
+  type DatasetCleanupPreviewResponse,
+  type DatasetJobGroupChecks,
   type DatasetJobStatus,
+  type DatasetJobTelemetry,
+  type DatasetJobTickerTelemetry,
   type DatasetFileSummary,
   type DatasetPreviewResponse,
   type DatasetRunResponse,
@@ -23,7 +34,6 @@ import {
 import PipelineStatusCard from "../components/PipelineStatusCard";
 import { useDatasetJob } from "../contexts/datasetJob";
 import { useAnyJobRunning } from "../contexts/jobGuard";
-import { OptionChainDocContent } from "./DocumentationContent";
 import "./DatasetsPage.css";
 
 type DatasetFormState = {
@@ -367,6 +377,498 @@ const formatByteCount = (bytes?: number | null): string => {
 const formatTimestamp = (value?: string | null): string =>
   value ? new Date(value).toLocaleString() : "Unknown";
 
+const formatPercent = (value?: number | null): string =>
+  value == null || !Number.isFinite(value) ? "—" : `${(value * 100).toFixed(1)}%`;
+
+const formatNumeric = (value?: number | null, digits = 2): string =>
+  value == null || !Number.isFinite(value) ? "—" : value.toFixed(digits);
+
+const shareBarWidth = (share?: number | null, minVisiblePercent = 6): string => {
+  const percent = (share ?? 0) * 100;
+  if (!Number.isFinite(percent) || percent <= 0) return "0%";
+  return `${Math.max(minVisiblePercent, percent)}%`;
+};
+
+type HeatmapMetric = "rows" | "issues" | "flagged";
+
+const HEATMAP_METRIC_OPTIONS: { value: HeatmapMetric; label: string }[] = [
+  { value: "rows", label: "Coverage" },
+  { value: "issues", label: "Issue load" },
+  { value: "flagged", label: "Flagged share" },
+];
+
+type CleanupCriteriaFormState = {
+  mode: "quality_buckets" | "flags";
+  qualityBuckets: Array<"clean" | "watch" | "noisy">;
+  selectedFlags: string[];
+  flagMatchMode: "any" | "all";
+};
+
+type CleanupModalTarget = {
+  runId: string;
+  runDir: string;
+  runName: string;
+  trainingFile: DatasetFileSummary;
+};
+
+const DEFAULT_CLEANUP_CRITERIA_FORM: CleanupCriteriaFormState = {
+  mode: "quality_buckets",
+  qualityBuckets: ["noisy"],
+  selectedFlags: [],
+  flagMatchMode: "any",
+};
+
+type ProblemTickerCardItem = {
+  ticker: string;
+  row_count: number;
+  snapshot_count?: number | null;
+  avg_issue_count?: number | null;
+  flagged_share?: number | null;
+  fallback_share?: number | null;
+  wide_spread_share?: number | null;
+  clean_share?: number | null;
+  watch_share?: number | null;
+  noisy_share?: number | null;
+};
+
+const compareProblemTickerCardItems = (
+  a: ProblemTickerCardItem,
+  b: ProblemTickerCardItem,
+): number => {
+  const issueDiff = (b.avg_issue_count ?? -1) - (a.avg_issue_count ?? -1);
+  if (issueDiff !== 0) return issueDiff;
+  const flaggedDiff = (b.flagged_share ?? -1) - (a.flagged_share ?? -1);
+  if (flaggedDiff !== 0) return flaggedDiff;
+  const spreadDiff = (b.wide_spread_share ?? -1) - (a.wide_spread_share ?? -1);
+  if (spreadDiff !== 0) return spreadDiff;
+  if (b.row_count !== a.row_count) return b.row_count - a.row_count;
+  return a.ticker.localeCompare(b.ticker);
+};
+
+const normalizeAuditProblemTicker = (
+  item: DatasetAuditTickerSummary,
+): ProblemTickerCardItem => ({
+  ticker: item.ticker,
+  row_count: item.row_count,
+  snapshot_count: item.snapshot_count,
+  avg_issue_count: item.avg_issue_count,
+  flagged_share: item.flagged_share,
+  fallback_share: item.fallback_share,
+  wide_spread_share: item.wide_spread_share,
+  clean_share: item.clean_share,
+  watch_share: item.watch_share,
+  noisy_share: item.noisy_share,
+});
+
+const normalizeLiveProblemTicker = (
+  item: DatasetJobTickerTelemetry,
+): ProblemTickerCardItem | null => {
+  if (!item.rows || item.rows <= 0) return null;
+  const rowCount = item.rows;
+  return {
+    ticker: item.ticker,
+    row_count: rowCount,
+    snapshot_count: item.kept_groups,
+    avg_issue_count: rowCount > 0 ? item.issue_count_sum / rowCount : null,
+    flagged_share: rowCount > 0 ? item.flagged_rows / rowCount : null,
+    fallback_share: rowCount > 0 ? item.fallback_rows / rowCount : null,
+    wide_spread_share: rowCount > 0 ? item.wide_spread_rows / rowCount : null,
+    clean_share: rowCount > 0 ? item.clean_rows / rowCount : null,
+    watch_share: rowCount > 0 ? item.watch_rows / rowCount : null,
+    noisy_share: rowCount > 0 ? item.noisy_rows / rowCount : null,
+  };
+};
+
+type ProblemTickerAuditCardProps = {
+  subtitle: string;
+  items: ProblemTickerCardItem[];
+  emptyMessage: string;
+  className?: string;
+};
+
+function ProblemTickerAuditCard({
+  subtitle,
+  items,
+  emptyMessage,
+  className,
+}: ProblemTickerAuditCardProps) {
+  const cardClassName = [
+    "dataset-audit-card",
+    "dataset-audit-problem-tickers-card",
+    className,
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    <section className={cardClassName}>
+      <div className="dataset-audit-card-header">
+        <h3>Problem tickers</h3>
+        <span>{subtitle}</span>
+      </div>
+      {items.length > 0 ? (
+        <div className="dataset-audit-table dataset-audit-problem-ticker-table">
+          <div className="dataset-audit-table-head">
+            <span>Ticker</span>
+            <span>Issue load</span>
+            <span>Quality mix</span>
+          </div>
+          {items.map((ticker) => (
+            <div key={ticker.ticker} className="dataset-audit-table-row">
+              <div>
+                <strong>{ticker.ticker}</strong>
+                <span>
+                  {ticker.row_count.toLocaleString()} rows ·{" "}
+                  {ticker.snapshot_count?.toLocaleString() ?? "—"} snapshots
+                </span>
+              </div>
+              <div>
+                <strong>{formatNumeric(ticker.avg_issue_count, 2)}</strong>
+                <span>{formatPercent(ticker.flagged_share)} flagged rows</span>
+              </div>
+              <div>
+                <div className="dataset-audit-stack-bar" aria-label="Clean, watch, and noisy row mix">
+                  <span
+                    className="clean"
+                    style={{ width: `${Math.max(0, (ticker.clean_share ?? 0) * 100)}%` }}
+                  />
+                  <span
+                    className="watch"
+                    style={{ width: `${Math.max(0, (ticker.watch_share ?? 0) * 100)}%` }}
+                  />
+                  <span
+                    className="noisy"
+                    style={{ width: `${Math.max(0, (ticker.noisy_share ?? 0) * 100)}%` }}
+                  />
+                </div>
+                <div className="dataset-audit-mix-legend">
+                  <span className="dataset-audit-mix-stat clean">
+                    <span className="dataset-audit-mix-dot" />
+                    Clean {formatPercent(ticker.clean_share)}
+                  </span>
+                  <span className="dataset-audit-mix-stat watch">
+                    <span className="dataset-audit-mix-dot" />
+                    Watch {formatPercent(ticker.watch_share)}
+                  </span>
+                  <span className="dataset-audit-mix-stat noisy">
+                    <span className="dataset-audit-mix-dot" />
+                    Noisy {formatPercent(ticker.noisy_share)}
+                  </span>
+                </div>
+                <span className="dataset-audit-mix-meta">
+                  Fallback {formatPercent(ticker.fallback_share)} · Wide spread{" "}
+                  {formatPercent(ticker.wide_spread_share)}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="dataset-preview-empty">{emptyMessage}</div>
+      )}
+    </section>
+  );
+}
+
+const RV_LEVEL_FEATURES = ["rv5", "rv10", "rv20"] as const;
+const RV_RATIO_FEATURES = ["rv5_over_rv10", "rv5_over_rv20", "rv10_over_rv20"] as const;
+const RV_TERCILE_BUCKETS = ["low", "mid", "high"] as const;
+const RV_CONTEXT_METRICS = [
+  "rel_spread_median",
+  "n_chain_used",
+  "quality_issue_count",
+] as const;
+
+const formatAuditMetricValue = (metricName: string, value?: number | null): string => {
+  if (metricName === "n_chain_used") return formatNumeric(value, 0);
+  if (metricName === "quality_issue_count") return formatNumeric(value, 2);
+  return formatNumeric(value, 3);
+};
+
+const railPositionPercent = (
+  value?: number | null,
+  min?: number | null,
+  max?: number | null,
+): number => {
+  if (
+    value == null ||
+    min == null ||
+    max == null ||
+    !Number.isFinite(value) ||
+    !Number.isFinite(min) ||
+    !Number.isFinite(max)
+  ) {
+    return 50;
+  }
+  const span = max - min;
+  if (!Number.isFinite(span) || Math.abs(span) < 1e-12) return 50;
+  return Math.min(100, Math.max(0, ((value - min) / span) * 100));
+};
+
+const formatAuditRange = (
+  metricName: string,
+  min?: number | null,
+  max?: number | null,
+): string => {
+  if (min == null || !Number.isFinite(min)) return "—";
+  if (max == null || !Number.isFinite(max)) return formatAuditMetricValue(metricName, min);
+  if (Math.abs(max - min) < 1e-12) return formatAuditMetricValue(metricName, min);
+  return `${formatAuditMetricValue(metricName, min)} - ${formatAuditMetricValue(metricName, max)}`;
+};
+
+function RvSurfaceAuditCard({ auditResponse }: { auditResponse: DatasetAuditResponse }) {
+  const availableFeatures = auditResponse.available_rv_features;
+  const levels = RV_LEVEL_FEATURES.filter((feature) => availableFeatures.includes(feature));
+  const ratios = RV_RATIO_FEATURES.filter((feature) => availableFeatures.includes(feature));
+  const distributionMap = new Map(
+    auditResponse.numeric_distributions.map((metric) => [metric.name, metric]),
+  );
+  const rvFeatureAuditMap = new Map(
+    auditResponse.rv_feature_audit.map((item) => [item.feature, item]),
+  );
+  const contextMetrics = RV_CONTEXT_METRICS.map((metricName) => ({
+    metricName,
+    distribution: distributionMap.get(metricName),
+  })).filter(
+    (
+      item,
+    ): item is { metricName: (typeof RV_CONTEXT_METRICS)[number]; distribution: DatasetAuditDistribution } =>
+      Boolean(item.distribution),
+  );
+
+  return (
+    <section className="dataset-audit-card dataset-audit-card-wide dataset-audit-rv-card">
+      <div className="dataset-audit-card-header">
+        <h3>RV surface</h3>
+        <span>{availableFeatures.length} features</span>
+      </div>
+      {availableFeatures.length > 0 ? (
+        <>
+          <div className="dataset-audit-rv-section">
+            <div className="dataset-audit-rv-section-title">Feature families</div>
+            <div className="dataset-audit-rv-group-grid">
+              <div className="dataset-audit-rv-group">
+                <span className="meta-label">Levels</span>
+                <div className="dataset-audit-chip-row">
+                  {levels.length > 0 ? (
+                    levels.map((feature) => (
+                      <span key={feature} className="dataset-audit-chip">
+                        {feature}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="dataset-audit-rv-empty-inline">No level RV features</span>
+                  )}
+                </div>
+              </div>
+              <div className="dataset-audit-rv-group">
+                <span className="meta-label">Regime ratios</span>
+                <div className="dataset-audit-chip-row">
+                  {ratios.length > 0 ? (
+                    ratios.map((feature) => (
+                      <span key={feature} className="dataset-audit-chip">
+                        {feature}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="dataset-audit-rv-empty-inline">No RV ratio features</span>
+                  )}
+                </div>
+                <p className="dataset-audit-rv-caption">
+                  Ratios above 1 mean shorter-window RV is above the longer-window RV.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="dataset-audit-rv-section">
+            <div className="dataset-audit-rv-section-title">Distribution range</div>
+            <div className="dataset-audit-rv-rail-list">
+              {availableFeatures.map((feature) => {
+                const distribution = distributionMap.get(feature);
+                if (!distribution) {
+                  return (
+                    <div key={feature} className="dataset-audit-rv-rail-row muted">
+                      <div className="dataset-audit-rv-feature-label">
+                        <code>{feature}</code>
+                      </div>
+                      <div className="dataset-preview-empty">No finite values available.</div>
+                    </div>
+                  );
+                }
+
+                const bandStart = railPositionPercent(
+                  distribution.p05,
+                  distribution.min,
+                  distribution.max,
+                );
+                const bandEnd = railPositionPercent(
+                  distribution.p95,
+                  distribution.min,
+                  distribution.max,
+                );
+                const medianPosition = railPositionPercent(
+                  distribution.p50,
+                  distribution.min,
+                  distribution.max,
+                );
+
+                return (
+                  <div key={feature} className="dataset-audit-rv-rail-row">
+                    <div className="dataset-audit-rv-feature-label">
+                      <code>{feature}</code>
+                    </div>
+                    <div className="dataset-audit-rv-rail-block">
+                      <div className="dataset-audit-rv-rail-track">
+                        <span
+                          className="dataset-audit-rv-rail-band"
+                          style={{
+                            left: `${bandStart}%`,
+                            width: `${Math.max(bandEnd - bandStart, 1)}%`,
+                          }}
+                        />
+                        <span
+                          className="dataset-audit-rv-rail-marker"
+                          style={{ left: `${medianPosition}%` }}
+                        />
+                      </div>
+                      <div className="dataset-audit-rv-rail-range">
+                        <span>min {formatAuditMetricValue(feature, distribution.min)}</span>
+                        <span>max {formatAuditMetricValue(feature, distribution.max)}</span>
+                      </div>
+                    </div>
+                    <div className="dataset-audit-rv-rail-values">
+                      <span>P05 {formatAuditMetricValue(feature, distribution.p05)}</span>
+                      <span>P50 {formatAuditMetricValue(feature, distribution.p50)}</span>
+                      <span>P95 {formatAuditMetricValue(feature, distribution.p95)}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="dataset-audit-rv-section">
+            <div className="dataset-audit-rv-section-title">Quality by RV tercile</div>
+            <div className="dataset-audit-rv-tercile-table-wrap">
+              <table className="dataset-audit-rv-tercile-table">
+                <colgroup>
+                  <col className="dataset-audit-rv-tercile-col-feature" />
+                  <col className="dataset-audit-rv-tercile-col-coverage" />
+                  {RV_TERCILE_BUCKETS.map((label) => (
+                    <Fragment key={`cols-${label}`}>
+                      <col className="dataset-audit-rv-tercile-col-range" />
+                      <col className="dataset-audit-rv-tercile-col-metric" />
+                      <col className="dataset-audit-rv-tercile-col-metric" />
+                    </Fragment>
+                  ))}
+                </colgroup>
+                <thead>
+                  <tr className="dataset-audit-rv-tercile-group-row">
+                    <th scope="col" rowSpan={2}>
+                      Feature
+                    </th>
+                    <th scope="col" rowSpan={2}>
+                      Coverage
+                    </th>
+                    {RV_TERCILE_BUCKETS.map((label) => (
+                      <th
+                        key={label}
+                        scope="colgroup"
+                        colSpan={3}
+                        className="dataset-audit-rv-tercile-group-head dataset-audit-rv-tercile-divider-col"
+                      >
+                        {label}
+                      </th>
+                    ))}
+                  </tr>
+                  <tr className="dataset-audit-rv-tercile-subhead-row">
+                    {RV_TERCILE_BUCKETS.map((label) => (
+                      <Fragment key={`subhead-${label}`}>
+                        <th scope="col" className="dataset-audit-rv-tercile-divider-col">
+                          Range
+                        </th>
+                        <th scope="col">Issues</th>
+                        <th scope="col">Flagged</th>
+                      </Fragment>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {availableFeatures.map((feature) => {
+                    const featureAudit = rvFeatureAuditMap.get(feature);
+                    const bucketMap = new Map(
+                      (featureAudit?.buckets ?? []).map((bucket) => [bucket.label, bucket] as const),
+                    );
+
+                    return (
+                      <tr key={feature}>
+                        <th scope="row" className="dataset-audit-rv-tercile-feature-cell">
+                          <code>{feature}</code>
+                        </th>
+                        <td className="dataset-audit-rv-tercile-coverage-cell">
+                          {featureAudit
+                            ? `${featureAudit.finite_row_count.toLocaleString()} finite rows · ${formatPercent(
+                                featureAudit.finite_row_share,
+                              )} coverage`
+                            : "No RV audit summary"}
+                        </td>
+                        {RV_TERCILE_BUCKETS.map((label) => {
+                          const bucket = bucketMap.get(label);
+                          return (
+                            <Fragment key={`${feature}-${label}`}>
+                              <td className="dataset-audit-rv-tercile-range-cell dataset-audit-rv-tercile-divider-col">
+                                {bucket
+                                  ? formatAuditRange(feature, bucket.value_min, bucket.value_max)
+                                  : "—"}
+                              </td>
+                              <td className="dataset-audit-rv-tercile-metric-cell">
+                                {bucket
+                                  ? formatAuditMetricValue(
+                                      "quality_issue_count",
+                                      bucket.avg_issue_count,
+                                    )
+                                  : "—"}
+                              </td>
+                              <td className="dataset-audit-rv-tercile-metric-cell">
+                                {bucket ? formatPercent(bucket.flagged_share) : "—"}
+                              </td>
+                            </Fragment>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      ) : (
+        <div className="dataset-preview-empty">No RV features detected.</div>
+      )}
+
+      {contextMetrics.length > 0 ? (
+        <div className="dataset-audit-rv-section">
+          <div className="dataset-audit-rv-section-title">Quality context</div>
+          <div className="dataset-audit-rv-context-grid">
+            {contextMetrics.map(({ metricName, distribution }) => (
+              <div key={metricName} className="dataset-audit-rv-context-card">
+                <code>{metricName}</code>
+                <strong>P50 {formatAuditMetricValue(metricName, distribution.p50)}</strong>
+                <span>
+                  P05 {formatAuditMetricValue(metricName, distribution.p05)} · P95{" "}
+                  {formatAuditMetricValue(metricName, distribution.p95)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 type PreviewMode = "head" | "tail";
 
 const PREVIEW_LIMIT_DEFAULT = 20;
@@ -403,6 +905,25 @@ const buildRunFiles = (run: DatasetRunSummary): DatasetFileSummary[] => {
   return dedupeFiles(fallback);
 };
 
+const isCleanedDatasetFile = (file: DatasetFileSummary): boolean =>
+  file.name.toLowerCase().endsWith("-cleaned.csv");
+
+const RUN_CARD_TOGGLE_IGNORE_SELECTOR = [
+  "button",
+  "a",
+  "input",
+  "select",
+  "textarea",
+  "label",
+  "[role='button']",
+  "[role='link']",
+  ".dataset-run-files-drawer",
+].join(", ");
+
+const shouldIgnoreRunCardToggle = (target: EventTarget | null): boolean =>
+  target instanceof Element &&
+  Boolean(target.closest(RUN_CARD_TOGGLE_IGNORE_SELECTOR));
+
 const sortRunFiles = (
   files: DatasetFileSummary[],
   trainingPath?: string | null,
@@ -433,18 +954,108 @@ const countMondaysInRange = (start: string, end: string): number | null => {
   return count;
 };
 
+const DATE_RANGE_ERROR = "End date must be on or after start date.";
+
+const LIVE_PHASE_LABELS: Record<DatasetJobTelemetry["phase"], string> = {
+  planning: "Planning",
+  preloading_stock: "Preloading closes",
+  preloading_dividends: "Preloading dividends",
+  building: "Building snapshots",
+  finalizing: "Finalizing dataset",
+  writing_outputs: "Writing CSVs",
+  finished: "Finished",
+};
+
+type QuickAuditCheckKey = keyof DatasetJobGroupChecks;
+
+const QUICK_AUDIT_CHECKS: Array<{
+  key: QuickAuditCheckKey;
+  label: string;
+  description: string;
+}> = [
+  {
+    key: "asof_close_fallback",
+    label: "As-of fallback",
+    description: "Snapshot close had to fall forward from the target date.",
+  },
+  {
+    key: "expiry_close_fallback",
+    label: "Expiry fallback",
+    description: "Expiry close had to fall backward from Friday.",
+  },
+  {
+    key: "expiry_saturday_fallback",
+    label: "Saturday expiry",
+    description: "The option chain was pulled from Saturday instead of Friday.",
+  },
+  {
+    key: "quote_close_fallback",
+    label: "Close quote source",
+    description: "Close prices were used instead of bid/ask mid quotes.",
+  },
+  {
+    key: "low_chain_used",
+    label: "Thin chain",
+    description: "The kept group used fewer strikes than the comfort threshold.",
+  },
+  {
+    key: "wide_rel_spread",
+    label: "Wide spread",
+    description: "Median relative spread crossed the warning threshold.",
+  },
+];
+
+const formatDurationFromSeconds = (value?: number | null): string => {
+  if (value == null || !Number.isFinite(value) || value < 0) return "—";
+  const wholeSeconds = Math.round(value);
+  if (wholeSeconds < 60) return `${wholeSeconds}s`;
+  const minutes = Math.floor(wholeSeconds / 60);
+  const seconds = wholeSeconds % 60;
+  if (minutes < 60) return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remMinutes = minutes % 60;
+  return remMinutes > 0 ? `${hours}h ${remMinutes}m` : `${hours}h`;
+};
+
+const countDropReasons = (dropReasons?: Record<string, number> | null): number =>
+  Object.values(dropReasons ?? {}).reduce((sum, count) => sum + (count ?? 0), 0);
+
+const topDropReason = (dropReasons?: Record<string, number> | null): string => {
+  const entries = Object.entries(dropReasons ?? {});
+  if (!entries.length) return "—";
+  entries.sort((a, b) => {
+    if (b[1] !== a[1]) return b[1] - a[1];
+    return a[0].localeCompare(b[0]);
+  });
+  return entries[0][0].replace(/_/g, " ");
+};
+
+const getTickerDropShare = (item: DatasetJobTickerTelemetry): number => {
+  if (!item.completed_jobs) return 0;
+  return countDropReasons(item.drop_reasons) / item.completed_jobs;
+};
+
+const hasInvalidDateRange = (start: string, end: string): boolean => {
+  if (!start || !end) return false;
+  const startDate = new Date(`${start}T00:00:00Z`);
+  const endDate = new Date(`${end}T00:00:00Z`);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+    return false;
+  }
+  return endDate < startDate;
+};
+
 export default function DatasetsPage() {
   const [formState, setFormState] = useState<DatasetFormState>(defaultForm);
   const [isRunning, setIsRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [runResult, setRunResult] = useState<DatasetRunResponse | null>(null);
-  const [workspaceTab, setWorkspaceTab] = useState<
-    "run_job" | "run_directory" | "documentation"
-  >("run_job");
+  const [workspaceTab, setWorkspaceTab] = useState<"run_job" | "run_directory">(
+    "run_job",
+  );
   const [runJobPanel, setRunJobPanel] = useState<"configuration" | "active_run">(
     "configuration",
   );
-  const [activeLog, setActiveLog] = useState<"stdout" | "stderr" | null>(null);
   const [storageReady, setStorageReady] = useState(false);
   const { jobStatus, jobId, setJobId, setJobStatus: setGlobalJobStatus } =
     useDatasetJob();
@@ -458,6 +1069,16 @@ export default function DatasetsPage() {
     useState<DatasetPreviewResponse | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [auditTargetPath, setAuditTargetPath] = useState<string | null>(null);
+  const [auditResponse, setAuditResponse] =
+    useState<DatasetAuditResponse | null>(null);
+  const [auditError, setAuditError] = useState<string | null>(null);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [heatmapMetric, setHeatmapMetric] = useState<HeatmapMetric>("issues");
+  const [activeRunAuditResponse, setActiveRunAuditResponse] =
+    useState<DatasetAuditResponse | null>(null);
+  const [activeRunAuditError, setActiveRunAuditError] = useState<string | null>(null);
+  const [activeRunAuditLoading, setActiveRunAuditLoading] = useState(false);
   const [previewMode, setPreviewMode] = useState<PreviewMode>("head");
   const [previewLimit, setPreviewLimit] = useState<number>(
     PREVIEW_LIMIT_DEFAULT,
@@ -469,6 +1090,22 @@ export default function DatasetsPage() {
   const [renameValue, setRenameValue] = useState<string>("");
   const [renameError, setRenameError] = useState<string | null>(null);
   const [renameLoading, setRenameLoading] = useState(false);
+  const [cleanupTarget, setCleanupTarget] = useState<CleanupModalTarget | null>(
+    null,
+  );
+  const [cleanupCriteriaForm, setCleanupCriteriaForm] =
+    useState<CleanupCriteriaFormState>(DEFAULT_CLEANUP_CRITERIA_FORM);
+  const [cleanupPreviewResponse, setCleanupPreviewResponse] =
+    useState<DatasetCleanupPreviewResponse | null>(null);
+  const [cleanupPreviewError, setCleanupPreviewError] = useState<string | null>(
+    null,
+  );
+  const [cleanupPreviewLoading, setCleanupPreviewLoading] = useState(false);
+  const [cleanupConfirmText, setCleanupConfirmText] = useState("");
+  const [cleanupApplyLoading, setCleanupApplyLoading] = useState(false);
+  const [cleanupActionError, setCleanupActionError] = useState<string | null>(
+    null,
+  );
   // Accordion: tracks which run's CSV file list is expanded — null means all collapsed.
   // Single value ensures only one run can be open at a time without per-item flags.
   const [openRunId, setOpenRunId] = useState<string | null>(null);
@@ -510,6 +1147,10 @@ export default function DatasetsPage() {
   const resolvedTickersCount = selectedTickers.length;
   const weeksCount = useMemo(
     () => countMondaysInRange(formState.start, formState.end),
+    [formState.start, formState.end],
+  );
+  const dateRangeInvalid = useMemo(
+    () => hasInvalidDateRange(formState.start, formState.end),
     [formState.start, formState.end],
   );
   const expiryWeekdays = useMemo(
@@ -586,6 +1227,15 @@ export default function DatasetsPage() {
   }, [refreshDatasetRuns]);
 
   useEffect(() => {
+    if (!isDatasetJobActive) return undefined;
+    void refreshDatasetRuns();
+    const intervalId = window.setInterval(() => {
+      void refreshDatasetRuns();
+    }, 1000);
+    return () => window.clearInterval(intervalId);
+  }, [isDatasetJobActive, refreshDatasetRuns]);
+
+  useEffect(() => {
     if (selectedTickers.length === 0) {
       updateTickers(TRADING_UNIVERSE_TICKERS);
     }
@@ -624,6 +1274,7 @@ export default function DatasetsPage() {
   const plannedWeeksLabel =
     expiriesCount !== null ? `${expiriesCount} expiries` : "Expiries pending";
   const jobProgress = jobStatus?.progress ?? null;
+  const currentTelemetry = jobStatus?.telemetry ?? null;
   const progressPercent =
     jobProgress && jobProgress.total > 0
       ? Math.round((jobProgress.done / jobProgress.total) * 100)
@@ -640,6 +1291,16 @@ export default function DatasetsPage() {
     jobStatus?.result?.stderr ||
     runResult?.stderr ||
     "";
+  const recentWarnings = useMemo(
+    () =>
+      stdoutText
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.startsWith("[WARN]"))
+        .slice(-3)
+        .reverse(),
+    [stdoutText],
+  );
   const currentResult = jobStatus?.result ?? runResult;
   const statusClass = jobStatus
     ? jobStatus.status === "running" || jobStatus.status === "queued"
@@ -664,11 +1325,177 @@ export default function DatasetsPage() {
   );
   const showNewJobButton = Boolean(jobStatus && !isJobInFlight);
   const datasetNameKebab = toKebabCase(formState.datasetName);
+  const outputLocationLabel =
+    currentResult?.output_file ??
+    currentResult?.run_dir ??
+    `${currentResult?.out_dir ?? formState.outDir}/${datasetNameKebab || "(pending)"}`;
   const trainingDatasetPath =
-    currentResult?.out_dir && datasetNameKebab
+    currentResult?.training_file ??
+    (currentResult?.out_dir && datasetNameKebab
       ? `${currentResult.out_dir}/${datasetNameKebab}/training-${datasetNameKebab}.csv`
-      : null;
+      : null);
   const trainingDatasetEnabled = formState.writeTrainView;
+  const activeRunAuditPath =
+    jobStatus?.status === "finished" && currentResult?.ok
+      ? currentResult?.training_file ?? null
+      : null;
+  const liveTickerItems = currentTelemetry?.tickers ?? [];
+  const telemetryKeptGroups =
+    jobProgress?.groups ??
+    liveTickerItems.reduce((sum, item) => sum + item.kept_groups, 0);
+  const elapsedSeconds = useMemo(() => {
+    if (currentResult) return currentResult.duration_s;
+    if (!jobStatus?.started_at) return null;
+    const started = new Date(jobStatus.started_at).getTime();
+    if (!Number.isFinite(started)) return null;
+    const finished = jobStatus.finished_at
+      ? new Date(jobStatus.finished_at).getTime()
+      : Date.now();
+    if (!Number.isFinite(finished) || finished < started) return null;
+    return (finished - started) / 1000;
+  }, [currentResult, jobStatus?.finished_at, jobStatus?.started_at]);
+  const jobsPerMinute =
+    jobProgress && elapsedSeconds && elapsedSeconds > 0
+      ? (jobProgress.done / elapsedSeconds) * 60
+      : null;
+  const remainingJobs =
+    jobProgress ? Math.max(0, jobProgress.total - jobProgress.done) : null;
+  const etaSeconds =
+    jobsPerMinute && remainingJobs != null && jobsPerMinute > 0
+      ? (remainingJobs / jobsPerMinute) * 60
+      : null;
+  const keptGroupRate =
+    jobProgress && jobProgress.done > 0
+      ? telemetryKeptGroups / jobProgress.done
+      : null;
+  const rowsPerKeptGroup =
+    jobProgress && telemetryKeptGroups > 0
+      ? jobProgress.rows / telemetryKeptGroups
+      : null;
+  const phaseLabel = currentTelemetry
+    ? LIVE_PHASE_LABELS[currentTelemetry.phase]
+    : jobStatus?.status === "queued"
+      ? LIVE_PHASE_LABELS.planning
+      : "Waiting for telemetry";
+  const quickAuditChecks = useMemo(
+    () =>
+      QUICK_AUDIT_CHECKS.map((item) => {
+        const count = currentTelemetry?.group_checks?.[item.key] ?? 0;
+        const share =
+          telemetryKeptGroups > 0 ? count / Math.max(telemetryKeptGroups, 1) : null;
+        return {
+          ...item,
+          count,
+          share,
+        };
+      }),
+    [currentTelemetry, telemetryKeptGroups],
+  );
+  const problemTickers = useMemo(() => {
+    return [...liveTickerItems]
+      .map(normalizeLiveProblemTicker)
+      .filter((item): item is ProblemTickerCardItem => item !== null)
+      .sort(compareProblemTickerCardItems)
+      .slice(0, 6);
+  }, [liveTickerItems]);
+  const tickerProgressItems = useMemo(() => {
+    return [...liveTickerItems]
+      .filter((item) => item.completed_jobs > 0)
+      .sort((a, b) => {
+        const dropShareDiff = getTickerDropShare(b) - getTickerDropShare(a);
+        if (dropShareDiff !== 0) return dropShareDiff;
+        if (b.completed_jobs !== a.completed_jobs) {
+          return b.completed_jobs - a.completed_jobs;
+        }
+        return a.ticker.localeCompare(b.ticker);
+      })
+      .slice(0, 6);
+  }, [liveTickerItems]);
+  const compactAuditFlags = activeRunAuditResponse?.quality_flags.slice(0, 5) ?? [];
+  const compactProblemTickers = useMemo(
+    () =>
+      (activeRunAuditResponse?.top_problem_tickers ?? [])
+        .slice(0, 5)
+        .map(normalizeAuditProblemTicker),
+    [activeRunAuditResponse],
+  );
+  const fullAuditProblemTickers = useMemo(
+    () => (auditResponse?.top_problem_tickers ?? []).map(normalizeAuditProblemTicker),
+    [auditResponse],
+  );
+  const cleanupTargetTrainingPath = cleanupTarget?.trainingFile.path ?? null;
+  const cleanupAudit = useMemo(() => {
+    if (!cleanupTargetTrainingPath) return null;
+    return auditResponse?.file.path === cleanupTargetTrainingPath ? auditResponse : null;
+  }, [auditResponse, cleanupTargetTrainingPath]);
+  const cleanupAuditRequestError = useMemo(() => {
+    if (!cleanupTargetTrainingPath || auditTargetPath !== cleanupTargetTrainingPath) {
+      return null;
+    }
+    return auditError;
+  }, [auditError, auditTargetPath, cleanupTargetTrainingPath]);
+  const cleanupAuditRequestLoading =
+    Boolean(cleanupTargetTrainingPath) &&
+    auditTargetPath === cleanupTargetTrainingPath &&
+    auditLoading;
+  const cleanupCriteriaPayload = useMemo(
+    () => ({
+      qualityBuckets:
+        cleanupCriteriaForm.mode === "quality_buckets"
+          ? cleanupCriteriaForm.qualityBuckets
+          : [],
+      flagColumns:
+        cleanupCriteriaForm.mode === "flags" ? cleanupCriteriaForm.selectedFlags : [],
+      flagMatchMode:
+        cleanupCriteriaForm.mode === "flags"
+          ? cleanupCriteriaForm.flagMatchMode
+          : undefined,
+    }),
+    [cleanupCriteriaForm],
+  );
+  const cleanupCanApply = Boolean(
+    cleanupPreviewResponse &&
+      cleanupConfirmText === "CLEAN" &&
+      !cleanupPreviewLoading &&
+      !cleanupApplyLoading &&
+      cleanupPreviewResponse.rows_to_drop > 0 &&
+      !cleanupPreviewResponse.would_drop_all,
+  );
+  const cleanupFlagOptions = cleanupAudit?.available_quality_flags ?? [];
+  const cleanupModeHasSelection =
+    cleanupCriteriaForm.mode === "quality_buckets"
+      ? cleanupCriteriaForm.qualityBuckets.length > 0
+      : cleanupCriteriaForm.selectedFlags.length > 0;
+  const criticalErrorText = (
+    stderrText ||
+    jobStatus?.error ||
+    runError ||
+    (jobStatus?.status === "cancelled" ? "Dataset creation was cancelled." : "")
+  ).trim();
+  const showCriticalErrors = Boolean(
+    stderrText.trim() ||
+      jobStatus?.status === "failed" ||
+      jobStatus?.status === "cancelled",
+  );
+  const heatmapTickers = useMemo(() => {
+    if (!auditResponse) return [];
+    return auditResponse.top_problem_tickers.map((item) => item.ticker);
+  }, [auditResponse]);
+  const heatmapCellMap = useMemo(() => {
+    if (!auditResponse) {
+      return new Map<string, NonNullable<DatasetAuditResponse["heatmap_cells"]>[number]>();
+    }
+    return new Map(
+      auditResponse.heatmap_cells.map((cell) => [
+        `${cell.ticker}__${cell.asof_date}`,
+        cell,
+      ]),
+    );
+  }, [auditResponse]);
+  const heatmapMaxRows = useMemo(() => {
+    if (!auditResponse || auditResponse.heatmap_cells.length === 0) return 1;
+    return Math.max(...auditResponse.heatmap_cells.map((cell) => cell.row_count), 1);
+  }, [auditResponse]);
 
   useEffect(() => {
     if (!jobStatus || jobStatus.status !== "finished") return;
@@ -688,6 +1515,35 @@ export default function DatasetsPage() {
     trainingDatasetPath,
     trainingDatasetEnabled,
   ]);
+
+  useEffect(() => {
+    if (!activeRunAuditPath) {
+      setActiveRunAuditResponse(null);
+      setActiveRunAuditError(null);
+      setActiveRunAuditLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setActiveRunAuditLoading(true);
+    setActiveRunAuditError(null);
+    auditDatasetFile(activeRunAuditPath)
+      .then((result) => {
+        if (cancelled) return;
+        setActiveRunAuditResponse(result);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setActiveRunAuditResponse(null);
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setActiveRunAuditError(message);
+      })
+      .finally(() => {
+        if (!cancelled) setActiveRunAuditLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeRunAuditPath]);
 
   useEffect(() => {
     if (!previewTarget) {
@@ -717,6 +1573,111 @@ export default function DatasetsPage() {
       cancelled = true;
     };
   }, [previewTarget, previewMode, previewLimit]);
+
+  useEffect(() => {
+    if (!auditTargetPath) {
+      setAuditResponse(null);
+      setAuditError(null);
+      setAuditLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setAuditLoading(true);
+    setAuditError(null);
+    auditDatasetFile(auditTargetPath)
+      .then((result) => {
+        if (cancelled) return;
+        setAuditResponse(result);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setAuditResponse(null);
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setAuditError(message);
+      })
+      .finally(() => {
+        if (!cancelled) setAuditLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [auditTargetPath]);
+
+  useEffect(() => {
+    if (!cleanupTargetTrainingPath) {
+      setCleanupPreviewResponse(null);
+      setCleanupPreviewError(null);
+      setCleanupPreviewLoading(false);
+      setCleanupConfirmText("");
+      setCleanupActionError(null);
+      return;
+    }
+    if (auditTargetPath !== cleanupTargetTrainingPath) {
+      setAuditTargetPath(cleanupTargetTrainingPath);
+    }
+  }, [auditTargetPath, cleanupTargetTrainingPath]);
+
+  useEffect(() => {
+    if (!cleanupTarget || !cleanupTargetTrainingPath) {
+      return;
+    }
+    if (cleanupAuditRequestLoading) {
+      setCleanupPreviewLoading(true);
+      return;
+    }
+    if (cleanupAuditRequestError) {
+      setCleanupPreviewResponse(null);
+      setCleanupPreviewError(cleanupAuditRequestError);
+      setCleanupPreviewLoading(false);
+      return;
+    }
+    if (!cleanupAudit) {
+      return;
+    }
+    if (!cleanupModeHasSelection) {
+      setCleanupPreviewResponse(null);
+      setCleanupPreviewError(null);
+      setCleanupPreviewLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    const timeoutId = window.setTimeout(() => {
+      setCleanupPreviewLoading(true);
+      setCleanupPreviewError(null);
+      setCleanupActionError(null);
+      previewDatasetCleanup({
+        runDir: cleanupTarget.runDir,
+        criteria: cleanupCriteriaPayload,
+      })
+        .then((result) => {
+          if (cancelled) return;
+          setCleanupPreviewResponse(result);
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          setCleanupPreviewResponse(null);
+          const message = err instanceof Error ? err.message : "Unknown error";
+          setCleanupPreviewError(message);
+        })
+        .finally(() => {
+          if (!cancelled) setCleanupPreviewLoading(false);
+        });
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [
+    cleanupAudit,
+    cleanupAuditRequestError,
+    cleanupAuditRequestLoading,
+    cleanupModeHasSelection,
+    cleanupCriteriaPayload,
+    cleanupTarget,
+    cleanupTargetTrainingPath,
+  ]);
 
   useEffect(() => {
     const stored = loadStoredForm();
@@ -753,12 +1714,19 @@ export default function DatasetsPage() {
     setRunResult(null);
     setGlobalJobStatus(null);
     setJobId(null);
-    setActiveLog(null);
+    setActiveRunAuditResponse(null);
+    setActiveRunAuditError(null);
+    setActiveRunAuditLoading(false);
     setIsRunning(true);
 
     try {
       if (!formState.datasetName.trim()) {
         setRunError("Dataset name is required.");
+        setIsRunning(false);
+        return;
+      }
+      if (dateRangeInvalid) {
+        setRunError(DATE_RANGE_ERROR);
         setIsRunning(false);
         return;
       }
@@ -829,6 +1797,7 @@ export default function DatasetsPage() {
 
       const status = await startDatasetJob(payload);
       updateJobState(status);
+      await refreshDatasetRuns();
       setRunJobPanel("active_run");
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
@@ -851,9 +1820,15 @@ export default function DatasetsPage() {
     }
   };
 
-  const handlePreviewSelection = useCallback((target: PreviewTarget) => {
-    setPreviewTarget(target);
-  }, []);
+  const handlePreviewSelection = useCallback(
+    (target: PreviewTarget, options?: { auditPath?: string | null }) => {
+      setPreviewTarget(target);
+      if (options && "auditPath" in options) {
+        setAuditTargetPath(options.auditPath ?? null);
+      }
+    },
+    [],
+  );
 
   const handleDeleteRun = async (runId: string, runDir: string) => {
     setDeleteLoadingRun(runId);
@@ -863,6 +1838,9 @@ export default function DatasetsPage() {
       setDeleteConfirmText("");
       if (previewTarget?.path.startsWith(runDir)) {
         setPreviewTarget(null);
+      }
+      if (auditTargetPath?.startsWith(runDir)) {
+        setAuditTargetPath(null);
       }
       await refreshDatasetRuns();
     } catch (err) {
@@ -901,6 +1879,9 @@ export default function DatasetsPage() {
       if (previewTarget?.path.startsWith(runDir)) {
         setPreviewTarget(null);
       }
+      if (auditTargetPath?.startsWith(runDir)) {
+        setAuditTargetPath(null);
+      }
       handleCancelRename();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
@@ -910,30 +1891,92 @@ export default function DatasetsPage() {
     }
   };
 
-  const handleStartDateChange = useCallback((value: string) => {
-    setFormState((prev) => {
-      const nextStart = value;
-      const nextEnd =
-        prev.end && nextStart && prev.end < nextStart ? nextStart : prev.end;
-      return {
+  const handleOpenCleanupModal = useCallback(
+    (run: DatasetRunSummary, trainingFile: DatasetFileSummary) => {
+      const runName = run.run_dir.split("/").pop() ?? run.id;
+      setCleanupTarget({
+        runId: run.id,
+        runDir: run.run_dir,
+        runName,
+        trainingFile,
+      });
+      setCleanupCriteriaForm(DEFAULT_CLEANUP_CRITERIA_FORM);
+      setCleanupPreviewResponse(null);
+      setCleanupPreviewError(null);
+      setCleanupPreviewLoading(true);
+      setCleanupConfirmText("");
+      setCleanupActionError(null);
+      setAuditTargetPath(trainingFile.path);
+    },
+    [],
+  );
+
+  const handleCloseCleanupModal = useCallback(() => {
+    setCleanupTarget(null);
+    setCleanupPreviewResponse(null);
+    setCleanupPreviewError(null);
+    setCleanupPreviewLoading(false);
+    setCleanupConfirmText("");
+    setCleanupActionError(null);
+  }, []);
+
+  const toggleCleanupBucket = useCallback(
+    (bucket: "clean" | "watch" | "noisy") => {
+      setCleanupCriteriaForm((prev) => ({
         ...prev,
-        start: nextStart,
-        end: nextEnd,
-      };
-    });
+        qualityBuckets: prev.qualityBuckets.includes(bucket)
+          ? prev.qualityBuckets.filter((value) => value !== bucket)
+          : [...prev.qualityBuckets, bucket],
+      }));
+    },
+    [],
+  );
+
+  const toggleCleanupFlag = useCallback((flag: string) => {
+    setCleanupCriteriaForm((prev) => ({
+      ...prev,
+      selectedFlags: prev.selectedFlags.includes(flag)
+        ? prev.selectedFlags.filter((value) => value !== flag)
+        : [...prev.selectedFlags, flag],
+    }));
+  }, []);
+
+  const handleApplyCleanup = async () => {
+    if (!cleanupTarget || !cleanupCanApply) return;
+    setCleanupApplyLoading(true);
+    setCleanupActionError(null);
+    try {
+      const response = await applyDatasetCleanup({
+        runDir: cleanupTarget.runDir,
+        criteria: cleanupCriteriaPayload,
+      });
+      await refreshDatasetRuns();
+      const cleanedFileName =
+        response.cleaned_file.split("/").pop() ?? "training-cleaned.csv";
+      setWorkspaceTab("run_directory");
+      setOpenRunId(response.cleaned_run_dir);
+      setPreviewTarget({
+        label: `${cleanedFileName} (cleaned)`,
+        path: response.cleaned_file,
+      });
+      setAuditTargetPath(response.cleaned_file);
+      handleCloseCleanupModal();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setCleanupActionError(message);
+    } finally {
+      setCleanupApplyLoading(false);
+    }
+  };
+
+  const handleStartDateChange = useCallback((value: string) => {
+    setFormState((prev) => ({ ...prev, start: value }));
+    setRunError((current) => (current === DATE_RANGE_ERROR ? null : current));
   }, []);
 
   const handleEndDateChange = useCallback((value: string) => {
-    setFormState((prev) => {
-      const nextEnd = value;
-      const nextStart =
-        prev.start && nextEnd && prev.start > nextEnd ? nextEnd : prev.start;
-      return {
-        ...prev,
-        start: nextStart,
-        end: nextEnd,
-      };
-    });
+    setFormState((prev) => ({ ...prev, end: value }));
+    setRunError((current) => (current === DATE_RANGE_ERROR ? null : current));
   }, []);
 
   const toggleUniverseTicker = useCallback(
@@ -963,16 +2006,57 @@ export default function DatasetsPage() {
     setCustomTickerInput("");
   }, [customTickerInput, selectedTickers, updateTickers]);
 
-  const handleToggleLog = useCallback((target: "stdout" | "stderr") => {
-    setActiveLog((prev) => (prev === target ? null : target));
-  }, []);
-
   const handleNewJob = useCallback(() => {
     if (isDatasetJobActive) return;
     setRunJobPanel("configuration");
-    setActiveLog(null);
     setWorkspaceTab("run_job");
   }, [isDatasetJobActive]);
+  const handleViewLatestRun = useCallback(() => {
+    setRunJobPanel("active_run");
+    setWorkspaceTab("run_job");
+  }, []);
+  const toggleRunOpen = useCallback(
+    (
+      runId: string,
+      runDir: string,
+      fileCount: number,
+      trainingPath: string | null,
+      trainingFileName?: string | null,
+    ) => {
+      if (fileCount === 0) return;
+      setOpenRunId((prev) => {
+        const nextOpen = prev === runId ? null : runId;
+        if (nextOpen === runId) {
+          if (trainingPath) {
+            setAuditTargetPath(trainingPath);
+            setPreviewTarget((current) =>
+              current && current.path.startsWith(runDir)
+                ? current
+                : {
+                    label: `${trainingFileName ?? "training.csv"} (training)`,
+                    path: trainingPath,
+                  },
+            );
+          }
+        } else if (auditTargetPath?.startsWith(runDir)) {
+          setAuditTargetPath(null);
+        }
+        return nextOpen;
+      });
+    },
+    [auditTargetPath],
+  );
+  const handleOpenFullAudit = useCallback(() => {
+    if (!activeRunAuditPath) return;
+    const trainingName = activeRunAuditPath.split("/").pop() ?? activeRunAuditPath;
+    setWorkspaceTab("run_directory");
+    setOpenRunId(currentResult?.run_dir ?? null);
+    setPreviewTarget({
+      label: `${trainingName} (training)`,
+      path: activeRunAuditPath,
+    });
+    setAuditTargetPath(activeRunAuditPath);
+  }, [activeRunAuditPath, currentResult?.run_dir]);
   const deleteTargetRun = deleteConfirmRun
     ? datasetRuns.find((run) => run.id === deleteConfirmRun) ?? null
     : null;
@@ -1026,19 +2110,6 @@ export default function DatasetsPage() {
           >
             Datasets
           </button>
-          <button
-            id="datasets-tab-documentation"
-            type="button"
-            role="tab"
-            aria-selected={workspaceTab === "documentation"}
-            aria-controls="datasets-panel-documentation"
-            className={`datasets-workspace-tab ${
-              workspaceTab === "documentation" ? "active" : ""
-            }`}
-            onClick={() => setWorkspaceTab("documentation")}
-          >
-            Documentation
-          </button>
         </div>
 
         {workspaceTab === "run_job" ? (
@@ -1055,14 +2126,24 @@ export default function DatasetsPage() {
             <div>
               <h2 className="datasets-job-config-title">Job Configuration</h2>
             </div>
-            <button
-              className="button ghost datasets-config-action-button"
-              type="button"
-              disabled={isRunning}
-              onClick={() => setFormState(defaultForm)}
-            >
-              Reset config
-            </button>
+            <div className="datasets-job-config-actions">
+              <button
+                className="button ghost datasets-config-action-button"
+                type="button"
+                disabled={isRunning}
+                onClick={() => setFormState(defaultForm)}
+              >
+                Reset config
+              </button>
+              <button
+                className="button ghost datasets-config-action-button"
+                type="button"
+                disabled={!currentResult && !jobStatus}
+                onClick={handleViewLatestRun}
+              >
+                View Latest Run
+              </button>
+            </div>
           </div>
           <div className="config-summary">
             <div>
@@ -1096,17 +2177,18 @@ export default function DatasetsPage() {
           <form className="panel-body" onSubmit={handleSubmit}>
             <div className="section-card dataset-section datasets-core-range-section">
               <h3>Core range</h3>
-              <div className="inline-fields">
+              <div className="datasets-date-range-fields">
                 <div className="field">
                   <label htmlFor="datasetStart">Start date</label>
                   <input
                     id="datasetStart"
-                    className="input"
+                    className={`input ${dateRangeInvalid ? "input-invalid" : ""}`}
                     type="date"
                     min="2023-06-01"
                     max={todayDateString}
                     required
                     value={formState.start}
+                    aria-invalid={dateRangeInvalid}
                     onChange={(event) =>
                       handleStartDateChange(event.target.value)
                     }
@@ -1116,18 +2198,24 @@ export default function DatasetsPage() {
                   <label htmlFor="datasetEnd">End date</label>
                   <input
                     id="datasetEnd"
-                    className="input"
+                    className={`input ${dateRangeInvalid ? "input-invalid" : ""}`}
                     type="date"
-                    min={formState.start || "2023-06-01"}
+                    min="2023-06-01"
                     max={todayDateString}
                     required
                     value={formState.end}
+                    aria-invalid={dateRangeInvalid}
                     onChange={(event) =>
                       handleEndDateChange(event.target.value)
                     }
                   />
                 </div>
               </div>
+              {dateRangeInvalid ? (
+                <p className="field-hint datasets-date-range-hint is-invalid">
+                  {DATE_RANGE_ERROR}
+                </p>
+              ) : null}
               <div className="field datasets-ticker-universe-field">
                 <label>Trading universe</label>
                 <div className="ticker-grid">
@@ -1203,7 +2291,6 @@ export default function DatasetsPage() {
                   <input
                     id="datasetName"
                     className="input"
-                    placeholder="e.g. pm10-mon-thu-v2"
                     required
                     value={formState.datasetName}
                     onChange={(event) =>
@@ -1364,12 +2451,6 @@ export default function DatasetsPage() {
                       }))
                     }
                   />
-                  <span className="field-hint">
-                    Days to observe the chain.{" "}
-                    {formState.dteList.trim()
-                      ? "Disabled because DTE list is set."
-                      : "e.g. mon,tue,wed,thu"}
-                  </span>
                 </div>
                 <div className="field">
                   <label htmlFor="dteList">DTE list (overrides weekdays)</label>
@@ -1385,9 +2466,6 @@ export default function DatasetsPage() {
                       }))
                     }
                   />
-                  <span className="field-hint">
-                    Days-to-expiry to observe. Leave blank to use weekdays above.
-                  </span>
                 </div>
               </div>
               {formState.dteList.trim() ? (
@@ -2078,7 +3156,7 @@ export default function DatasetsPage() {
             <div>
               <h2 className="datasets-job-config-title">Active Run</h2>
               <span className="panel-hint">
-                Captures stdout/stderr from the dataset script.
+                Monitor build telemetry, quick audit checks, and critical stderr.
               </span>
             </div>
             {showNewJobButton ? (
@@ -2166,9 +3244,6 @@ export default function DatasetsPage() {
                           />
                         </div>
                       </div>
-                      <p className="run-feedback-note">
-                        Progress updates print every 100 jobs in stdout.
-                      </p>
                       {(jobStatus.status === "running" ||
                         jobStatus.status === "queued") ? (
                         <button
@@ -2198,10 +3273,7 @@ export default function DatasetsPage() {
                       <div className="run-summary-header">
                         <div>
                           <span className="meta-label">Output</span>
-                          <div className="run-id">
-                            {currentResult?.output_file ??
-                              `${currentResult?.out_dir ?? formState.outDir}/${datasetNameKebab || "(pending)"}`}
-                          </div>
+                          <div className="run-id">{outputLocationLabel}</div>
                         </div>
                         <div className="run-summary-actions">
                           <span className={`status-pill ${statusClass}`}>
@@ -2217,13 +3289,13 @@ export default function DatasetsPage() {
                               ? `${currentResult.duration_s.toFixed(2)}s`
                               : jobStatus.status === "running" ||
                                 jobStatus.status === "queued"
-                              ? "Running"
+                              ? formatDurationFromSeconds(elapsedSeconds)
                               : "Pending"}
                           </span>
                         </div>
                         <div>
                           <span className="meta-label">Output dir</span>
-                          <span>{currentResult?.out_dir ?? formState.outDir}</span>
+                          <span>{currentResult?.run_dir ?? currentResult?.out_dir ?? formState.outDir}</span>
                         </div>
                         <div>
                           <span className="meta-label">Training dataset</span>
@@ -2242,45 +3314,308 @@ export default function DatasetsPage() {
                         </div>
                       </div>
                     </div>
-                    <div className="log-tabs">
-                      <button
-                        className={`log-tab ${
-                          activeLog === "stdout" ? "active" : ""
-                        }`}
-                        type="button"
-                        aria-pressed={activeLog === "stdout"}
-                        onClick={() => handleToggleLog("stdout")}
-                      >
-                        stdout
-                      </button>
-                      <button
-                        className={`log-tab ${
-                          activeLog === "stderr" ? "active" : ""
-                        }`}
-                        type="button"
-                        aria-pressed={activeLog === "stderr"}
-                        onClick={() => handleToggleLog("stderr")}
-                      >
-                        stderr
-                      </button>
-                    </div>
-                    <div className="log-block">
-                      {activeLog ? (
-                        <>
-                          <span className="meta-label">{activeLog}</span>
-                          <pre>
-                            {activeLog === "stdout"
-                              ? stdoutText || "No stdout captured."
-                              : stderrText || "No stderr captured."}
-                          </pre>
-                        </>
+                    <div className="run-insights-panel">
+                      <div className="run-insights-header">
+                        <div>
+                          <span className="meta-label">Build insights</span>
+                          <p className="run-insights-title">
+                            {activeRunAuditPath
+                              ? "Compact final audit snapshot"
+                              : "Live build telemetry"}
+                          </p>
+                        </div>
+                        <span className={`status-pill ${statusClass}`}>
+                          {activeRunAuditPath ? "Audit ready" : phaseLabel}
+                        </span>
+                      </div>
+                      {activeRunAuditPath ? (
+                        activeRunAuditLoading ? (
+                          <div className="dataset-preview-empty">
+                            Loading final audit snapshot…
+                          </div>
+                        ) : activeRunAuditError ? (
+                          <div className="error">{activeRunAuditError}</div>
+                        ) : activeRunAuditResponse ? (
+                          <>
+                            <div className="dataset-audit-kpis run-final-audit-kpis">
+                              <div>
+                                <span className="meta-label">Rows</span>
+                                <strong>{activeRunAuditResponse.row_count.toLocaleString()}</strong>
+                              </div>
+                              <div>
+                                <span className="meta-label">Tickers</span>
+                                <strong>{activeRunAuditResponse.ticker_count?.toLocaleString() ?? "—"}</strong>
+                              </div>
+                              <div>
+                                <span className="meta-label">Snapshots</span>
+                                <strong>{activeRunAuditResponse.snapshot_count?.toLocaleString() ?? "—"}</strong>
+                              </div>
+                              <div>
+                                <span className="meta-label">Date range</span>
+                                <strong>
+                                  {activeRunAuditResponse.date_start &&
+                                  activeRunAuditResponse.date_end
+                                    ? `${activeRunAuditResponse.date_start} → ${activeRunAuditResponse.date_end}`
+                                    : "—"}
+                                </strong>
+                              </div>
+                              <div>
+                                <span className="meta-label">Expiry range</span>
+                                <strong>
+                                  {activeRunAuditResponse.expiry_start &&
+                                  activeRunAuditResponse.expiry_end
+                                    ? `${activeRunAuditResponse.expiry_start} → ${activeRunAuditResponse.expiry_end}`
+                                    : "—"}
+                                </strong>
+                              </div>
+                            </div>
+                            <div className="dataset-audit-grid run-final-audit-grid">
+                              <section className="dataset-audit-card">
+                                <div className="dataset-audit-card-header">
+                                  <h3>Quality flags</h3>
+                                  <span>Top 5 by share</span>
+                                </div>
+                                {compactAuditFlags.length > 0 ? (
+                                  <div className="dataset-audit-list">
+                                    {compactAuditFlags.map((flag) => {
+                                      const share = activeRunAuditResponse.row_count
+                                        ? flag.count / activeRunAuditResponse.row_count
+                                        : 0;
+                                      return (
+                                        <div key={flag.name} className="dataset-audit-list-row">
+                                          <div className="dataset-audit-list-label">
+                                            <code>{flag.name}</code>
+                                            <span>{flag.count.toLocaleString()} rows</span>
+                                          </div>
+                                          <div className="dataset-audit-bar-track">
+                                            <div
+                                              className="dataset-audit-bar-fill"
+                                              style={{ width: shareBarWidth(share) }}
+                                            />
+                                          </div>
+                                          <span className="dataset-audit-list-value">
+                                            {formatPercent(flag.share)}
+                                          </span>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                ) : (
+                                  <div className="dataset-preview-empty">
+                                    No quality flags were detected in the final training file.
+                                  </div>
+                                )}
+                              </section>
+                              <ProblemTickerAuditCard
+                                subtitle="Top 5 by issue load"
+                                items={compactProblemTickers}
+                                emptyMessage="No ticker-level issues were detected."
+                              />
+                            </div>
+                            <div className="run-insights-cta">
+                              <span>
+                                The full drill-through audit remains in the Run Directory tab.
+                              </span>
+                              <button
+                                className="button light"
+                                type="button"
+                                onClick={handleOpenFullAudit}
+                              >
+                                Open full audit
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="dataset-preview-empty">
+                            Final audit snapshot is not available yet.
+                          </div>
+                        )
                       ) : (
-                        <div className="log-empty-state">
-                          Select <strong>stdout</strong> or <strong>stderr</strong>{" "}
-                          to view logs.
+                        <div className="run-insights-grid">
+                          <section className="run-insight-card">
+                            <div className="run-insight-card-header">
+                              <h3>Build overview</h3>
+                              <span>{phaseLabel}</span>
+                            </div>
+                            <div className="run-insight-metrics">
+                              <div>
+                                <span className="meta-label">Status</span>
+                                <strong>{statusLabel}</strong>
+                              </div>
+                              <div>
+                                <span className="meta-label">Last job</span>
+                                <strong>
+                                  {jobProgress
+                                    ? `${jobProgress.lastTicker} · ${jobProgress.lastWeek} · ${jobProgress.lastAsof}`
+                                    : "Waiting for progress…"}
+                                </strong>
+                              </div>
+                              <div className="run-insight-metric-wide">
+                                <span className="meta-label">Output path</span>
+                                <strong>{outputLocationLabel}</strong>
+                              </div>
+                              <div>
+                                <span className="meta-label">Duration</span>
+                                <strong>{formatDurationFromSeconds(elapsedSeconds)}</strong>
+                              </div>
+                              <div>
+                                <span className="meta-label">Training dataset</span>
+                                <strong>{trainingDatasetPath ?? "Pending"}</strong>
+                              </div>
+                            </div>
+                          </section>
+                          <section className="run-insight-card">
+                            <div className="run-insight-card-header">
+                              <h3>Build yield</h3>
+                              <span>
+                                {jobProgress
+                                  ? `${jobProgress.done.toLocaleString()}/${jobProgress.total.toLocaleString()}`
+                                  : "Waiting"}
+                              </span>
+                            </div>
+                            <div className="run-insight-metrics">
+                              <div>
+                                <span className="meta-label">Progress</span>
+                                <strong>
+                                  {jobProgress
+                                    ? `${progressPercent ?? 0}%`
+                                    : "Waiting for progress…"}
+                                </strong>
+                              </div>
+                              <div>
+                                <span className="meta-label">Kept-group rate</span>
+                                <strong>{formatPercent(keptGroupRate)}</strong>
+                              </div>
+                              <div>
+                                <span className="meta-label">Rows</span>
+                                <strong>{jobProgress?.rows.toLocaleString() ?? "—"}</strong>
+                              </div>
+                              <div>
+                                <span className="meta-label">Rows / kept group</span>
+                                <strong>{formatNumeric(rowsPerKeptGroup, 1)}</strong>
+                              </div>
+                              <div>
+                                <span className="meta-label">Jobs / min</span>
+                                <strong>
+                                  {jobsPerMinute && Number.isFinite(jobsPerMinute)
+                                    ? jobsPerMinute.toFixed(1)
+                                    : "—"}
+                                </strong>
+                              </div>
+                              <div>
+                                <span className="meta-label">ETA</span>
+                                <strong>
+                                  {isJobInFlight
+                                    ? formatDurationFromSeconds(etaSeconds)
+                                    : "—"}
+                                </strong>
+                              </div>
+                            </div>
+                          </section>
+                          <section className="run-insight-card run-insight-card-wide">
+                            <div className="run-insight-card-header">
+                              <h3>Quick audit checks</h3>
+                              <span>{telemetryKeptGroups.toLocaleString()} kept groups</span>
+                            </div>
+                            <div className="run-check-grid">
+                              {quickAuditChecks.map((item) => (
+                                <div key={item.key} className="run-check-card" title={item.description}>
+                                  <div className="run-check-topline">
+                                    <span>{item.label}</span>
+                                    <strong>{item.count.toLocaleString()}</strong>
+                                  </div>
+                                  <div className="dataset-audit-bar-track">
+                                    <div
+                                      className="dataset-audit-bar-fill"
+                                      style={{ width: shareBarWidth(item.share) }}
+                                    />
+                                  </div>
+                                  <span className="run-check-share">
+                                    {item.share == null ? "Waiting for kept groups…" : formatPercent(item.share)}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </section>
+                          <ProblemTickerAuditCard
+                            className="dataset-audit-card"
+                            subtitle="Top 6 so far · kept rows only"
+                            items={problemTickers}
+                            emptyMessage="Waiting for enough kept rows to rank ticker diagnostics."
+                          />
+                          <section className="run-insight-card">
+                            <div className="run-insight-card-header">
+                              <h3>Ticker progress</h3>
+                              <span>
+                                {tickerProgressItems.length
+                                  ? "Top 6 by drop pressure"
+                                  : "No drop pressure yet"}
+                              </span>
+                            </div>
+                            {tickerProgressItems.length > 0 ? (
+                              <div className="run-ticker-table">
+                                <div className="run-ticker-table-head">
+                                  <span>Ticker</span>
+                                  <span>Done / planned</span>
+                                  <span>Kept</span>
+                                  <span>Rows</span>
+                                  <span>Top drop reason</span>
+                                </div>
+                                {tickerProgressItems.map((item) => (
+                                  <div key={item.ticker} className="run-ticker-table-row">
+                                    <strong>{item.ticker}</strong>
+                                    <span>
+                                      {item.completed_jobs.toLocaleString()} /{" "}
+                                      {item.planned_jobs.toLocaleString()}
+                                    </span>
+                                    <span>{item.kept_groups.toLocaleString()}</span>
+                                    <span>{item.rows.toLocaleString()}</span>
+                                    <span>
+                                      {topDropReason(item.drop_reasons)}{" "}
+                                      {countDropReasons(item.drop_reasons)
+                                        ? `(${formatPercent(getTickerDropShare(item))})`
+                                        : ""}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="dataset-preview-empty">
+                                Waiting for enough completed jobs to rank ticker risk.
+                              </div>
+                            )}
+                          </section>
+                          <section className="run-insight-card">
+                            <div className="run-insight-card-header">
+                              <h3>Recent warnings</h3>
+                              <span>{recentWarnings.length ? "Newest 3" : "No warnings yet"}</span>
+                            </div>
+                            {recentWarnings.length > 0 ? (
+                              <div className="run-warning-list">
+                                {recentWarnings.map((line, index) => (
+                                  <div key={`${line}-${index}`} className="run-warning-item">
+                                    <code>{line}</code>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="dataset-preview-empty">
+                                No high-value warnings have been emitted yet.
+                              </div>
+                            )}
+                          </section>
                         </div>
                       )}
                     </div>
+                    {showCriticalErrors ? (
+                      <div className="run-error-panel">
+                        <div className="run-insight-card-header">
+                          <h3>Critical errors</h3>
+                          <span>stderr</span>
+                        </div>
+                        <pre>{criticalErrorText || "No critical stderr captured."}</pre>
+                      </div>
+                    ) : null}
                     {currentResult?.command ? (
                       <details className="command-details">
                         <summary>Command used</summary>
@@ -2296,7 +3631,7 @@ export default function DatasetsPage() {
               )}
             </div>
           </div>
-        ) : workspaceTab === "run_directory" ? (
+        ) : (
           <div
             id="datasets-panel-run-directory"
             role="tabpanel"
@@ -2324,6 +3659,7 @@ export default function DatasetsPage() {
                 const runName = run.run_dir.split("/").pop() ?? run.id;
                 const trainingFile = run.training_file ?? null;
                 const trainingPath = trainingFile?.path ?? null;
+                const isCreatingRun = run.status === "creating";
                 const files = sortRunFiles(buildRunFiles(run), trainingPath);
                 const fileCount = files.length;
                 const filesLabel = fileCount
@@ -2336,12 +3672,38 @@ export default function DatasetsPage() {
                 const isPreviewingRun = Boolean(
                   previewTarget?.path.startsWith(run.run_dir),
                 );
+                const auditPathForRun = auditTargetPath?.startsWith(run.run_dir)
+                  ? auditTargetPath
+                  : null;
+                const isAuditingRun = Boolean(auditPathForRun);
+                const auditedFileName =
+                  auditPathForRun?.split("/").pop() ??
+                  trainingFile?.name ??
+                  "Training dataset";
                 // Derived from single openRunId state — no per-item boolean flags
                 const isOpen = openRunId === run.id;
                 return (
                   <article
                     key={run.id}
-                    className={`dataset-run-item${isOpen ? " is-open" : ""}`}
+                    className={`dataset-run-item${isOpen ? " is-open" : ""}${
+                      isCreatingRun ? " is-creating" : ""
+                    }`}
+                    onClick={
+                      isRenaming || fileCount === 0
+                        ? undefined
+                        : (event) => {
+                            if (shouldIgnoreRunCardToggle(event.target)) {
+                              return;
+                            }
+                            toggleRunOpen(
+                              run.id,
+                              run.run_dir,
+                              fileCount,
+                              trainingPath,
+                              trainingFile?.name,
+                            );
+                          }
+                    }
                   >
                     {/* ── Accordion Header ────────────────────────────────────────
                         Rename mode  : plain <div> — no toggle while input is active.
@@ -2410,18 +3772,23 @@ export default function DatasetsPage() {
                         aria-controls={
                           fileCount > 0 ? `run-files-${run.id}` : undefined
                         }
-                        onClick={() => {
-                          // No-op when no CSV files exist; otherwise toggle open/closed.
-                          // Clicking the same open run collapses it (single-accordion).
-                          if (fileCount > 0) {
-                            setOpenRunId((prev) =>
-                              prev === run.id ? null : run.id,
-                            );
-                          }
-                        }}
+                        onClick={() =>
+                          toggleRunOpen(
+                            run.id,
+                            run.run_dir,
+                            fileCount,
+                            trainingPath,
+                            trainingFile?.name,
+                          )
+                        }
                       >
                         <div className="dataset-run-main">
-                          <div className="dataset-run-title">{runName}</div>
+                          <div className="dataset-run-heading">
+                            <div className="dataset-run-title">{runName}</div>
+                            {isCreatingRun ? (
+                              <span className="status-pill running">Creating</span>
+                            ) : null}
+                          </div>
                           <div className="dataset-run-meta">
                             <span>{formatTimestamp(run.last_modified)}</span>
                             <span>{filesLabel}</span>
@@ -2438,27 +3805,51 @@ export default function DatasetsPage() {
                       </button>
                     )}
                     <div className="dataset-run-actions">
-                      <button
-                        type="button"
-                        className="button light small"
-                        onClick={() => handleStartRename(run.id, runName)}
-                        disabled={isRenaming || renameLoading}
-                      >
-                        Rename dataset
-                      </button>
-                      <button
-                        type="button"
-                        className="button ghost danger small"
-                        onClick={() => {
-                          setDeleteConfirmRun(run.id);
-                          setDeleteConfirmText("");
-                        }}
-                        disabled={deleteLoadingRun === run.id}
-                      >
-                        {deleteLoadingRun === run.id
-                          ? "Deleting…"
-                          : "Delete dataset"}
-                      </button>
+                      {isCreatingRun ? (
+                        <button
+                          type="button"
+                          className="button ghost danger small"
+                          onClick={handleViewLatestRun}
+                        >
+                          Stop run
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            className="button light small"
+                            onClick={() =>
+                              trainingFile
+                                ? handleOpenCleanupModal(run, trainingFile)
+                                : undefined
+                            }
+                            disabled={!trainingFile}
+                          >
+                            Clean noisy rows
+                          </button>
+                          <button
+                            type="button"
+                            className="button light small"
+                            onClick={() => handleStartRename(run.id, runName)}
+                            disabled={isRenaming || renameLoading}
+                          >
+                            Rename dataset
+                          </button>
+                          <button
+                            type="button"
+                            className="button ghost danger small"
+                            onClick={() => {
+                              setDeleteConfirmRun(run.id);
+                              setDeleteConfirmText("");
+                            }}
+                            disabled={deleteLoadingRun === run.id}
+                          >
+                            {deleteLoadingRun === run.id
+                              ? "Deleting…"
+                              : "Delete dataset"}
+                          </button>
+                        </>
+                      )}
                     </div>
                     {/* ── Collapsible Drawer ────────────────────────────────────────
                         Hidden by default via the `hidden` attribute.
@@ -2474,6 +3865,8 @@ export default function DatasetsPage() {
                         <div className="dataset-run-files">
                           {files.map((file) => {
                             const isTraining = trainingPath === file.path;
+                            const isCleanedVariant =
+                              isCleanedDatasetFile(file);
                             return (
                               <div key={file.path} className="dataset-run-file">
                                 <div className="dataset-run-file-info">
@@ -2494,10 +3887,24 @@ export default function DatasetsPage() {
                                     type="button"
                                     className="button light small"
                                     onClick={() =>
-                                      handlePreviewSelection({
-                                        label: `${file.name}${isTraining ? " (training)" : ""}`,
-                                        path: file.path,
-                                      })
+                                      handlePreviewSelection(
+                                        {
+                                          label: `${file.name}${
+                                            isTraining
+                                              ? " (training)"
+                                              : isCleanedVariant
+                                                ? " (cleaned)"
+                                                : ""
+                                          }`,
+                                          path: file.path,
+                                        },
+                                        {
+                                          auditPath:
+                                            isTraining || isCleanedVariant
+                                              ? file.path
+                                              : trainingPath,
+                                        },
+                                      )
                                     }
                                   >
                                     Preview
@@ -2646,6 +4053,196 @@ export default function DatasetsPage() {
                             ) : null}
                           </div>
                         ) : null}
+                        {isAuditingRun ? (
+                          <div className="dataset-audit-panel">
+                            <div className="dataset-audit-header">
+                              <div>
+                                <span className="meta-label">Dataset audit</span>
+                                <p className="dataset-audit-title">
+                                  {auditedFileName}
+                                </p>
+                              </div>
+                              <div className="dataset-audit-meta">
+                                <span>{auditPathForRun}</span>
+                              </div>
+                            </div>
+                            {auditLoading ? (
+                              <div className="dataset-preview-empty">
+                                Loading audit summary…
+                              </div>
+                            ) : auditError ? (
+                              <div className="error">{auditError}</div>
+                            ) : auditResponse ? (
+                              <>
+                                <div className="dataset-audit-kpis">
+                                  <div>
+                                    <span className="meta-label">Rows</span>
+                                    <strong>{auditResponse.row_count.toLocaleString()}</strong>
+                                  </div>
+                                  <div>
+                                    <span className="meta-label">Columns</span>
+                                    <strong>{auditResponse.column_count.toLocaleString()}</strong>
+                                  </div>
+                                  <div>
+                                    <span className="meta-label">Tickers</span>
+                                    <strong>{auditResponse.ticker_count?.toLocaleString() ?? "—"}</strong>
+                                  </div>
+                                  <div>
+                                    <span className="meta-label">Snapshots</span>
+                                    <strong>{auditResponse.snapshot_count?.toLocaleString() ?? "—"}</strong>
+                                  </div>
+                                  <div>
+                                    <span className="meta-label">Date range</span>
+                                    <strong>
+                                      {auditResponse.date_start && auditResponse.date_end
+                                        ? `${auditResponse.date_start} → ${auditResponse.date_end}`
+                                        : "—"}
+                                    </strong>
+                                  </div>
+                                  <div>
+                                    <span className="meta-label">Expiry range</span>
+                                    <strong>
+                                      {auditResponse.expiry_start && auditResponse.expiry_end
+                                        ? `${auditResponse.expiry_start} → ${auditResponse.expiry_end}`
+                                        : "—"}
+                                    </strong>
+                                  </div>
+                                </div>
+                                <div className="dataset-audit-grid">
+                                  <section className="dataset-audit-card dataset-audit-card-wide">
+                                    <div className="dataset-audit-card-header">
+                                      <h3>Quality flags</h3>
+                                      <span>{auditResponse.available_quality_flags.length} active columns</span>
+                                    </div>
+                                    {auditResponse.quality_flags.length > 0 ? (
+                                      <div className="dataset-audit-list">
+                                    {auditResponse.quality_flags.map((flag) => {
+                                          const share = auditResponse.row_count
+                                            ? flag.count / auditResponse.row_count
+                                            : 0;
+                                          return (
+                                            <div key={flag.name} className="dataset-audit-list-row">
+                                              <div className="dataset-audit-list-label">
+                                                <code>{flag.name}</code>
+                                                <span>{flag.count.toLocaleString()} rows</span>
+                                              </div>
+                                              <div className="dataset-audit-bar-track">
+                                                <div
+                                                  className="dataset-audit-bar-fill"
+                                                  style={{ width: shareBarWidth(share) }}
+                                                />
+                                              </div>
+                                              <span className="dataset-audit-list-value">
+                                                {formatPercent(flag.share)}
+                                              </span>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    ) : (
+                                      <div className="dataset-preview-empty">
+                                        No explicit `flag_*` columns found yet.
+                                      </div>
+                                )}
+                              </section>
+                              <ProblemTickerAuditCard
+                                className="dataset-audit-card-wide"
+                                subtitle={`${fullAuditProblemTickers.length} ranked`}
+                                items={fullAuditProblemTickers}
+                                emptyMessage="Ticker-level diagnostics are unavailable."
+                              />
+                              <RvSurfaceAuditCard auditResponse={auditResponse} />
+                                  <section className="dataset-audit-card dataset-audit-card-wide">
+                                    <div className="dataset-audit-card-header">
+                                      <h3>Coverage heatmap</h3>
+                                      <div className="dataset-preview-controls">
+                                        <label className="dataset-preview-control">
+                                          <span className="meta-label">Metric</span>
+                                          <select
+                                            className="input"
+                                            value={heatmapMetric}
+                                            onChange={(event) =>
+                                              setHeatmapMetric(event.target.value as HeatmapMetric)
+                                            }
+                                          >
+                                            {HEATMAP_METRIC_OPTIONS.map((option) => (
+                                              <option key={option.value} value={option.value}>
+                                                {option.label}
+                                              </option>
+                                            ))}
+                                          </select>
+                                        </label>
+                                      </div>
+                                    </div>
+                                    {auditResponse.heatmap_dates.length > 0 &&
+                                    heatmapTickers.length > 0 ? (
+                                      <div className="dataset-audit-heatmap-wrap">
+                                        <div
+                                          className="dataset-audit-heatmap-grid"
+                                          style={{
+                                            gridTemplateColumns: `minmax(72px, auto) repeat(${auditResponse.heatmap_dates.length}, minmax(1.75rem, 1.75rem))`,
+                                          }}
+                                        >
+                                          <div className="dataset-audit-heatmap-corner">Ticker</div>
+                                          {auditResponse.heatmap_dates.map((date) => (
+                                            <div
+                                              key={date}
+                                              className="dataset-audit-heatmap-date"
+                                              title={date}
+                                            >
+                                              {date.slice(5)}
+                                            </div>
+                                          ))}
+                                          {heatmapTickers.map((ticker) => (
+                                            <div key={ticker} className="dataset-audit-heatmap-row">
+                                              <div key={`${ticker}-label`} className="dataset-audit-heatmap-ticker">
+                                                {ticker}
+                                              </div>
+                                              {auditResponse.heatmap_dates.map((date) => {
+                                                const cell = heatmapCellMap.get(`${ticker}__${date}`);
+                                                let intensity = 0;
+                                                if (cell) {
+                                                  if (heatmapMetric === "rows") {
+                                                    intensity = cell.row_count / heatmapMaxRows;
+                                                  } else if (heatmapMetric === "flagged") {
+                                                    intensity = cell.flagged_share ?? 0;
+                                                  } else {
+                                                    intensity = Math.min((cell.avg_issue_count ?? 0) / 3, 1);
+                                                  }
+                                                }
+                                                return (
+                                                  <button
+                                                    key={`${ticker}-${date}`}
+                                                    type="button"
+                                                    className={`dataset-audit-heatmap-cell${
+                                                      cell?.quality_bucket ? ` ${cell.quality_bucket}` : ""
+                                                    }`}
+                                                    style={{ opacity: cell ? Math.max(0.18, intensity) : 0.08 }}
+                                                    title={
+                                                      cell
+                                                        ? `${ticker} ${date}: ${cell.row_count} rows, ${formatNumeric(cell.avg_issue_count, 2)} avg issues, ${formatPercent(cell.flagged_share)} flagged`
+                                                        : `${ticker} ${date}: no rows`
+                                                    }
+                                                  >
+                                                    {cell ? cell.row_count : ""}
+                                                  </button>
+                                                );
+                                              })}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <div className="dataset-preview-empty">
+                                        Heatmap coverage is unavailable for this dataset.
+                                      </div>
+                                    )}
+                                  </section>
+                                </div>
+                              </>
+                            ) : null}
+                          </div>
+                        ) : null}
                       </div>
                     ) : null}
                   </article>
@@ -2656,115 +4253,287 @@ export default function DatasetsPage() {
         </div>
             </section>
           </div>
-        ) : (
-          <div
-            id="datasets-panel-documentation"
-            role="tabpanel"
-            aria-labelledby="datasets-tab-documentation"
-            className="datasets-tab-panel"
-          >
-            <section className="panel datasets-documentation-tab-panel">
-              <div className="panel-header datasets-job-config-header">
-                <div>
-                  <h2 className="datasets-job-config-title">
-                    Documentation
-                  </h2>
-                </div>
-              </div>
-              <div className="panel-body datasets-documentation-body">
-                <section className="section-card datasets-doc-subsection">
-                  <h3 className="datasets-doc-subsection-title">
-                    Configuration Guide
-                  </h3>
-                  <div className="datasets-doc-description">
-                    <div className="datasets-doc-description-block">
-                      <h4>Core Range</h4>
-                      <p>
-                        Core Range defines which observations the builder will
-                        attempt to create. Start date and End date set the
-                        overall time window and the date pickers keep the range
-                        valid by preventing impossible selections and aligning
-                        the second date when needed. Trading universe contains
-                        the quick-select ticker set and each chip toggles that
-                        ticker on or off in the request. Add custom tickers lets
-                        you append symbols that are not in the default set and
-                        the input accepts comma or space separated values. The
-                        Selected tickers row shows the final ticker list that
-                        will be used and clicking a selected chip removes that
-                        symbol from the run.
-                      </p>
-                    </div>
-                    <div className="datasets-doc-description-block">
-                      <h4>Output Targets</h4>
-                      <p>
-                        Output Targets controls how files are named and which
-                        CSV views are written. Dataset name is required and
-                        becomes the normalized folder and filename suffix for the
-                        run output. pRN version stores a version label alongside
-                        the generated data so downstream analysis can identify
-                        which pRN view specification was used. Outputs to
-                        generate lets you toggle the optional CSV views while
-                        keeping Training always enabled because it is the main
-                        calibration dataset. Snapshot, pRN View, Legacy, and
-                        Drops can be enabled or disabled depending on whether
-                        you need compact snapshots, the pRN-oriented export, the
-                        legacy format, or a file of dropped rows.
-                      </p>
-                    </div>
-                    <div className="datasets-doc-description-block">
-                      <h4>Snapshot Schedule</h4>
-                      <p>
-                        Snapshot Schedule determines how the date range is
-                        interpreted and how snapshot dates are generated inside
-                        that range. The schedule mode selector switches between
-                        a weekly workflow and an expiry range workflow. In
-                        weekly mode the builder anchors work to week windows. In
-                        expiry range mode the start and end values are treated
-                        as expiry dates and Expiry weekdays tells the builder
-                        which expiry weekdays to include. Observation weekdays
-                        defines which as-of weekdays to sample before expiry.
-                        DTE list can override weekday scheduling with explicit
-                        days-to-expiry targets, and the DTE min, DTE max, and
-                        DTE step inputs define a generated DTE range when you
-                        want a regular interval instead of a manual list.
-                      </p>
-                    </div>
-                    <div className="datasets-doc-description-block">
-                      <h4>Settings</h4>
-                      <p>
-                        Settings groups the advanced accordion sections that
-                        refine data sourcing, filtering, curve construction, and
-                        diagnostics. Market Data and Runtime inputs control the
-                        data endpoint, stock source preference, timeout, risk
-                        free rate, and threading behavior. Band Selection and
-                        Training inputs tune log-m limits, band widening, band
-                        strike thresholds, pRN training bounds, and adaptive
-                        band behavior. Option Chain and Expiry inputs adjust
-                        strike range handling, retry behavior, Saturday expiry
-                        fallback, and split adjustment. Liquidity and Filters
-                        inputs set trade count, volume, spread, chain usage, and
-                        quote selection thresholds. Dividend, Weights, and
-                        Volatility inputs control dividend assumptions, realized
-                        volatility lookback, forward moneyness usage, and
-                        weighting toggles. Cache and Sanity inputs control cache
-                        usage, sanity report generation, row dropping rules, and
-                        verbose skip output. These sections are optional and if
-                        left unchanged the builder runs with the default values.
-                      </p>
-                    </div>
-                  </div>
-                </section>
-                <section className="section-card datasets-doc-subsection">
-                  <h3 className="datasets-doc-subsection-title">
-                    Output Row Description
-                  </h3>
-                  <OptionChainDocContent className="datasets-doc-embedded" />
-                </section>
-              </div>
-            </section>
-          </div>
         )}
       </div>
+      {cleanupTarget ? (
+        <div
+          className="dataset-delete-modal-overlay"
+          onClick={() => {
+            if (cleanupApplyLoading) return;
+            handleCloseCleanupModal();
+          }}
+        >
+          <div
+            className="dataset-cleanup-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="dataset-cleanup-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="dataset-delete-modal-header">
+              <h3 id="dataset-cleanup-modal-title">Create cleaned dataset</h3>
+              <p>
+                This creates a cleaned clone of{" "}
+                <span className="dataset-delete-modal-code">
+                  {cleanupTarget.runName}
+                </span>
+                . Standard dataset artifacts are copied into a new sibling run,
+                and rows matching the criteria below are removed from the copied
+                row-level CSVs.
+              </p>
+            </div>
+            <div className="dataset-cleanup-modal-body">
+              <div className="dataset-cleanup-note">
+                Training file:{" "}
+                <span className="dataset-delete-modal-code">
+                  {cleanupTarget.trainingFile.name}
+                </span>
+              </div>
+              {cleanupActionError ? (
+                <div className="error">{cleanupActionError}</div>
+              ) : null}
+              <section className="dataset-cleanup-section">
+                <div className="dataset-cleanup-section-header">
+                  <h4>Criteria</h4>
+                  <span>
+                    Pick one cleanup mode: quality buckets or flag filters.
+                  </span>
+                </div>
+                <div className="dataset-cleanup-form-grid">
+                  <div className="field dataset-cleanup-mode-field">
+                    <label>Cleanup mode</label>
+                    <div className="dataset-cleanup-toggle-row dataset-cleanup-mode-toggle">
+                      <button
+                        type="button"
+                        className={`button ghost small${
+                          cleanupCriteriaForm.mode === "quality_buckets"
+                            ? " is-selected"
+                            : ""
+                        }`}
+                        onClick={() =>
+                          setCleanupCriteriaForm((prev) => ({
+                            ...prev,
+                            mode: "quality_buckets",
+                          }))
+                        }
+                      >
+                        Quality buckets
+                      </button>
+                      <button
+                        type="button"
+                        className={`button ghost small${
+                          cleanupCriteriaForm.mode === "flags" ? " is-selected" : ""
+                        }`}
+                        onClick={() =>
+                          setCleanupCriteriaForm((prev) => ({
+                            ...prev,
+                            mode: "flags",
+                          }))
+                        }
+                      >
+                        Flag filters
+                      </button>
+                    </div>
+                  </div>
+                  {cleanupCriteriaForm.mode === "quality_buckets" ? (
+                    <div className="field dataset-cleanup-mode-panel">
+                      <label>Quality buckets</label>
+                      <div className="dataset-cleanup-chip-row">
+                        {(["clean", "watch", "noisy"] as const).map((bucket) => (
+                          <button
+                            key={bucket}
+                            type="button"
+                            className={`dataset-cleanup-chip quality-${bucket}${
+                              cleanupCriteriaForm.qualityBuckets.includes(bucket)
+                                ? " selected"
+                                : ""
+                            }`}
+                            onClick={() => toggleCleanupBucket(bucket)}
+                          >
+                            {bucket}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="field dataset-cleanup-mode-panel">
+                        <label>Flag filters</label>
+                        {cleanupAuditRequestLoading && !cleanupAudit ? (
+                          <div className="dataset-preview-empty">
+                            Loading audit flags…
+                          </div>
+                        ) : cleanupFlagOptions.length > 0 ? (
+                          <div className="dataset-cleanup-chip-row">
+                            {cleanupFlagOptions.map((flag) => (
+                              <button
+                                key={flag}
+                                type="button"
+                                className={`dataset-cleanup-chip${
+                                  cleanupCriteriaForm.selectedFlags.includes(flag)
+                                    ? " selected"
+                                    : ""
+                                }`}
+                                onClick={() => toggleCleanupFlag(flag)}
+                              >
+                                {flag}
+                              </button>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="dataset-preview-empty">
+                            No `flag_*` columns available for this training file.
+                          </div>
+                        )}
+                      </div>
+                      <div className="field">
+                        <label>Flag match mode</label>
+                        <div className="dataset-cleanup-toggle-row">
+                          {(["any", "all"] as const).map((mode) => (
+                            <button
+                              key={mode}
+                              type="button"
+                              className={`button ghost small${
+                                cleanupCriteriaForm.flagMatchMode === mode
+                                  ? " is-selected"
+                                  : ""
+                              }`}
+                              onClick={() =>
+                                setCleanupCriteriaForm((prev) => ({
+                                  ...prev,
+                                  flagMatchMode: mode,
+                                }))
+                              }
+                            >
+                              Match {mode}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </section>
+
+              <section className="dataset-cleanup-section">
+                <div className="dataset-cleanup-section-header">
+                  <h4>Preview</h4>
+                  <span>Preview impact for the active cleanup mode.</span>
+                </div>
+                {cleanupAuditRequestLoading && !cleanupAudit ? (
+                  <div className="dataset-preview-empty">
+                    Loading audit summary…
+                  </div>
+                ) : cleanupPreviewLoading ? (
+                  <div className="dataset-preview-empty">
+                    Refreshing cleanup preview…
+                  </div>
+                ) : !cleanupModeHasSelection ? (
+                  <div className="dataset-preview-empty">
+                    Select at least one{" "}
+                    {cleanupCriteriaForm.mode === "quality_buckets"
+                      ? "quality bucket"
+                      : "flag"}{" "}
+                    to preview cleanup impact.
+                  </div>
+                ) : cleanupPreviewError ? (
+                  <div className="error">{cleanupPreviewError}</div>
+                ) : cleanupPreviewResponse ? (
+                  <>
+                    <div className="dataset-cleanup-preview-grid">
+                      <div>
+                        <span className="meta-label">Rows before</span>
+                        <strong>
+                          {cleanupPreviewResponse.rows_before.toLocaleString()}
+                        </strong>
+                      </div>
+                      <div>
+                        <span className="meta-label">Rows dropped</span>
+                        <strong>
+                          {cleanupPreviewResponse.rows_to_drop.toLocaleString()}
+                        </strong>
+                      </div>
+                      <div>
+                        <span className="meta-label">Rows after</span>
+                        <strong>
+                          {cleanupPreviewResponse.rows_after.toLocaleString()}
+                        </strong>
+                      </div>
+                      <div>
+                        <span className="meta-label">Drop share</span>
+                        <strong>
+                          {(cleanupPreviewResponse.drop_share * 100).toFixed(1)}%
+                        </strong>
+                      </div>
+                    </div>
+                    {cleanupCriteriaForm.mode === "flags" ? (
+                      <div className="dataset-cleanup-summary-grid">
+                        <div className="dataset-cleanup-summary-card">
+                          <span className="meta-label">Dropped buckets</span>
+                          <div className="dataset-cleanup-chip-row">
+                            {Object.entries(
+                              cleanupPreviewResponse.dropped_bucket_counts,
+                            ).map(([bucket, count]) => (
+                              <span
+                                key={bucket}
+                                className={`dataset-cleanup-chip quality-${bucket} static`}
+                              >
+                                {bucket}: {count.toLocaleString()}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <div className="dataset-preview-empty">
+                    Configure cleanup criteria to preview cleanup impact.
+                  </div>
+                )}
+              </section>
+
+              <section className="dataset-cleanup-section">
+                <div className="dataset-cleanup-section-header">
+                  <h4>Confirm</h4>
+                  <span>Type CLEAN to create the cleaned clone.</span>
+                </div>
+                <label htmlFor="datasetCleanupConfirmInput">
+                  Type <strong>CLEAN</strong> to confirm
+                </label>
+                <input
+                  id="datasetCleanupConfirmInput"
+                  className="input"
+                  type="text"
+                  value={cleanupConfirmText}
+                  onChange={(event) => setCleanupConfirmText(event.target.value)}
+                  placeholder="CLEAN"
+                  autoFocus
+                  disabled={cleanupApplyLoading}
+                />
+              </section>
+            </div>
+            <div className="dataset-delete-modal-actions">
+              <button
+                type="button"
+                className="button ghost"
+                onClick={handleCloseCleanupModal}
+                disabled={cleanupApplyLoading}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="button danger"
+                onClick={handleApplyCleanup}
+                disabled={!cleanupCanApply}
+              >
+                {cleanupApplyLoading ? "Creating…" : "Create cleaned clone"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {deleteTargetRun ? (
         <div
           className="dataset-delete-modal-overlay"
@@ -2820,7 +4589,7 @@ export default function DatasetsPage() {
               </button>
               <button
                 type="button"
-                className="button danger dataset-delete-modal-confirm"
+                className="button ghost danger"
                 onClick={() =>
                   handleDeleteRun(deleteTargetRun.id, deleteTargetRun.run_dir)
                 }

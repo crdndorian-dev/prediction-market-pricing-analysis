@@ -1,60 +1,54 @@
 from __future__ import annotations
 
-import importlib.util
 import json
-import os
-import shutil
-import subprocess
-import sys
-import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
-from app.models.datasets import DatasetRunRequest
-from app.services.datasets import (
-    BUILD_META_NAME,
-    _build_dataset_command,
-    _extract_run_dir_from_output,
-    _find_training_file_path,
-    _read_build_meta,
-)
 from app.services.run_csv_files import dedupe_merged_dataframe, get_run_csv_paths
 
 BASE_DIR = Path(__file__).resolve().parents[5]
 SCRIPTS_DIR = BASE_DIR / "src" / "scripts"
-BACKEND_DIR = BASE_DIR / "src" / "webapp" / "backend"
 WEEKLY_HISTORY_DIR = BASE_DIR / "src" / "data" / "raw" / "polymarket" / "weekly_history"
 WEEKLY_HISTORY_RUNS_DIR = WEEKLY_HISTORY_DIR / "runs"
 LATEST_POINTER_PATH = WEEKLY_HISTORY_DIR / "latest.json"
 
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
+if str(SCRIPTS_DIR) not in __import__("sys").path:
+    __import__("sys").path.insert(0, str(SCRIPTS_DIR))
 
-from polymarket.prn_loader import find_latest_prn_dataset
+from option_chain.exact_builder import (  # noqa: E402
+    DEFAULT_PRN_ASOF_CLOSE_TIME,
+    DEFAULT_PRN_ASOF_TZ,
+    DEFAULT_PRN_VERSION,
+    DEFAULT_THREADS,
+    Config as ExactPrnConfig,
+    build_polymarket_exact_prn,
+)
+from polymarket.quality_flags import (  # noqa: E402
+    add_prn_quality_columns,
+    build_market_quality,
+)
+from polymarket.prn_loader import find_latest_prn_dataset  # noqa: E402
 
 PRN_DATASET_DIRNAME = "prn_dataset"
-PRN_EXPIRY_COLUMNS = (
-    "expiry_close_date_used",
-    "option_expiration_used",
-    "option_expiration_requested",
-    "expiry_date",
-)
 RUN_LOCAL_PRN_META_NAME = "polymarket_run_prn_meta.json"
+BUILD_META_NAME = "dataset_build_meta.json"
 TRAINING_FILE_TEMPLATE = "training-{run_id}-prn.csv"
-DEFAULT_PRN_VERSION = "v1"
-DEFAULT_BUILDER_TIMEOUT_S = 30
-
-_BUILDER_DEFAULT_HASH_CACHE: Optional[str] = None
+MARKET_QUALITY_FILENAME = "market_quality.csv"
+MARKET_QUALITY_SUMMARY_FILENAME = "market_quality_summary.json"
+REQUIRED_WEEKLY_MARKETS_COLUMNS = ("market_id", "event_id", "ticker", "threshold", "week_monday", "week_friday", "event_endDate")
 
 
 @dataclass
 class RunLocalPrnRefreshResult:
     run_dir: Path
     training_path: Path
+    market_quality_path: Optional[Path] = None
+    market_quality_summary_path: Optional[Path] = None
+    quality_summary: Dict[str, Any] = field(default_factory=dict)
     source_training_path: Optional[Path] = None
     seeded_from_source: bool = False
     used_inferred_defaults: bool = False
@@ -67,12 +61,13 @@ class RunLocalPrnRefreshResult:
     required_week_fridays: List[date] = field(default_factory=list)
     affected_week_fridays: List[date] = field(default_factory=list)
     temp_run_dirs: List[Path] = field(default_factory=list)
-
-
-def _model_dump(model: DatasetRunRequest) -> Dict[str, Any]:
-    if hasattr(model, "model_dump"):
-        return model.model_dump(exclude_none=True)
-    return model.dict(exclude_none=True)
+    required_market_snapshots: int = 0
+    ok_market_snapshots: int = 0
+    missing_market_snapshots: int = 0
+    coverage_counts: Dict[str, int] = field(default_factory=dict)
+    drop_reason_counts: Dict[str, int] = field(default_factory=dict)
+    prn_version: str = DEFAULT_PRN_VERSION
+    prn_config_hash: str = ""
 
 
 def _resolve_project_path(path_value: str | Path) -> Path:
@@ -148,7 +143,8 @@ def find_run_local_prn_training_file(run_dir: Path) -> Optional[Path]:
     target = _run_local_training_path(run_dir)
     if target.exists():
         return target
-    return _find_training_file_path(prn_dir)
+    candidates = sorted(prn_dir.glob("training-*.csv"))
+    return candidates[0] if candidates else None
 
 
 def has_run_local_markets_artifact(run_dir: Path) -> bool:
@@ -180,135 +176,33 @@ def resolve_preferred_prn_dataset_path(
     return latest if latest and latest.exists() else None
 
 
-def _read_uniform_prn_metadata(training_path: Path) -> Tuple[Optional[str], Optional[str]]:
-    versions: Set[str] = set()
-    hashes: Set[str] = set()
-
-    for chunk in pd.read_csv(
-        training_path,
-        usecols=["prn_version", "prn_config_hash"],
-        chunksize=100_000,
-    ):
-        versions.update(str(v).strip() for v in chunk["prn_version"].dropna().tolist() if str(v).strip())
-        hashes.update(str(v).strip() for v in chunk["prn_config_hash"].dropna().tolist() if str(v).strip())
-        if len(versions) > 1 or len(hashes) > 1:
-            break
-
-    version = next(iter(versions)) if len(versions) == 1 else None
-    config_hash = next(iter(hashes)) if len(hashes) == 1 else None
-    return version, config_hash
-
-
-def _load_builder_default_prn_hash() -> str:
-    global _BUILDER_DEFAULT_HASH_CACHE
-    if _BUILDER_DEFAULT_HASH_CACHE is not None:
-        return _BUILDER_DEFAULT_HASH_CACHE
-
-    script_path = SCRIPTS_DIR / "01-option-chain-build-historic-dataset-v1.0.py"
-    if str(SCRIPTS_DIR) not in sys.path:
-        sys.path.insert(0, str(SCRIPTS_DIR))
-
-    spec = importlib.util.spec_from_file_location("option_chain_builder_default_hash", script_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Failed to load option-chain builder script: {script_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    _BUILDER_DEFAULT_HASH_CACHE = str(module.compute_prn_config_hash(module.Config()))
-    return _BUILDER_DEFAULT_HASH_CACHE
-
-
-def _resolve_base_payload(
-    training_path: Path,
-    *,
-    required_start: date,
-    required_end: date,
-    required_tickers: Set[str],
-) -> Tuple[DatasetRunRequest, bool]:
-    meta = _read_build_meta(training_path.parent)
-    if meta and isinstance(meta.get("payload"), dict):
-        payload = DatasetRunRequest(**meta["payload"])
-        return payload, False
-
-    version, config_hash = _read_uniform_prn_metadata(training_path)
-    default_hash = _load_builder_default_prn_hash()
-    if config_hash != default_hash:
-        raise ValueError(
-            "Source pRN dataset metadata is missing and its prn_config_hash does not match "
-            "the builder defaults. Exact run-local backfill is blocked."
-        )
-
-    payload = DatasetRunRequest(
-        tickers=",".join(sorted(required_tickers)) if required_tickers else None,
-        start=required_start.isoformat(),
-        end=required_end.isoformat(),
-        prn_version=version or DEFAULT_PRN_VERSION,
-        prn_config_hash=config_hash,
-    )
-    return payload, True
-
-
-def _write_run_local_meta(
-    run_dir: Path,
-    *,
-    source_training_path: Path,
-    base_payload: DatasetRunRequest,
-    used_inferred_defaults: bool,
-) -> None:
-    prn_dir = _run_prn_dir(run_dir)
-    prn_dir.mkdir(parents=True, exist_ok=True)
-
-    payload = {
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "payload": _model_dump(base_payload),
-        "source_training_file": _display_path(source_training_path),
-        "used_inferred_defaults": used_inferred_defaults,
-        "training_file": _run_local_training_path(run_dir).name,
-    }
-    _run_prn_meta_path(run_dir).write_text(json.dumps(payload, indent=2, sort_keys=True))
-
-    build_meta_payload = {
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "command": [],
-        "payload": _model_dump(base_payload),
-        "out_name": _run_local_training_path(run_dir).name,
-        "drops_name": "",
-        "source_training_file": _display_path(source_training_path),
-        "used_inferred_defaults": used_inferred_defaults,
-    }
-    (_run_prn_dir(run_dir) / BUILD_META_NAME).write_text(
-        json.dumps(build_meta_payload, indent=2, sort_keys=True)
-    )
-
-
 def _load_required_pairs(
     run_dir: Path,
     week_filter: Optional[Set[date]] = None,
-) -> Tuple[Set[Tuple[str, date]], List[date]]:
+) -> Tuple[Set[Tuple[str, date]], List[date], pd.DataFrame]:
     weekly_paths = get_run_csv_paths(run_dir, "weekly_markets.csv")
     if not weekly_paths:
         raise FileNotFoundError(f"weekly_markets.csv not found in {run_dir.name}")
 
     frames: List[pd.DataFrame] = []
     for path in weekly_paths:
-        try:
-            frame = pd.read_csv(path, usecols=["ticker", "week_friday"])
-        except ValueError:
-            frame = pd.read_csv(path)
+        frame = pd.read_csv(path)
         frames.append(frame)
 
-    df = dedupe_merged_dataframe(
-        pd.concat(frames, ignore_index=True, sort=False),
-        "weekly_markets.csv",
-    )
-    if "ticker" not in df.columns or "week_friday" not in df.columns:
-        raise ValueError("weekly_markets.csv is missing ticker/week_friday columns.")
+    df = dedupe_merged_dataframe(pd.concat(frames, ignore_index=True, sort=False), "weekly_markets.csv")
+    missing_cols = [col for col in REQUIRED_WEEKLY_MARKETS_COLUMNS if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"weekly_markets.csv is missing columns: {missing_cols}")
 
+    df = df[list(REQUIRED_WEEKLY_MARKETS_COLUMNS)].copy()
     df["ticker"] = df["ticker"].astype(str).str.upper()
-    week_series = pd.to_datetime(df["week_friday"], errors="coerce").dt.date
-    df = df.assign(week_friday=week_series).dropna(subset=["ticker", "week_friday"])
+    df["week_friday"] = pd.to_datetime(df["week_friday"], errors="coerce").dt.date
+    df["week_monday"] = pd.to_datetime(df["week_monday"], errors="coerce").dt.date
+    df["threshold"] = pd.to_numeric(df["threshold"], errors="coerce").round(6)
+    df = df.dropna(subset=["market_id", "ticker", "week_friday", "week_monday", "threshold"])
     if week_filter:
         df = df[df["week_friday"].isin(week_filter)]
+    df = df.sort_values(["ticker", "week_friday", "threshold", "market_id"]).reset_index(drop=True)
 
     pairs = {
         (str(row.ticker).upper(), row.week_friday)
@@ -316,48 +210,41 @@ def _load_required_pairs(
         if row.ticker and row.week_friday
     }
     weeks = sorted({week for _, week in pairs})
-    return pairs, weeks
-
-
-def _resolve_expiry_column(path: Path) -> str:
-    header = pd.read_csv(path, nrows=0)
-    cols = set(header.columns.tolist())
-    for candidate in PRN_EXPIRY_COLUMNS:
-        if candidate in cols:
-            return candidate
-    raise KeyError(f"Training dataset missing expiry column: {path}")
+    return pairs, weeks, df
 
 
 def _load_existing_pairs(
     training_path: Path,
     required_pairs: Set[Tuple[str, date]],
 ) -> Set[Tuple[str, date]]:
-    if not training_path.exists():
-        return set()
-    if not required_pairs:
+    if not training_path.exists() or not required_pairs:
         return set()
 
-    expiry_col = _resolve_expiry_column(training_path)
     required_tickers = {ticker for ticker, _ in required_pairs}
     required_weeks = {week for _, week in required_pairs}
     existing: Set[Tuple[str, date]] = set()
 
-    for chunk in pd.read_csv(
-        training_path,
-        usecols=["ticker", expiry_col],
-        chunksize=100_000,
-    ):
+    for chunk in pd.read_csv(training_path, chunksize=100_000):
+        if "ticker" not in chunk.columns or "week_friday" not in chunk.columns:
+            continue
         chunk["ticker"] = chunk["ticker"].astype(str).str.upper()
         chunk = chunk[chunk["ticker"].isin(required_tickers)]
         if chunk.empty:
             continue
-        chunk["expiry_date"] = pd.to_datetime(chunk[expiry_col], errors="coerce").dt.date
-        chunk = chunk.dropna(subset=["expiry_date"])
-        chunk = chunk[chunk["expiry_date"].isin(required_weeks)]
+        chunk["week_friday"] = pd.to_datetime(chunk["week_friday"], errors="coerce").dt.date
+        chunk = chunk.dropna(subset=["week_friday"])
+        chunk = chunk[chunk["week_friday"].isin(required_weeks)]
+        if chunk.empty:
+            continue
+        if "coverage_status" in chunk.columns:
+            chunk = chunk[chunk["coverage_status"].astype(str).str.lower() == "ok"]
+        elif "pRN" in chunk.columns:
+            chunk["pRN"] = pd.to_numeric(chunk["pRN"], errors="coerce")
+            chunk = chunk[chunk["pRN"].notna()]
         if chunk.empty:
             continue
         existing.update(
-            (str(row.ticker).upper(), row.expiry_date)
+            (str(row.ticker).upper(), row.week_friday)
             for row in chunk.itertuples(index=False)
         )
     return existing
@@ -401,116 +288,133 @@ def _load_existing_markets_pairs(
     return existing
 
 
-def _stream_filter_source_training(
-    source_training: Path,
-    local_training: Path,
-    required_pairs: Set[Tuple[str, date]],
-) -> None:
-    local_training.parent.mkdir(parents=True, exist_ok=True)
-    expiry_col = _resolve_expiry_column(source_training)
-    tmp_path = local_training.with_suffix(".tmp")
-    if tmp_path.exists():
-        tmp_path.unlink()
-
-    wrote_any = False
-    for chunk in pd.read_csv(source_training, chunksize=100_000):
-        if "ticker" not in chunk.columns or expiry_col not in chunk.columns:
-            continue
-        chunk["ticker"] = chunk["ticker"].astype(str).str.upper()
-        chunk["__expiry_date__"] = pd.to_datetime(chunk[expiry_col], errors="coerce").dt.date
-        mask = [
-            (ticker, expiry_date) in required_pairs
-            for ticker, expiry_date in zip(chunk["ticker"], chunk["__expiry_date__"])
-        ]
-        filtered = chunk.loc[mask].drop(columns=["__expiry_date__"])
-        if filtered.empty:
-            continue
-        filtered.to_csv(tmp_path, mode="a", header=not wrote_any, index=False)
-        wrote_any = True
-
-    if not wrote_any:
-        header = pd.read_csv(source_training, nrows=0)
-        header.iloc[0:0].to_csv(tmp_path, index=False)
-
-    os.replace(tmp_path, local_training)
+def _write_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True))
 
 
-def _compress_contiguous_fridays(weeks: Iterable[date]) -> List[Tuple[date, date]]:
-    sorted_weeks = sorted(set(weeks))
-    if not sorted_weeks:
-        return []
+def _resolve_exact_builder_config(run_dir: Path) -> Tuple[ExactPrnConfig, Dict[str, Any]]:
+    manifest = _load_manifest(run_dir)
+    pipeline_args = manifest.get("pipeline_args") if isinstance(manifest.get("pipeline_args"), dict) else {}
 
-    ranges: List[Tuple[date, date]] = []
-    start = sorted_weeks[0]
-    end = sorted_weeks[0]
-    for current in sorted_weeks[1:]:
-        if current == end + timedelta(days=7):
-            end = current
-            continue
-        ranges.append((start, end))
-        start = end = current
-    ranges.append((start, end))
-    return ranges
+    config = ExactPrnConfig()
+    payload = {
+        "source_mode": "theta_only",
+        "tickers": pipeline_args.get("tickers"),
+        "start": manifest.get("start_date") or pipeline_args.get("start_date"),
+        "end": manifest.get("end_date") or pipeline_args.get("end_date"),
+        "schedule_mode": "polymarket_exact_weekly",
+        "expiry_weekdays": "fri",
+        "asof_weekdays": "mon,tue,wed,thu",
+        "threads": DEFAULT_THREADS,
+        "prn_version": DEFAULT_PRN_VERSION,
+        "prn_asof_tz": DEFAULT_PRN_ASOF_TZ,
+        "prn_asof_close_time": DEFAULT_PRN_ASOF_CLOSE_TIME,
+        "config": {
+            "theta_base_url": config.theta_base_url,
+            "risk_free_rate": config.risk_free_rate,
+            "option_strike_range": config.option_strike_range,
+            "retry_full_chain_if_band_thin": config.retry_full_chain_if_band_thin,
+            "try_saturday_expiry_fallback": config.try_saturday_expiry_fallback,
+            "max_abs_logm": config.max_abs_logm,
+            "max_abs_logm_cap": config.max_abs_logm_cap,
+            "band_widen_step": config.band_widen_step,
+            "adaptive_band": config.adaptive_band,
+            "max_band_strikes": config.max_band_strikes,
+            "min_strikes_for_curve": config.min_strikes_for_curve,
+            "min_strikes_in_prn_band": config.min_strikes_in_prn_band,
+            "prefer_bidask": config.prefer_bidask,
+            "stock_source": config.stock_source,
+            "dividend_source": config.dividend_source,
+            "dividend_lookback_days": config.dividend_lookback_days,
+            "use_forward_moneyness": config.use_forward_moneyness,
+            "use_cache": config.use_cache,
+            "rv_lookback_days": config.rv_lookback_days,
+        },
+    }
+    return config, payload
 
 
-def _backfill_jobs(
-    missing_pairs: Set[Tuple[str, date]],
-) -> List[Tuple[List[str], date, date]]:
-    by_ticker: Dict[str, List[date]] = {}
-    for ticker, week in missing_pairs:
-        by_ticker.setdefault(ticker, []).append(week)
-
-    jobs: List[Tuple[List[str], date, date]] = []
-    for ticker, weeks in sorted(by_ticker.items()):
-        for start, end in _compress_contiguous_fridays(weeks):
-            jobs.append(([ticker], start, end))
-    return jobs
-
-
-def _load_local_base_payload(
+def _write_run_local_meta(
     run_dir: Path,
-    training_path: Path,
     *,
-    required_start: date,
-    required_end: date,
-    required_tickers: Set[str],
-) -> Tuple[DatasetRunRequest, bool]:
+    builder_payload: Dict[str, Any],
+    result: RunLocalPrnRefreshResult,
+) -> None:
     prn_dir = _run_prn_dir(run_dir)
-    meta = _read_build_meta(prn_dir)
-    if meta and isinstance(meta.get("payload"), dict):
-        return DatasetRunRequest(**meta["payload"]), bool(meta.get("used_inferred_defaults"))
+    prn_dir.mkdir(parents=True, exist_ok=True)
 
-    run_meta_path = _run_prn_meta_path(run_dir)
-    if run_meta_path.exists():
-        payload = json.loads(run_meta_path.read_text())
-        if isinstance(payload, dict) and isinstance(payload.get("payload"), dict):
-            return DatasetRunRequest(**payload["payload"]), bool(payload.get("used_inferred_defaults"))
+    summary = {
+        "required_pairs": len(result.required_pairs),
+        "existing_pairs_before": len(result.existing_pairs_before),
+        "missing_pairs_before": len(result.missing_pairs_before),
+        "missing_pairs_after": len(result.missing_pairs_after),
+        "required_market_snapshots": result.required_market_snapshots,
+        "ok_market_snapshots": result.ok_market_snapshots,
+        "missing_market_snapshots": result.missing_market_snapshots,
+        "coverage_counts": result.coverage_counts,
+        "drop_reason_counts": result.drop_reason_counts,
+        "quality_summary": result.quality_summary,
+    }
+    payload = {
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "source_mode": "theta_only",
+        "payload": builder_payload,
+        "training_file": _run_local_training_path(run_dir).name,
+        "market_quality_file": result.market_quality_path.name if result.market_quality_path else None,
+        "market_quality_summary_file": (
+            result.market_quality_summary_path.name if result.market_quality_summary_path else None
+        ),
+        "prn_version": result.prn_version,
+        "prn_config_hash": result.prn_config_hash,
+        "summary": summary,
+    }
+    _write_json(_run_prn_meta_path(run_dir), payload)
 
-    source_path = resolve_preferred_prn_dataset_path(run_dir)
-    if source_path is None:
-        raise FileNotFoundError(f"No pRN dataset available for run {run_dir.name}.")
-    base_payload, used_defaults = _resolve_base_payload(
-        source_path,
-        required_start=required_start,
-        required_end=required_end,
-        required_tickers=required_tickers,
-    )
-    _write_run_local_meta(
+    build_meta_payload = {
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "command": [],
+        "source_mode": "theta_only",
+        "payload": builder_payload,
+        "out_name": _run_local_training_path(run_dir).name,
+        "drops_name": "",
+        "market_quality_name": result.market_quality_path.name if result.market_quality_path else None,
+        "prn_version": result.prn_version,
+        "prn_config_hash": result.prn_config_hash,
+        "summary": summary,
+    }
+    _write_json(_run_prn_dir(run_dir) / BUILD_META_NAME, build_meta_payload)
+
+
+def _write_market_quality_artifacts(
+    run_dir: Path,
+    *,
+    weekly_markets: pd.DataFrame,
+    training_rows: pd.DataFrame,
+) -> tuple[Path, Path, Dict[str, Any]]:
+    quality_result = build_market_quality(
         run_dir,
-        source_training_path=source_path,
-        base_payload=base_payload,
-        used_inferred_defaults=used_defaults,
+        weekly_markets,
+        training_rows,
+        tz_name=DEFAULT_PRN_ASOF_TZ,
+        close_time=DEFAULT_PRN_ASOF_CLOSE_TIME,
+        emit_live=True,
     )
-    return base_payload, used_defaults
+    quality_path = run_dir / MARKET_QUALITY_FILENAME
+    summary_path = run_dir / MARKET_QUALITY_SUMMARY_FILENAME
+    quality_result.rows.to_csv(quality_path, index=False)
+    _write_json(summary_path, quality_result.summary)
 
+    manifest_path = run_dir / "manifest.json"
+    manifest = _load_manifest(run_dir)
+    manifest["quality_summary"] = quality_result.summary
+    manifest["artifacts"] = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), dict) else {}
+    manifest["artifacts"][quality_path.name] = {"size_bytes": quality_path.stat().st_size}
+    manifest["artifacts"][summary_path.name] = {"size_bytes": summary_path.stat().st_size}
+    if manifest:
+        _write_json(manifest_path, manifest)
 
-def _merge_training_files(target_path: Path, incoming_path: Path) -> None:
-    target_df = pd.read_csv(target_path)
-    incoming_df = pd.read_csv(incoming_path)
-    combined = pd.concat([target_df, incoming_df], ignore_index=True, sort=False)
-    if "row_id" in combined.columns:
-        combined = combined.drop_duplicates(subset=["row_id"], keep="first")
-    combined.to_csv(target_path, index=False)
+    return quality_path, summary_path, quality_result.summary
 
 
 def refresh_run_local_prn_dataset(
@@ -519,112 +423,55 @@ def refresh_run_local_prn_dataset(
     week_fridays: Optional[Set[date]] = None,
     explicit_prn_dataset: Optional[str | Path] = None,
 ) -> RunLocalPrnRefreshResult:
-    required_pairs, required_weeks = _load_required_pairs(run_dir, week_filter=week_fridays)
+    required_pairs, required_weeks, weekly_markets = _load_required_pairs(run_dir, week_filter=week_fridays)
     if not required_pairs or not required_weeks:
         raise ValueError(f"No weekly markets found to backfill for run {run_dir.name}.")
 
-    required_tickers = {ticker for ticker, _ in required_pairs}
-    required_start = min(required_weeks)
-    required_end = max(required_weeks)
-
-    local_training = find_run_local_prn_training_file(run_dir)
-    source_training: Optional[Path] = None
-    seeded_from_source = False
-    used_inferred_defaults = False
-
-    if local_training is None or not local_training.exists():
-        source_training = resolve_preferred_prn_dataset_path(run_dir, explicit_prn_dataset)
-        if source_training is None:
-            raise FileNotFoundError(f"No source pRN dataset found for run {run_dir.name}.")
-        base_payload, used_inferred_defaults = _resolve_base_payload(
-            source_training,
-            required_start=required_start,
-            required_end=required_end,
-            required_tickers=required_tickers,
-        )
-        local_training = _run_local_training_path(run_dir)
-        _stream_filter_source_training(source_training, local_training, required_pairs)
-        _write_run_local_meta(
-            run_dir,
-            source_training_path=source_training,
-            base_payload=base_payload,
-            used_inferred_defaults=used_inferred_defaults,
-        )
-        seeded_from_source = True
-
+    local_training = _run_local_training_path(run_dir)
     existing_pairs_before = _load_existing_pairs(local_training, required_pairs)
     missing_pairs_before = required_pairs - existing_pairs_before
     existing_markets_pairs_before = _load_existing_markets_pairs(run_dir, required_pairs)
     missing_markets_pairs_before = required_pairs - existing_markets_pairs_before
-    affected_week_fridays = sorted({week for _, week in missing_pairs_before})
-    temp_run_dirs: List[Path] = []
 
-    if missing_pairs_before:
-        prn_dir = _run_prn_dir(run_dir)
-        backfill_out_dir = prn_dir / "_backfills"
-        backfill_out_dir.mkdir(parents=True, exist_ok=True)
-        base_payload, payload_used_defaults = _load_local_base_payload(
-            run_dir,
-            local_training,
-            required_start=required_start,
-            required_end=required_end,
-            required_tickers=required_tickers,
+    cfg, builder_payload = _resolve_exact_builder_config(run_dir)
+    build_result = build_polymarket_exact_prn(
+        weekly_markets,
+        cfg=cfg,
+        threads=DEFAULT_THREADS,
+        prn_version=DEFAULT_PRN_VERSION,
+        prn_asof_tz=DEFAULT_PRN_ASOF_TZ,
+        prn_asof_close_time=DEFAULT_PRN_ASOF_CLOSE_TIME,
+    )
+    if build_result.rows.empty:
+        raise RuntimeError(f"Exact run-local pRN build produced no rows for run {run_dir.name}.")
+    if build_result.ok_market_snapshots <= 0:
+        raise RuntimeError(
+            f"Exact run-local pRN build produced zero covered market snapshots for run {run_dir.name}."
         )
-        used_inferred_defaults = used_inferred_defaults or payload_used_defaults
 
-        for idx, (tickers, start_week, end_week) in enumerate(_backfill_jobs(missing_pairs_before), start=1):
-            payload_data = _model_dump(base_payload)
-            payload_data.update(
-                {
-                    "out_dir": str(backfill_out_dir.relative_to(BASE_DIR)),
-                    "dataset_name": f"{run_dir.name}-prn-backfill-{int(time.time())}-{idx}",
-                    "run_dir_name": f"{run_dir.name}-prn-backfill-{int(time.time())}-{idx}",
-                    "tickers": ",".join(sorted(tickers)),
-                    "start": start_week.isoformat(),
-                    "end": end_week.isoformat(),
-                    "schedule_mode": "expiry_range",
-                    "expiry_weekdays": payload_data.get("expiry_weekdays") or "fri",
-                    "write_snapshot": False,
-                    "write_prn_view": True,
-                    "write_train_view": True,
-                    "write_legacy": False,
-                    "write_drops": False,
-                }
-            )
-            range_payload = DatasetRunRequest(**payload_data)
-            cmd, _out_dir, _out_name, _drops_name = _build_dataset_command(range_payload)
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=False,
-                env={**os.environ, "PYTHONUNBUFFERED": "1"},
-            )
-            if result.returncode != 0:
-                raise RuntimeError(
-                    result.stderr or result.stdout or "Exact pRN backfill builder run failed."
-                )
-            backfill_run_dir = _extract_run_dir_from_output(result.stdout)
-            if backfill_run_dir is None or not backfill_run_dir.exists():
-                raise RuntimeError("Could not locate exact pRN backfill output directory.")
-            temp_run_dirs.append(backfill_run_dir)
-            backfill_training = _find_training_file_path(backfill_run_dir)
-            if backfill_training is None:
-                continue
-            _merge_training_files(local_training, backfill_training)
+    training_rows = add_prn_quality_columns(build_result.rows)
+    local_training.parent.mkdir(parents=True, exist_ok=True)
+    training_rows.to_csv(local_training, index=False)
 
-        for tmp_dir in temp_run_dirs:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+    quality_path, quality_summary_path, quality_summary = _write_market_quality_artifacts(
+        run_dir,
+        weekly_markets=weekly_markets,
+        training_rows=training_rows,
+    )
 
     existing_pairs_after = _load_existing_pairs(local_training, required_pairs)
     missing_pairs_after = required_pairs - existing_pairs_after
+    affected_week_fridays = sorted({week for _, week in required_pairs})
 
-    return RunLocalPrnRefreshResult(
+    result = RunLocalPrnRefreshResult(
         run_dir=run_dir,
         training_path=local_training,
-        source_training_path=source_training,
-        seeded_from_source=seeded_from_source,
-        used_inferred_defaults=used_inferred_defaults,
+        market_quality_path=quality_path,
+        market_quality_summary_path=quality_summary_path,
+        quality_summary=quality_summary,
+        source_training_path=None,
+        seeded_from_source=False,
+        used_inferred_defaults=False,
         required_pairs=required_pairs,
         existing_pairs_before=existing_pairs_before,
         missing_pairs_before=missing_pairs_before,
@@ -633,5 +480,14 @@ def refresh_run_local_prn_dataset(
         missing_markets_pairs_before=missing_markets_pairs_before,
         required_week_fridays=required_weeks,
         affected_week_fridays=affected_week_fridays,
-        temp_run_dirs=temp_run_dirs,
+        temp_run_dirs=[],
+        required_market_snapshots=build_result.required_market_snapshots,
+        ok_market_snapshots=build_result.ok_market_snapshots,
+        missing_market_snapshots=build_result.missing_market_snapshots,
+        coverage_counts=build_result.coverage_counts,
+        drop_reason_counts=build_result.drop_reason_counts,
+        prn_version=build_result.prn_version,
+        prn_config_hash=build_result.prn_config_hash,
     )
+    _write_run_local_meta(run_dir, builder_payload=builder_payload, result=result)
+    return result

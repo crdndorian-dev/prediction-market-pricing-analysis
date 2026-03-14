@@ -34,9 +34,15 @@ prepend_sys_path(SCRIPTS_ROOT)
 from polymarket.weekly_history_io import (
     append_df_to_csv_with_schema,
     build_bars_from_prices,
+    build_bars_from_trades,
     clean_price_history,
     fetch_price_history,
-    write_bars,
+)
+from polymarket.master_bars import (
+    MASTER_BAR_COLUMNS,
+    build_master_bar_rows,
+    master_bar_path,
+    upsert_master_bars,
 )
 
 # Endpoints
@@ -49,6 +55,10 @@ SCRIPT_VERSION = "1.0.0"
 SCHEMA_VERSION_MARKETS = "pm_weekly_markets_v1.0"
 SCHEMA_VERSION_PRICES = "pm_weekly_prices_v1.0"
 SCHEMA_VERSION_BARS = "pm_bars_history_v1.0"
+HISTORY_RESUME_STATE_FILENAME = ".history_resume_state.json"
+LEGACY_SUBGRAPH_YES_TRADES_FILENAME = "subgraph_yes_trades.csv"
+SUBGRAPH_INFO_FILENAME = "subgraph_info.json"
+TOKEN_ROLES: Tuple[str, ...] = ("yes", "no")
 
 DEFAULT_TICKERS_WEEKLY = [
     "NVDA",
@@ -64,9 +74,7 @@ DEFAULT_TICKERS_WEEKLY = [
 ]
 
 DEFAULT_OUT_DIR = REPO_ROOT / "src" / "data" / "raw" / "polymarket" / "weekly_history"
-DEFAULT_BARS_DIR = REPO_ROOT / "src" / "data" / "analysis" / "polymarket" / "bars_history"
 DEFAULT_DIM_MARKET_PATH = REPO_ROOT / "src" / "data" / "models" / "polymarket" / "dim_market_weekly.csv"
-DEFAULT_FACT_TRADE_DIR = REPO_ROOT / "src" / "data" / "raw" / "polymarket" / "weekly_history" / "fact_trade"
 
 MONTHS = {
     "january": 1,
@@ -133,6 +141,252 @@ class Config:
 
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+
+
+def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+    ensure_dir(path.parent)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    temp_path.write_text(json.dumps(payload, indent=2, default=str))
+    temp_path.replace(path)
+
+
+def _safe_read_json(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text())
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _history_state_path(run_dir: Path) -> Path:
+    return run_dir / HISTORY_RESUME_STATE_FILENAME
+
+
+def _new_history_state(
+    *,
+    run_id: str,
+    tickers: List[str],
+    start_date: Optional[date],
+    end_date: Optional[date],
+    include_subgraph: bool,
+    bars_freqs: Tuple[str, ...],
+) -> Dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "run_id": run_id,
+        "script_version": SCRIPT_VERSION,
+        "created_at_utc": now,
+        "updated_at_utc": now,
+        "status": "running",
+        "phase": "history",
+        "tickers": list(tickers),
+        "start_date": start_date.isoformat() if start_date else None,
+        "end_date": end_date.isoformat() if end_date else None,
+        "include_subgraph": bool(include_subgraph),
+        "bars_freqs": list(bars_freqs),
+        "markets_total": 0,
+        "completed_market_ids": [],
+        "failed_market_ids": [],
+        "subgraph_completed": False,
+        "bars_completed": False,
+        "manifest_written": False,
+    }
+
+
+def _load_history_state(run_dir: Path) -> Dict[str, Any]:
+    return _safe_read_json(_history_state_path(run_dir))
+
+
+def _write_history_state(run_dir: Path, payload: Dict[str, Any]) -> None:
+    state = dict(payload)
+    state["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+    _atomic_write_json(_history_state_path(run_dir), state)
+
+
+def _completed_market_ids_from_state(state: Dict[str, Any]) -> set[str]:
+    values = state.get("completed_market_ids")
+    if not isinstance(values, list):
+        return set()
+    return {str(value) for value in values if value is not None and str(value).strip()}
+
+
+def _failed_market_ids_from_state(state: Dict[str, Any]) -> set[str]:
+    values = state.get("failed_market_ids")
+    if not isinstance(values, list):
+        return set()
+    return {str(value) for value in values if value is not None and str(value).strip()}
+
+
+def _purge_market_rows(path: Path, market_id: Any) -> int:
+    if not path.exists():
+        return 0
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return 0
+    if "market_id" not in df.columns:
+        return 0
+    market_id_text = str(market_id)
+    before = len(df)
+    filtered = df[df["market_id"].astype(str) != market_id_text].copy()
+    removed = before - len(filtered)
+    if removed <= 0:
+        return 0
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    filtered.to_csv(temp_path, index=False)
+    temp_path.replace(path)
+    return removed
+
+
+def _count_csv_rows(path: Path) -> int:
+    if not path.exists():
+        return 0
+    with path.open("r", encoding="utf-8") as handle:
+        next(handle, None)
+        return sum(1 for _ in handle)
+
+
+def _load_yes_price_history(prices_path: Path) -> pd.DataFrame:
+    if not prices_path.exists():
+        return pd.DataFrame(columns=["timestamp_utc", "price", "market_id"])
+    try:
+        prices = pd.read_csv(prices_path)
+    except Exception:
+        return pd.DataFrame(columns=["timestamp_utc", "price", "market_id"])
+    required = {"timestamp_utc", "price", "market_id"}
+    if not required.issubset(prices.columns):
+        return pd.DataFrame(columns=["timestamp_utc", "price", "market_id"])
+    if "token_role" in prices.columns:
+        prices = prices[prices["token_role"].astype(str).str.lower() == "yes"].copy()
+    prices["timestamp_utc"] = pd.to_datetime(prices["timestamp_utc"], utc=True, errors="coerce")
+    prices["price"] = pd.to_numeric(prices["price"], errors="coerce")
+    prices["market_id"] = prices["market_id"].astype(str)
+    prices = prices.dropna(subset=["timestamp_utc", "price", "market_id"])
+    return prices[["timestamp_utc", "price", "market_id"]].sort_values(
+        ["market_id", "timestamp_utc"],
+        kind="mergesort",
+    )
+
+
+def _run_raw_dir(run_dir: Path) -> Path:
+    return run_dir / "raw"
+
+
+def _run_raw_side_dir(run_dir: Path, token_role: str) -> Path:
+    return _run_raw_dir(run_dir) / token_role
+
+
+def _run_analysis_side_bars_dir(run_dir: Path, token_role: str) -> Path:
+    return run_dir / "analysis" / "bars_history" / token_role
+
+
+def _side_price_history_path(run_dir: Path, token_role: str) -> Path:
+    return _run_raw_side_dir(run_dir, token_role) / "price_history.csv"
+
+
+def _side_subgraph_trades_path(run_dir: Path, token_role: str) -> Path:
+    return _run_raw_side_dir(run_dir, token_role) / "subgraph_trades.csv"
+
+
+def _side_fact_trade_dir(fact_trade_root: Path, token_role: str) -> Path:
+    return fact_trade_root / token_role / "fact_trade"
+
+
+def _display_path(path: Path, *, root: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def _write_empty_csv(path: Path, columns: Iterable[str]) -> None:
+    ensure_dir(path.parent)
+    pd.DataFrame(columns=list(columns)).to_csv(path, index=False)
+
+
+def _ensure_master_bar_file(path: Path) -> None:
+    if path.exists():
+        return
+    _write_empty_csv(path, MASTER_BAR_COLUMNS)
+
+
+def _summarize_csv_artifact(path: Path, *, root: Path) -> Dict[str, Any]:
+    return {
+        "path": _display_path(path, root=root),
+        "rows": _count_csv_rows(path),
+        "size_bytes": path.stat().st_size if path.exists() else 0,
+    }
+
+
+def _load_price_history_for_role(prices_path: Path, *, token_role: str) -> pd.DataFrame:
+    if not prices_path.exists():
+        return pd.DataFrame(columns=["timestamp_utc", "price", "market_id"])
+    try:
+        prices = pd.read_csv(prices_path)
+    except Exception:
+        return pd.DataFrame(columns=["timestamp_utc", "price", "market_id"])
+    required = {"timestamp_utc", "price", "market_id"}
+    if not required.issubset(prices.columns):
+        return pd.DataFrame(columns=["timestamp_utc", "price", "market_id"])
+    if "token_role" in prices.columns:
+        prices = prices[prices["token_role"].astype(str).str.lower() == token_role].copy()
+    prices["timestamp_utc"] = pd.to_datetime(prices["timestamp_utc"], utc=True, errors="coerce")
+    prices["price"] = pd.to_numeric(prices["price"], errors="coerce")
+    prices["market_id"] = prices["market_id"].astype(str)
+    prices = prices.dropna(subset=["timestamp_utc", "price", "market_id"])
+    return prices[["timestamp_utc", "price", "market_id"]].sort_values(
+        ["market_id", "timestamp_utc"],
+        kind="mergesort",
+    )
+
+
+def _subgraph_info_path(run_dir: Path) -> Path:
+    return run_dir / SUBGRAPH_INFO_FILENAME
+
+
+def _legacy_subgraph_yes_trades_path(run_dir: Path) -> Path:
+    return run_dir / LEGACY_SUBGRAPH_YES_TRADES_FILENAME
+
+
+def _write_subgraph_cache(run_dir: Path, info: Dict[str, Any], side_trades: Dict[str, pd.DataFrame]) -> None:
+    info_path = _subgraph_info_path(run_dir)
+    for token_role in TOKEN_ROLES:
+        side_path = _side_subgraph_trades_path(run_dir, token_role)
+        trades = side_trades.get(token_role, pd.DataFrame())
+        if trades.empty:
+            _write_empty_csv(side_path, ["market_id", "timestamp_utc", "price", "size"])
+            continue
+        cached = trades.copy()
+        if "timestamp_utc" in cached.columns:
+            cached["timestamp_utc"] = pd.to_datetime(cached["timestamp_utc"], utc=True, errors="coerce").dt.strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+        ensure_dir(side_path.parent)
+        cached.to_csv(side_path, index=False)
+    _atomic_write_json(info_path, info if isinstance(info, dict) else {})
+
+
+def _load_subgraph_cache(run_dir: Path) -> tuple[Dict[str, Any], Dict[str, pd.DataFrame]]:
+    info = _safe_read_json(_subgraph_info_path(run_dir))
+    trades_by_side: Dict[str, pd.DataFrame] = {}
+    for token_role in TOKEN_ROLES:
+        side_path = _side_subgraph_trades_path(run_dir, token_role)
+        if not side_path.exists() and token_role == "yes":
+            side_path = _legacy_subgraph_yes_trades_path(run_dir)
+        if not side_path.exists():
+            trades_by_side[token_role] = pd.DataFrame()
+            continue
+        try:
+            trades = pd.read_csv(side_path)
+        except Exception:
+            trades_by_side[token_role] = pd.DataFrame()
+            continue
+        if "timestamp_utc" in trades.columns:
+            trades["timestamp_utc"] = pd.to_datetime(trades["timestamp_utc"], utc=True, errors="coerce")
+        trades_by_side[token_role] = trades
+    return info, trades_by_side
 
 
 def make_session() -> requests.Session:
@@ -699,7 +953,23 @@ def _write_trade_partitions(df: pd.DataFrame, out_dir: Path) -> int:
     for trade_date, part in df.groupby("trade_date"):
         path = out_dir / f"date={trade_date}" / "trades.csv"
         part = part.reindex(columns=cols)
-        append_df_to_csv_with_schema(part, path)
+        if path.exists():
+            try:
+                existing = pd.read_csv(path)
+            except Exception:
+                existing = pd.DataFrame(columns=cols)
+            existing = existing.reindex(columns=cols)
+            merged = pd.concat([existing, part], ignore_index=True, sort=False)
+            if "trade_id" in merged.columns:
+                merged["trade_id"] = merged["trade_id"].astype(str)
+                merged = merged.drop_duplicates(subset=["trade_id"], keep="last")
+            merged = merged.sort_values(["timestamp_utc", "trade_id"], kind="mergesort")
+            temp_path = path.with_suffix(path.suffix + ".tmp")
+            ensure_dir(path.parent)
+            merged.to_csv(temp_path, index=False)
+            temp_path.replace(path)
+        else:
+            append_df_to_csv_with_schema(part, path)
         count += 1
 
     return count
@@ -709,28 +979,31 @@ def maybe_ingest_subgraph_trades(
     market_ids: List[str],
     since_ts: Optional[int],
     cfg: Config,
-    out_dir: Path,
-) -> Dict[str, Any]:
+    fact_trade_root: Path,
+    *,
+    yes_token_ids_by_market: Dict[str, str],
+    no_token_ids_by_market: Dict[str, str],
+) -> tuple[Dict[str, Any], Dict[str, pd.DataFrame]]:
     result: Dict[str, Any] = {"ok": False}
     try:
         from polymarket.subgraph_client import SubgraphClient
         from polymarket.graphql_queries import get_query
     except Exception as exc:
         result["error"] = f"subgraph import failed: {exc}"
-        return result
+        return result, {token_role: pd.DataFrame() for token_role in TOKEN_ROLES}
 
     try:
         client = SubgraphClient()
     except Exception as exc:
         result["error"] = f"subgraph not configured: {exc}"
-        return result
+        return result, {token_role: pd.DataFrame() for token_role in TOKEN_ROLES}
 
     query_name = "tradesByMarket"
     try:
         sq = get_query(query_name)
     except Exception as exc:
         result["error"] = f"subgraph query unavailable: {exc}"
-        return result
+        return result, {token_role: pd.DataFrame() for token_role in TOKEN_ROLES}
 
     variables: Dict[str, Any] = {}
     if since_ts is not None:
@@ -742,27 +1015,44 @@ def maybe_ingest_subgraph_trades(
         pull = client.pull(sq, variable_overrides=variables or None)
     except Exception as exc:
         result["error"] = f"subgraph pull failed: {exc}"
-        return result
+        return result, {token_role: pd.DataFrame() for token_role in TOKEN_ROLES}
 
     if pull.total_entities > cfg.max_subgraph_entities:
         result["error"] = (
             f"subgraph pull too large ({pull.total_entities} entities > {cfg.max_subgraph_entities}); skipped filtering"
         )
-        return result
+        return result, {token_role: pd.DataFrame() for token_role in TOKEN_ROLES}
 
     try:
         entities = client.entities_from_run(pull.run_dir)
     except Exception as exc:
         result["error"] = f"subgraph load failed: {exc}"
-        return result
+        return result, {token_role: pd.DataFrame() for token_role in TOKEN_ROLES}
 
     if market_ids:
         market_set = set(market_ids)
         entities = [e for e in entities if str(e.get("marketId")) in market_set]
 
     df = _normalize_trades(entities)
-    ensure_dir(out_dir)
-    partitions = _write_trade_partitions(df, out_dir)
+    df["market_id"] = df["market_id"].astype(str)
+    df["outcome_token_id"] = df["outcome_token_id"].astype(str)
+    side_trades: Dict[str, pd.DataFrame] = {}
+    side_partitions: Dict[str, int] = {}
+    side_entities: Dict[str, int] = {}
+    token_maps = {"yes": yes_token_ids_by_market, "no": no_token_ids_by_market}
+    for token_role in TOKEN_ROLES:
+        token_map = token_maps[token_role]
+        trades = df[
+            df["market_id"].map(lambda market_id: token_map.get(str(market_id)))
+            == df["outcome_token_id"]
+        ].copy()
+        side_trades[token_role] = trades
+        side_entities[token_role] = len(trades)
+        ensure_dir(_side_fact_trade_dir(fact_trade_root, token_role))
+        side_partitions[token_role] = _write_trade_partitions(
+            trades,
+            _side_fact_trade_dir(fact_trade_root, token_role),
+        )
 
     result.update(
         {
@@ -770,10 +1060,12 @@ def maybe_ingest_subgraph_trades(
             "run_id": pull.run_id,
             "run_dir": str(pull.run_dir),
             "total_entities": len(df),
-            "partitions": partitions,
+            "yes_entities": side_entities.get("yes", 0),
+            "no_entities": side_entities.get("no", 0),
+            "partitions": side_partitions,
         }
     )
-    return result
+    return result, side_trades
 
 
 # ----------------------------
@@ -839,9 +1131,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Backfill weekly Polymarket events and price history.")
     parser.add_argument("--out-dir", type=str, default=str(DEFAULT_OUT_DIR))
     parser.add_argument("--run-id", type=str, default=None, help="Optional custom run directory name.")
-    parser.add_argument("--bars-dir", type=str, default=str(DEFAULT_BARS_DIR))
+    parser.add_argument("--bars-dir", type=str, default=None)
     parser.add_argument("--dim-market-out", type=str, default=str(DEFAULT_DIM_MARKET_PATH))
-    parser.add_argument("--fact-trade-dir", type=str, default=str(DEFAULT_FACT_TRADE_DIR))
+    parser.add_argument(
+        "--fact-trade-dir",
+        type=str,
+        default=None,
+        help="Optional root directory for side-split subgraph trade artifacts (defaults to run_dir/raw).",
+    )
     parser.add_argument("--tickers", type=str, default=None, help="Comma-separated tickers")
     parser.add_argument("--tickers-csv", type=str, default=None, help="CSV with a 'ticker' column")
     parser.add_argument(
@@ -862,9 +1159,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--despike", action="store_true", help="Remove single-point price spikes that immediately revert")
     parser.add_argument("--despike-jump", type=float, default=Config().despike_jump, help="Min jump size to treat as spike")
     parser.add_argument("--despike-revert", type=float, default=Config().despike_revert, help="Max revert distance to treat as spike")
-    parser.add_argument("--bars-freqs", type=str, default="1h,1d", help="Comma-separated bar freqs (e.g. 1h,1d)")
+    parser.add_argument("--bars-freqs", type=str, default="1d,1h", help="Comma-separated bar freqs (e.g. 1d,1h)")
     parser.add_argument("--include-subgraph", action="store_true", help="Attempt subgraph trade ingest if configured")
     parser.add_argument("--max-subgraph-entities", type=int, default=Config().max_subgraph_entities)
+    parser.add_argument("--resume", action="store_true", help="Resume an interrupted run in the same run directory.")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -912,9 +1210,7 @@ def main() -> None:
     )
 
     out_dir = Path(args.out_dir)
-    bars_dir = Path(args.bars_dir)
     dim_market_out = Path(args.dim_market_out)
-    fact_trade_dir = Path(args.fact_trade_dir)
     requested_run_id = (args.run_id or "").strip()
     if requested_run_id:
         if requested_run_id in {".", ".."} or "/" in requested_run_id or "\\" in requested_run_id:
@@ -923,12 +1219,41 @@ def main() -> None:
     else:
         run_id = datetime.now(timezone.utc).strftime("weekly-history-%Y%m%dT%H%M%SZ")
     run_dir = out_dir / "runs" / run_id
+    bars_dir = Path(args.bars_dir) if args.bars_dir else run_dir / "bars_history"
+    raw_dir = _run_raw_dir(run_dir)
+    analysis_dir = run_dir / "analysis"
+    fact_trade_root = Path(args.fact_trade_dir) if args.fact_trade_dir else raw_dir
+    markets_path = run_dir / "weekly_markets.csv"
+    events_path = run_dir / "weekly_events.csv"
+    prices_path = run_dir / "price_history.csv"
+    resume_mode = bool(args.resume and not args.dry_run)
 
     if not args.dry_run:
-        if run_dir.exists():
+        if run_dir.exists() and not resume_mode:
             raise FileExistsError(f"Run directory already exists: {run_dir}")
         ensure_dir(run_dir)
         ensure_dir(bars_dir)
+        ensure_dir(raw_dir)
+        ensure_dir(analysis_dir)
+        for token_role in TOKEN_ROLES:
+            ensure_dir(_run_raw_side_dir(run_dir, token_role))
+            ensure_dir(_run_analysis_side_bars_dir(run_dir, token_role))
+            side_prices_path = _side_price_history_path(run_dir, token_role)
+            if not side_prices_path.exists():
+                _write_empty_csv(
+                    side_prices_path,
+                    [
+                        "timestamp_utc",
+                        "price",
+                        "token_id",
+                        "schema_version",
+                        "market_id",
+                        "ticker",
+                        "threshold",
+                        "token_role",
+                        "fidelity_min",
+                    ],
+                )
 
     session = make_session()
 
@@ -947,22 +1272,29 @@ def main() -> None:
     print(f"[Weekly History] start_date={start_date} end_date={end_date}", flush=True)
     print(f"[Weekly History] run_id={run_id}", flush=True)
     print(f"[Weekly History] script_version={SCRIPT_VERSION}", flush=True)
+    if resume_mode:
+        print(f"[Weekly History] resume=true run_dir={run_dir}", flush=True)
 
     if slug_requested and not event_sources:
         print("[Weekly History] No event sources parsed from provided URLs/slugs.")
         return
 
-    if event_sources:
-        print(f"[Weekly History] event_sources={len(event_sources)} (slug-based)")
-        events = fetch_events_by_sources(session, cfg, event_sources)
-        if not events:
-            print("[Weekly History] No events resolved from event sources.")
-            return
-        pages = [events]
+    if resume_mode and markets_path.exists():
+        markets_df = pd.read_csv(markets_path)
+        events_df = pd.read_csv(events_path) if events_path.exists() else pd.DataFrame()
+        print("[Weekly History] resume=using existing weekly_markets.csv", flush=True)
     else:
-        print("[Weekly History] event_sources=discovery")
-        pages = fetch_gamma_events(session, cfg, params)
-    markets_df, events_df = extract_weekly_markets(pages, tickers, start_date, end_date)
+        if event_sources:
+            print(f"[Weekly History] event_sources={len(event_sources)} (slug-based)")
+            events = fetch_events_by_sources(session, cfg, event_sources)
+            if not events:
+                print("[Weekly History] No events resolved from event sources.")
+                return
+            pages = [events]
+        else:
+            print("[Weekly History] event_sources=discovery")
+            pages = fetch_gamma_events(session, cfg, params)
+        markets_df, events_df = extract_weekly_markets(pages, tickers, start_date, end_date)
 
     if markets_df.empty:
         print("[Weekly History] No weekly markets found.")
@@ -984,19 +1316,74 @@ def main() -> None:
     markets_df = markets_df.reset_index(drop=True)
 
     if not args.dry_run:
-        markets_path = run_dir / "weekly_markets.csv"
-        events_path = run_dir / "weekly_events.csv"
         markets_df.to_csv(markets_path, index=False)
         events_df.to_csv(events_path, index=False)
         dim_market = build_dim_market(markets_df)
         dim_path = write_dim_market(dim_market, dim_market_out)
         print(f"[Weekly History] dim_market={dim_path}", flush=True)
 
+    history_state: Dict[str, Any] = {}
+    completed_market_ids: set[str] = set()
+    failed_market_ids: set[str] = set()
+    if not args.dry_run:
+        history_state = (
+            _load_history_state(run_dir)
+            if resume_mode
+            else _new_history_state(
+                run_id=run_id,
+                tickers=tickers,
+                start_date=start_date,
+                end_date=end_date,
+                include_subgraph=cfg.include_subgraph,
+                bars_freqs=cfg.bars_freqs,
+            )
+        )
+        if not history_state:
+            history_state = _new_history_state(
+                run_id=run_id,
+                tickers=tickers,
+                start_date=start_date,
+                end_date=end_date,
+                include_subgraph=cfg.include_subgraph,
+                bars_freqs=cfg.bars_freqs,
+            )
+        history_state["run_id"] = run_id
+        history_state["status"] = "running"
+        history_state["phase"] = "history"
+        history_state["tickers"] = list(tickers)
+        history_state["start_date"] = start_date.isoformat() if start_date else None
+        history_state["end_date"] = end_date.isoformat() if end_date else None
+        history_state["include_subgraph"] = bool(cfg.include_subgraph)
+        history_state["bars_freqs"] = list(cfg.bars_freqs)
+        history_state["markets_total"] = int(len(markets_df))
+        completed_market_ids = _completed_market_ids_from_state(history_state)
+        failed_market_ids = _failed_market_ids_from_state(history_state)
+        _write_history_state(run_dir, history_state)
+        if resume_mode and completed_market_ids:
+            print(
+                "[Weekly History] resume=skipping "
+                f"{len(completed_market_ids)}/{len(markets_df)} completed markets",
+                flush=True,
+            )
+
+    market_metadata = markets_df[
+        [
+            "market_id",
+            "event_id",
+            "event_slug",
+            "market_slug",
+            "ticker",
+            "threshold",
+            "week_friday",
+            "expiry_date_utc",
+            "yes_token_id",
+        ]
+    ].copy()
+    market_metadata["market_id"] = market_metadata["market_id"].astype(str)
+
     # Fetch price history
-    prices_path = run_dir / "price_history.csv"
-    price_rows = 0
     despike_adjusted = 0
-    bar_partitions = 0
+    master_bar_updates: Dict[str, Dict[str, Any]] = {}
 
     start_dt = date_to_utc_start(start_date) if start_date else None
     end_dt = date_to_utc_end(end_date) if end_date else None
@@ -1015,8 +1402,12 @@ def main() -> None:
         no_token = row.get("no_token_id")
         ticker = row.get("ticker")
         threshold = row.get("threshold")
+        market_id_text = str(market_id)
 
         job_id = _safe_job_id(f"{ticker}:{threshold}:{market_id}")
+        if market_id_text in completed_market_ids:
+            continue
+
         print(
             f"[Weekly History] Market start {idx + 1}/{markets_total} "
             f"job_id={job_id} ticker={ticker} threshold={threshold} market_id={market_id}",
@@ -1028,6 +1419,18 @@ def main() -> None:
             flush=True,
         )
         market_failed = False
+        if not args.dry_run:
+            purge_targets = [prices_path] + [
+                _side_price_history_path(run_dir, token_role) for token_role in TOKEN_ROLES
+            ]
+            removed_rows = 0
+            for target in purge_targets:
+                removed_rows += _purge_market_rows(target, market_id_text)
+            if removed_rows > 0:
+                print(
+                    f"[Weekly History] resume=purged {removed_rows} partial rows for market_id={market_id_text}",
+                    flush=True,
+                )
 
         for token_role, token_id in [("yes", yes_token), ("no", no_token)]:
             if not token_id:
@@ -1063,18 +1466,7 @@ def main() -> None:
                     history_out = history.copy()
                     history_out["timestamp_utc"] = history_out["timestamp_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
                     append_df_to_csv_with_schema(history_out, prices_path)
-                    price_rows += len(history_out)
-
-                    if token_role == "yes":
-                        bars_in = history[["timestamp_utc", "price"]].copy()
-                        bars_in["market_id"] = market_id
-                        for freq in cfg.bars_freqs:
-                            bars = build_bars_from_prices(
-                                bars_in,
-                                freq,
-                                schema_version=SCHEMA_VERSION_BARS,
-                            )
-                            bar_partitions += write_bars(bars, bars_dir, freq)
+                    append_df_to_csv_with_schema(history_out, _side_price_history_path(run_dir, token_role))
 
             except Exception as exc:
                 market_failed = True
@@ -1090,21 +1482,172 @@ def main() -> None:
             f"job_id={job_id} status={'failed' if market_failed else 'ok'}",
             flush=True,
         )
+        if not args.dry_run:
+            completed_market_ids.add(market_id_text)
+            if market_failed:
+                failed_market_ids.add(market_id_text)
+            history_state["completed_market_ids"] = sorted(completed_market_ids)
+            history_state["failed_market_ids"] = sorted(failed_market_ids)
+            _write_history_state(run_dir, history_state)
 
     subgraph_info: Dict[str, Any] = {}
+    subgraph_trades_by_side: Dict[str, pd.DataFrame] = {
+        token_role: pd.DataFrame() for token_role in TOKEN_ROLES
+    }
     if cfg.include_subgraph and not args.dry_run:
+        history_state["phase"] = "subgraph"
+        _write_history_state(run_dir, history_state)
         market_ids = [m for m in markets_df["market_id"].dropna().astype(str).unique().tolist() if m]
         since_ts = int(start_dt.timestamp()) if start_dt else None
-        subgraph_info = maybe_ingest_subgraph_trades(market_ids, since_ts, cfg, fact_trade_dir)
-        if subgraph_info.get("ok"):
-            print(f"[Weekly History] subgraph trades run_id={subgraph_info.get('run_id')}")
+        yes_token_ids_by_market = {
+            str(row["market_id"]): str(row["yes_token_id"])
+            for _, row in markets_df[["market_id", "yes_token_id"]].dropna().iterrows()
+        }
+        no_token_ids_by_market = {
+            str(row["market_id"]): str(row["no_token_id"])
+            for _, row in markets_df[["market_id", "no_token_id"]].dropna().iterrows()
+        }
+        if resume_mode and history_state.get("subgraph_completed") and (
+            _side_subgraph_trades_path(run_dir, "yes").exists()
+            or _legacy_subgraph_yes_trades_path(run_dir).exists()
+        ):
+            subgraph_info, subgraph_trades_by_side = _load_subgraph_cache(run_dir)
+            print("[Weekly History] resume=using cached subgraph trades", flush=True)
         else:
-            print(f"[Weekly History] subgraph skipped: {subgraph_info.get('error')}")
+            subgraph_info, subgraph_trades_by_side = maybe_ingest_subgraph_trades(
+                market_ids,
+                since_ts,
+                cfg,
+                fact_trade_root,
+                yes_token_ids_by_market=yes_token_ids_by_market,
+                no_token_ids_by_market=no_token_ids_by_market,
+            )
+            _write_subgraph_cache(run_dir, subgraph_info, subgraph_trades_by_side)
+            history_state["subgraph_completed"] = True
+            _write_history_state(run_dir, history_state)
+        if subgraph_info.get("ok"):
+            print(
+                "[Weekly History] subgraph trades "
+                f"run_id={subgraph_info.get('run_id')} "
+                f"yes_entities={subgraph_info.get('yes_entities')} "
+                f"no_entities={subgraph_info.get('no_entities')}",
+                flush=True,
+            )
+        else:
+            print(f"[Weekly History] subgraph skipped: {subgraph_info.get('error')}", flush=True)
+
+    if not args.dry_run:
+        history_state["phase"] = "bars"
+        _write_history_state(run_dir, history_state)
+        analysis_side_updates: Dict[str, Dict[str, Dict[str, Any]]] = {
+            token_role: {} for token_role in TOKEN_ROLES
+        }
+        for freq in cfg.bars_freqs:
+            for token_role in TOKEN_ROLES:
+                side_prices_path = _side_price_history_path(run_dir, token_role)
+                side_clob_source = _load_price_history_for_role(side_prices_path, token_role=token_role)
+                if side_clob_source.empty and prices_path.exists():
+                    side_clob_source = _load_price_history_for_role(prices_path, token_role=token_role)
+
+                fallback_bars = pd.DataFrame(columns=["timestamp_utc", "market_id"])
+                if not side_clob_source.empty:
+                    fallback_bars = build_bars_from_prices(
+                        side_clob_source,
+                        freq,
+                        schema_version=SCHEMA_VERSION_BARS,
+                    )
+                    fallback_bars = build_master_bar_rows(
+                        fallback_bars,
+                        market_metadata,
+                        bar_source="clob_fallback",
+                        written_by_run_id=run_id,
+                        schema_version=SCHEMA_VERSION_BARS,
+                    )
+
+                merged_bars = fallback_bars
+                side_trades = subgraph_trades_by_side.get(token_role, pd.DataFrame())
+                if not side_trades.empty:
+                    trade_bars = build_bars_from_trades(
+                        side_trades,
+                        freq,
+                        schema_version=SCHEMA_VERSION_BARS,
+                    )
+                    trade_bars = build_master_bar_rows(
+                        trade_bars,
+                        market_metadata,
+                        bar_source="subgraph",
+                        written_by_run_id=run_id,
+                        schema_version=SCHEMA_VERSION_BARS,
+                    )
+                    merged_bars = pd.concat([fallback_bars, trade_bars], ignore_index=True)
+
+                analysis_bars_dir = _run_analysis_side_bars_dir(run_dir, token_role)
+                analysis_path = master_bar_path(analysis_bars_dir, freq)
+                if merged_bars.empty:
+                    _ensure_master_bar_file(analysis_path)
+                    analysis_side_updates[token_role][freq] = {
+                        "name": analysis_path.name,
+                        "path": _display_path(analysis_path, root=run_dir),
+                        "frequency": freq,
+                        "rows_written": 0,
+                        "rows_total": 0,
+                    }
+                else:
+                    analysis_meta = upsert_master_bars(merged_bars, analysis_bars_dir, freq)
+                    analysis_meta["path"] = _display_path(Path(str(analysis_meta["path"])), root=run_dir)
+                    analysis_side_updates[token_role][freq] = analysis_meta
+                if token_role == "yes":
+                    master_bar_updates[freq] = upsert_master_bars(merged_bars, bars_dir, freq)
+        history_state["bars_completed"] = True
+        _write_history_state(run_dir, history_state)
 
     if args.dry_run:
         print("[Weekly History] dry-run complete (no files written).")
         return
 
+    price_rows = _count_csv_rows(prices_path)
+    raw_side_outputs = {
+        token_role: {
+            "price_history": _summarize_csv_artifact(
+                _side_price_history_path(run_dir, token_role),
+                root=run_dir,
+            )
+        }
+        for token_role in TOKEN_ROLES
+    }
+    analysis_side_outputs = {
+        token_role: {
+            "bars_dir": _display_path(_run_analysis_side_bars_dir(run_dir, token_role), root=run_dir),
+            "bars": {
+                freq: {
+                    **analysis_side_updates.get(token_role, {}).get(freq, {}),
+                    "bar_source": (
+                        "subgraph"
+                        if not subgraph_trades_by_side.get(token_role, pd.DataFrame()).empty
+                        else "clob_fallback"
+                    ),
+                }
+                for freq in cfg.bars_freqs
+            },
+        }
+        for token_role in TOKEN_ROLES
+    }
+    subgraph_side_outputs = {"enabled": bool(cfg.include_subgraph)}
+    if cfg.include_subgraph:
+        for token_role in TOKEN_ROLES:
+            subgraph_side_outputs[token_role] = {
+                "trades": _summarize_csv_artifact(
+                    _side_subgraph_trades_path(run_dir, token_role),
+                    root=run_dir,
+                ),
+                "fact_trade_dir": _display_path(_side_fact_trade_dir(fact_trade_root, token_role), root=run_dir),
+                "partitions": int((subgraph_info.get("partitions") or {}).get(token_role, 0)),
+                "bar_source": (
+                    "subgraph"
+                    if not subgraph_trades_by_side.get(token_role, pd.DataFrame()).empty
+                    else "clob_fallback"
+                ),
+            }
     manifest = {
         "run_id": run_id,
         "script_version": SCRIPT_VERSION,
@@ -1121,17 +1664,25 @@ def main() -> None:
             "adjusted_points": despike_adjusted,
         },
         "bars_dir": str(bars_dir),
-        "fact_trade_dir": str(fact_trade_dir),
-        "bar_partitions": bar_partitions,
+        "bar_storage_version": "master_csv_v1",
+        "fact_trade_dir": str(fact_trade_root),
+        "raw_side_outputs": raw_side_outputs,
+        "analysis_side_outputs": analysis_side_outputs,
+        "subgraph_side_outputs": subgraph_side_outputs,
+        "master_bars": master_bar_updates,
         "dim_market": str(dim_market_out),
         "subgraph": subgraph_info,
     }
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    history_state["status"] = "completed"
+    history_state["phase"] = "complete"
+    history_state["manifest_written"] = True
+    _write_history_state(run_dir, history_state)
 
     print("[Weekly History] complete", flush=True)
     print(f"[Weekly History] run_dir={run_dir}", flush=True)
     print(f"[Weekly History] price_rows={price_rows}", flush=True)
-    print(f"[Weekly History] bar_partitions={bar_partitions}", flush=True)
+    print(f"[Weekly History] master_bars={json.dumps(master_bar_updates)}", flush=True)
     print(f"run_id={run_id}", flush=True)
 
 

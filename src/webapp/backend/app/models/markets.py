@@ -5,6 +5,8 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from app.models.polymarket_quality import PolymarketMarketQuality
+
 
 class MarketsRefreshRequest(BaseModel):
     week_friday: Optional[str] = Field(
@@ -98,6 +100,7 @@ class MarketsSeriesResponse(BaseModel):
     event_id: Optional[str]
     points: List[MarketsSeriesPoint]
     metadata: Optional[dict] = None
+    market_quality: Optional[PolymarketMarketQuality] = None
 
 
 class MarketsSeriesByTickerResponse(BaseModel):
@@ -106,3 +109,4 @@ class MarketsSeriesByTickerResponse(BaseModel):
     week_friday: str
     strikes: List[MarketsSeriesResponse]
     metadata: Optional[dict] = None
+    market_quality: Optional[dict[str, PolymarketMarketQuality]] = None

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Refresh exact run-local pRN data for an existing Polymarket history run."""
 
 from __future__ import annotations
 
@@ -6,24 +7,22 @@ import argparse
 import subprocess
 import sys
 from datetime import date
-from pathlib import Path
 from typing import Iterable, Optional, Set
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SRC_ROOT = REPO_ROOT / "src"
+from support.script_paths import REPO_ROOT, SCRIPTS_ROOT, SRC_ROOT, prepend_sys_path
+
 BACKEND_ROOT = SRC_ROOT / "webapp" / "backend"
 
-for candidate in (REPO_ROOT, SRC_ROOT, BACKEND_ROOT):
-    candidate_str = str(candidate)
-    if candidate_str not in sys.path:
-        sys.path.insert(0, candidate_str)
+for candidate in (REPO_ROOT, SRC_ROOT, SCRIPTS_ROOT, BACKEND_ROOT):
+    prepend_sys_path(candidate)
 
 from app.services.polymarket_run_prn import (
     refresh_run_local_prn_dataset,
     resolve_polymarket_run_dir,
 )
+from app.services.script_entrypoints import POLYMARKET_MARKETS_REFRESH_SCRIPT
 
-MARKETS_REFRESH_SCRIPT = REPO_ROOT / "src" / "scripts" / "07-polymarket-markets-refresh-v1.0.py"
+MARKETS_REFRESH_SCRIPT = POLYMARKET_MARKETS_REFRESH_SCRIPT.path
 
 
 def _parse_week_set(raw: Optional[str]) -> Optional[Set[date]]:
@@ -46,6 +45,18 @@ def _sorted_rebuild_weeks(
     weeks = {week for week in affected_weeks}
     weeks.update(week for _, week in missing_markets_pairs)
     return sorted(weeks)
+
+
+def _command_output_tail(*, stdout: str, stderr: str, max_lines: int = 20) -> str:
+    lines = [
+        line.rstrip()
+        for line in [*(stdout or "").splitlines(), *(stderr or "").splitlines()]
+        if line and line.strip()
+    ]
+    if not lines:
+        return ""
+    tail = lines[-max_lines:]
+    return "\n".join(tail)
 
 
 def parse_args() -> argparse.Namespace:
@@ -140,6 +151,7 @@ def main() -> None:
             "--week-friday",
             week.isoformat(),
             "--replace-week",
+            "--skip-build-features-append",
             "--prn-dataset",
             str(result.training_path),
         ]
@@ -150,7 +162,11 @@ def main() -> None:
         if proc.stderr:
             print(proc.stderr, end="" if proc.stderr.endswith("\n") else "\n", file=sys.stderr, flush=True)
         if proc.returncode != 0:
-            raise RuntimeError(f"Markets refresh rebuild failed for week {week.isoformat()}.")
+            tail = _command_output_tail(stdout=proc.stdout or "", stderr=proc.stderr or "")
+            message = f"Markets refresh rebuild failed for week {week.isoformat()}."
+            if tail:
+                message = f"{message}\n{tail}"
+            raise RuntimeError(message)
 
     print("[Run pRN] Refresh complete.", flush=True)
 

@@ -37,24 +37,22 @@ prepend_sys_path(REPO_ROOT)
 prepend_sys_path(SRC_ROOT)
 prepend_sys_path(SCRIPTS_ROOT)
 
-from calibration.calibrate_v2_core import (
+from model_training.calibration.calibrate_v2_core import (
     CalibrationCache,
     _collect_unsupported_compat_args,
     build_args_from_config,
     build_calibration_cache,
     run_calibration_from_cache,
 )
+from support.option_chain_feature_registry import (
+    OPTION_CHAIN_AUTO_FEATURE_SETS,
+    OPTION_CHAIN_BASE_FEATURE,
+    validate_option_chain_feature_selection,
+)
 
-BASE_FEATURE = "x_logit_prn"
-RISKY_FEATURES = {"prn_raw_gap", "had_fallback", "had_intrinsic_drop", "had_band_clip"}
+BASE_FEATURE = OPTION_CHAIN_BASE_FEATURE
 
-DEFAULT_FEATURE_SETS = [
-    [BASE_FEATURE],
-    [BASE_FEATURE, "rv20"],
-    [BASE_FEATURE, "abs_log_m_fwd"],
-    [BASE_FEATURE, "rv20", "abs_log_m_fwd"],
-    [BASE_FEATURE, "rv20", "abs_log_m_fwd", "log_rel_spread"],
-]
+DEFAULT_FEATURE_SETS = [list(feature_set) for feature_set in OPTION_CHAIN_AUTO_FEATURE_SETS]
 DEFAULT_C_VALUES = [0.003, 0.01, 0.03, 0.1, 0.3]
 DEFAULT_CAL_METHODS = ["none", "platt"]
 DEFAULT_UPWEIGHTS = [1.0, 1.25, 1.5]
@@ -371,19 +369,19 @@ def _sanitize_feature_sets(
     feature_sets: List[List[str]],
     *,
     available: set[str],
-    allow_risky: bool,
 ) -> List[List[str]]:
     cleaned: List[List[str]] = []
     for raw in feature_sets:
         if not raw:
             continue
-        features = _dedupe_preserve_order([f for f in raw if f in available or f == BASE_FEATURE])
-        if BASE_FEATURE not in features:
-            features = [BASE_FEATURE] + features
-        if not allow_risky and any(f in RISKY_FEATURES for f in features):
-            continue
-        if len(features) == 0:
-            continue
+        try:
+            features, _ = validate_option_chain_feature_selection(
+                numeric_features=raw,
+                categorical_features=[],
+                available_columns=sorted(available),
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         cleaned.append(features)
     # de-dupe sets
     seen = set()
@@ -1357,18 +1355,10 @@ def main() -> None:
         raise SystemExit(f"Dataset not found: {dataset_path}")
 
     available_cols = set(_read_dataset_columns(dataset_path))
-    allow_risky = bool(search_cfg.get("allow_risky_features", False))
     feature_sets = _sanitize_feature_sets(
         search_cfg.get("feature_sets") or DEFAULT_FEATURE_SETS,
         available=available_cols,
-        allow_risky=allow_risky,
     )
-    if allow_risky:
-        risky_bundle = [BASE_FEATURE, "rv20", "abs_log_m_fwd", "log_rel_spread"]
-        risky_bundle += [feat for feat in sorted(RISKY_FEATURES) if feat in available_cols]
-        risky_bundle = _dedupe_preserve_order(risky_bundle)
-        if risky_bundle and risky_bundle not in feature_sets:
-            feature_sets.append(risky_bundle)
     if not feature_sets:
         raise SystemExit("No valid feature sets remain after availability/risk filtering.")
 

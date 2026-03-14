@@ -1,6 +1,8 @@
 # `src/scripts`
 
 This directory is organized so scripts do not live directly at the root.
+Temporary or one-off utilities should be archived under `deadcode/src/scripts/`
+instead of being added here.
 
 Public wrappers and helper layers live here:
 
@@ -32,6 +34,7 @@ the folders importable.
 - `entrypoints/polymarket-market-map.py`: Public CLI for building the Polymarket market identity table. It creates the joinable mapping between markets, tickers, thresholds, and expiries.
 - `entrypoints/polymarket-fetch-snapshot.py`: Public CLI for pulling a current Polymarket snapshot and enriching it with pRN-style fields. It is mainly used for point-in-time snapshot generation.
 - `entrypoints/polymarket-markets-refresh.py`: Public CLI for the end-to-end Polymarket refresh flow. It stitches together snapshot pulls, history, and feature building into one orchestration step.
+- `entrypoints/polymarket-run-prn-refresh.py`: Public CLI for rebuilding the exact run-local pRN dataset tied to an existing weekly-history run. It can also trigger targeted markets artifact rebuilds for impacted weeks.
 
 ## Compatibility
 
@@ -42,6 +45,7 @@ the folders importable.
 
 - `support/script_paths.py`: Shared path resolver for the scripts tree. It finds the repo root and scripts root without relying on fragile relative-directory assumptions.
 - `support/legacy_facade.py`: Shared loader for wrapper scripts and compatibility shims. It imports an implementation module by path and re-exports its public globals.
+- `support/calibrate_common.py`: Shared calibration helpers, model-bundle types, and feature-enrichment utilities reused by the calibration and Polymarket scripts.
 
 ## Data Collection
 
@@ -60,12 +64,14 @@ the folders importable.
 
 ## Model Training
 
-- `model_training/calibration/calibrate_logit_model_v2.py`: Runs the calibration trainer itself. It defines the CLI contract and passes execution into the shared calibration core under `src/calibration/`.
+- `model_training/calibration/calibrate_logit_model_v2.py`: Runs the calibration trainer itself. It defines the CLI contract and passes execution into the in-process calibration core in the same folder.
+- `model_training/calibration/calibrate_v2_core.py`: Houses the in-process calibration workflow shared by the public trainer and the auto-calibration orchestrator.
 
 ## Orchestration
 
 - `orchestration/calibration/auto_calibrate_logit_model_v2.py`: Coordinates automatic hyperparameter and feature-set search for calibration models. It repeatedly calls the calibrator and compares candidate results.
 - `orchestration/polymarket/markets_refresh_v1.py`: Coordinates the broader Polymarket refresh pipeline. It loads snapshots, weekly history, pRN data, and feature-building steps into one update flow.
+- `orchestration/polymarket/run_prn_refresh_v1.py`: Rebuilds the exact run-local pRN coverage for an existing Polymarket weekly-history run and optionally refreshes the affected market-week artifacts.
 
 ## Shared Polymarket Helpers
 

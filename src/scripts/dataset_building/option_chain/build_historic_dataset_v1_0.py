@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import hashlib
+import json
 import os
 import sys
 import threading
@@ -24,6 +25,10 @@ from feature_engineering.option_chain.weighting_v3 import (
     apply_weighting_v3,
     drop_weight_columns,
 )
+from option_chain.quality_flags import (
+    compute_quality_issue_count,
+    is_split_context_date,
+)
 
 try:
     import yfinance as yf  # type: ignore
@@ -35,6 +40,8 @@ PM10_TICKERS = ["AAPL", "GOOGL", "MSFT", "META", "AMZN", "PLTR", "NVDA", "NFLX",
 BUILD_VERSION = os.path.basename(__file__)
 RN_METHOD = "breeden_litzenberger_call_curve"
 DEFAULT_OUT_DIR = str((REPO_ROOT / "src" / "data" / "raw" / "option-chain").resolve())
+QUALITY_REL_SPREAD_WARN = 0.25
+QUALITY_CHAIN_USED_WARN = 12
 
 
 # ----------------------------
@@ -499,7 +506,12 @@ def preload_stock_closes(
     end: date,
     cfg: Config,
     stock_source: str,
-) -> Tuple[Dict[str, Dict[date, float]], Dict[str, Dict[date, float]], Dict[str, int]]:
+) -> Tuple[
+    Dict[str, Dict[date, float]],
+    Dict[str, Dict[date, float]],
+    Dict[str, int],
+    Dict[str, set[date]],
+]:
     stock_source = (stock_source or "yfinance").strip().lower()
     if stock_source not in {"yfinance", "theta", "auto"}:
         raise ValueError("stock_source must be one of: yfinance, theta, auto")
@@ -510,9 +522,10 @@ def preload_stock_closes(
     raw_out: Dict[str, Dict[date, float]] = {t: {} for t in tickers}
     adj_out: Dict[str, Dict[date, float]] = {t: {} for t in tickers}
     split_counts: Dict[str, int] = {t: 0 for t in tickers}
+    split_dates_by_ticker: Dict[str, set[date]] = {t: set() for t in tickers}
 
     def _fill_from_yf() -> None:
-        nonlocal raw_out, adj_out, split_counts
+        nonlocal raw_out, adj_out, split_counts, split_dates_by_ticker
         print(f"[STOCK] Preloading yfinance Close for {start0}..{end0} (tickers={len(tickers)}) ...")
         df = _yf_download_closes(tickers, start0, end0)
 
@@ -540,6 +553,11 @@ def preload_stock_closes(
             for t in tickers:
                 splits = splits_by_t.get(t, pd.Series(dtype=float))
                 split_counts[t] = int(len(splits)) if splits is not None else 0
+                split_dates_by_ticker[t] = {
+                    pd.Timestamp(idx).date()
+                    for idx, val in (splits.items() if splits is not None else [])
+                    if np.isfinite(val) and float(val) > 0
+                }
                 if not raw_out.get(t):
                     continue
 
@@ -597,16 +615,18 @@ def preload_stock_closes(
                 raw_out[t] = _theta_fetch(t)
                 adj_out[t] = dict(raw_out[t])
                 split_counts[t] = 0
+                split_dates_by_ticker[t] = set()
             except Exception:
                 raw_out[t] = {}
                 adj_out[t] = {}
                 split_counts[t] = 0
+                split_dates_by_ticker[t] = set()
 
     still_missing = [t for t in tickers if not raw_out.get(t)]
     if still_missing:
         print(f"[STOCK] ⚠️ No close data from yfinance/Theta for: {still_missing}")
 
-    return raw_out, adj_out, split_counts
+    return raw_out, adj_out, split_counts, split_dates_by_ticker
 
 
 # ----------------------------
@@ -721,6 +741,183 @@ def realized_vol_proxy(close_map: Dict[date, float], asof_used: date, lookback: 
     if rets.size < 2:
         return np.nan
     return float(np.sqrt(252.0) * np.nanstd(rets, ddof=1))
+
+
+def safe_ratio(numerator: float, denominator: float) -> float:
+    if not np.isfinite(numerator) or not np.isfinite(denominator) or denominator == 0:
+        return np.nan
+    return float(numerator) / float(denominator)
+
+
+def progress_update_interval(total_jobs: int) -> int:
+    total = max(0, int(total_jobs))
+    return 1 if total <= 10 else 10
+
+
+LIVE_GROUP_CHECK_FIELDS = (
+    ("flag_asof_close_fallback", "asof_close_fallback"),
+    ("flag_expiry_close_fallback", "expiry_close_fallback"),
+    ("flag_expiry_saturday_fallback", "expiry_saturday_fallback"),
+    ("flag_quote_close_fallback", "quote_close_fallback"),
+    ("flag_low_chain_used", "low_chain_used"),
+    ("flag_wide_rel_spread", "wide_rel_spread"),
+)
+
+
+def build_live_telemetry(tickers: List[str], planned_jobs_per_ticker: int) -> Dict[str, object]:
+    return {
+        "phase": "planning",
+        "drop_reasons": {},
+        "group_checks": {
+            metric_key: 0 for _, metric_key in LIVE_GROUP_CHECK_FIELDS
+        },
+        "tickers": [
+            {
+                "ticker": ticker,
+                "completed_jobs": 0,
+                "planned_jobs": int(planned_jobs_per_ticker),
+                "kept_groups": 0,
+                "rows": 0,
+                "issue_count_sum": 0.0,
+                "flagged_rows": 0,
+                "fallback_rows": 0,
+                "wide_spread_rows": 0,
+                "clean_rows": 0,
+                "watch_rows": 0,
+                "noisy_rows": 0,
+                "drop_reasons": {},
+            }
+            for ticker in tickers
+        ],
+    }
+
+
+def _get_live_ticker_entry(telemetry: Dict[str, object], ticker: str) -> Dict[str, object]:
+    items = telemetry.setdefault("tickers", [])
+    if not isinstance(items, list):
+        items = []
+        telemetry["tickers"] = items
+    for item in items:
+        if isinstance(item, dict) and str(item.get("ticker")) == ticker:
+            return item
+    entry = {
+        "ticker": ticker,
+        "completed_jobs": 0,
+        "planned_jobs": 0,
+        "kept_groups": 0,
+        "rows": 0,
+        "issue_count_sum": 0.0,
+        "flagged_rows": 0,
+        "fallback_rows": 0,
+        "wide_spread_rows": 0,
+        "clean_rows": 0,
+        "watch_rows": 0,
+        "noisy_rows": 0,
+        "drop_reasons": {},
+    }
+    items.append(entry)
+    return entry
+
+
+def _increment_reason_count(bucket: Dict[str, object], reason: Optional[str]) -> None:
+    if not reason:
+        return
+    bucket[reason] = int(bucket.get(reason) or 0) + 1
+
+
+def _live_issue_count(row: Dict[str, object]) -> float:
+    value = row.get("quality_issue_count")
+    try:
+        numeric = float(value)
+    except Exception:
+        return 0.0
+    return numeric if np.isfinite(numeric) else 0.0
+
+
+def _live_quality_bucket(row: Dict[str, object], issue_count: float) -> str:
+    bucket = str(row.get("quality_bucket") or "").strip().lower()
+    if bucket in {"clean", "watch", "noisy"}:
+        return bucket
+    if issue_count <= 0:
+        return "clean"
+    if issue_count <= 2:
+        return "watch"
+    return "noisy"
+
+
+def update_live_telemetry_for_job(
+    telemetry: Dict[str, object],
+    ticker: str,
+    rows: List[dict],
+    drop_log: Optional[dict],
+) -> None:
+    entry = _get_live_ticker_entry(telemetry, ticker)
+    entry["completed_jobs"] = int(entry.get("completed_jobs") or 0) + 1
+
+    if rows:
+        entry["kept_groups"] = int(entry.get("kept_groups") or 0) + 1
+        entry["rows"] = int(entry.get("rows") or 0) + len(rows)
+        first_row = rows[0]
+        group_checks = telemetry.setdefault("group_checks", {})
+        if not isinstance(group_checks, dict):
+            group_checks = {}
+            telemetry["group_checks"] = group_checks
+        for flag_key, metric_key in LIVE_GROUP_CHECK_FIELDS:
+            if bool(first_row.get(flag_key, False)):
+                group_checks[metric_key] = int(group_checks.get(metric_key) or 0) + 1
+        issue_count_sum = 0.0
+        flagged_rows = 0
+        fallback_rows = 0
+        wide_spread_rows = 0
+        clean_rows = 0
+        watch_rows = 0
+        noisy_rows = 0
+        for row in rows:
+            issue_count = _live_issue_count(row)
+            issue_count_sum += issue_count
+            if issue_count > 0:
+                flagged_rows += 1
+            if bool(row.get("flag_asof_close_fallback", False)) or bool(
+                row.get("flag_expiry_close_fallback", False)
+            ):
+                fallback_rows += 1
+            if bool(row.get("flag_wide_rel_spread", False)):
+                wide_spread_rows += 1
+            quality_bucket = _live_quality_bucket(row, issue_count)
+            if quality_bucket == "clean":
+                clean_rows += 1
+            elif quality_bucket == "watch":
+                watch_rows += 1
+            else:
+                noisy_rows += 1
+        entry["issue_count_sum"] = float(entry.get("issue_count_sum") or 0.0) + issue_count_sum
+        entry["flagged_rows"] = int(entry.get("flagged_rows") or 0) + flagged_rows
+        entry["fallback_rows"] = int(entry.get("fallback_rows") or 0) + fallback_rows
+        entry["wide_spread_rows"] = int(entry.get("wide_spread_rows") or 0) + wide_spread_rows
+        entry["clean_rows"] = int(entry.get("clean_rows") or 0) + clean_rows
+        entry["watch_rows"] = int(entry.get("watch_rows") or 0) + watch_rows
+        entry["noisy_rows"] = int(entry.get("noisy_rows") or 0) + noisy_rows
+
+    reason = None
+    if isinstance(drop_log, dict):
+        raw_reason = drop_log.get("drop_reason")
+        if raw_reason is not None:
+            reason = str(raw_reason).strip() or None
+    if reason:
+        drop_reasons = telemetry.setdefault("drop_reasons", {})
+        if not isinstance(drop_reasons, dict):
+            drop_reasons = {}
+            telemetry["drop_reasons"] = drop_reasons
+        entry_drop_reasons = entry.setdefault("drop_reasons", {})
+        if not isinstance(entry_drop_reasons, dict):
+            entry_drop_reasons = {}
+            entry["drop_reasons"] = entry_drop_reasons
+        _increment_reason_count(drop_reasons, reason)
+        _increment_reason_count(entry_drop_reasons, reason)
+
+
+def emit_live_telemetry(telemetry: Dict[str, object]) -> None:
+    print(f"[LIVE] {json.dumps(telemetry, sort_keys=True)}", flush=True)
 
 
 def fix_negative_zero(x: float, eps: float = 5e-13) -> float:
@@ -1043,6 +1240,7 @@ def process_one(
     raw_closes_by_ticker: Dict[str, Dict[date, float]],
     adj_closes_by_ticker: Dict[str, Dict[date, float]],
     split_event_counts: Dict[str, int],
+    split_event_dates_by_ticker: Dict[str, set[date]],
     dividend_histories: Dict[str, DividendHistory],
     option_chain_cache: Dict[Tuple[str, date, date, Optional[int]], pd.DataFrame],
     cache_lock: threading.Lock,
@@ -1051,6 +1249,7 @@ def process_one(
     raw_map = raw_closes_by_ticker.get(ticker, {})
     adj_map = adj_closes_by_ticker.get(ticker, {})
     split_n = int(split_event_counts.get(ticker, 0))
+    split_dates = split_event_dates_by_ticker.get(ticker, set())
 
     # As-of close (forward fallback from asof_target)
     S0_raw, asof_raw, asof_fwd = get_close_with_fallback_map(
@@ -1105,7 +1304,11 @@ def process_one(
         }
     T_years = float(T_days) / 365.25
 
+    rv5_raw = realized_vol_proxy(raw_map, asof_used, 5)
+    rv10_raw = realized_vol_proxy(raw_map, asof_used, 10)
     rv20_raw = realized_vol_proxy(raw_map, asof_used, cfg.rv_lookback_days)
+    rv5_adj = realized_vol_proxy(adj_map, asof_used, 5)
+    rv10_adj = realized_vol_proxy(adj_map, asof_used, 10)
     rv20_adj = realized_vol_proxy(adj_map, asof_used, cfg.rv_lookback_days)
 
     # Dividends (time-safe trailing window up to asof_used)
@@ -1321,15 +1524,43 @@ def process_one(
     if spot_scale_used == "raw":
         S0_used = float(S0_raw)
         ST_used = float(ST_raw)
+        rv5_used = rv5_raw
+        rv10_used = rv10_raw
         rv20_used = rv20_raw
         div_yield_used = float(div_yield_raw)
     else:
         S0_used = float(S0_adj)
         ST_used = float(ST_adj)
+        rv5_used = rv5_adj
+        rv10_used = rv10_adj
         rv20_used = rv20_adj
         div_yield_used = float(div_yield_adj)
 
     forward_used = float(fwd_used) if (np.isfinite(fwd_used) and fwd_used > 0) else _forward_price(S0_used, div_yield_used)
+    rv5_over_rv10 = safe_ratio(rv5_used, rv10_used)
+    rv5_over_rv20 = safe_ratio(rv5_used, rv20_used)
+    rv10_over_rv20 = safe_ratio(rv10_used, rv20_used)
+    flag_asof_close_fallback = bool(asof_fwd > 0)
+    flag_expiry_close_fallback = bool(exp_bwd > 0)
+    flag_expiry_saturday_fallback = bool(expiry_convention == "SAT_FALLBACK")
+    flag_quote_close_fallback = bool(diag_curve.get("quote_source") != "bidask_mid")
+    flag_split_event_context = is_split_context_date(asof_used, split_dates)
+    flag_prn_monotone_adjusted = bool(
+        diag_prn.get("monotone_adjusted_intervals") or diag_prn.get("monotone_adjusted_targets")
+    )
+    rel_spread_value = float(rsm) if (rsm is not None and np.isfinite(rsm)) else np.nan
+    flag_wide_rel_spread = bool(np.isfinite(rel_spread_value) and rel_spread_value > QUALITY_REL_SPREAD_WARN)
+    n_chain_used_value = int(diag_curve.get("n_used") or 0)
+    flag_low_chain_used = bool(
+        n_chain_used_value > 0
+        and n_chain_used_value < max(int(cfg.min_strikes_for_curve) + 2, QUALITY_CHAIN_USED_WARN)
+    )
+    flag_missing_rv = bool(
+        (not np.isfinite(rv5_used))
+        or (not np.isfinite(rv10_used))
+        or (not np.isfinite(rv20_used))
+    )
+    flag_thin_prn_band = False
 
     # Rows + apply pRN band
     tmp_rows: List[dict] = []
@@ -1360,6 +1591,35 @@ def process_one(
         if pRN_raw_targets is not None and i < len(pRN_raw_targets):
             pr = float(pRN_raw_targets[i])
             p_raw = float(np.round(pr, 7)) if np.isfinite(pr) else np.nan
+
+        abs_log_m_fwd_value = (
+            float(np.round(abs(np.log(float(K_val) / float(forward_used))), 9))
+            if np.isfinite(forward_used) and forward_used > 0
+            else np.nan
+        )
+        abs_log_m_value = float(np.round(abs(np.log(float(K_val) / float(S0_used))), 9))
+        band_edge_metric = abs_log_m_fwd_value if np.isfinite(abs_log_m_fwd_value) else abs_log_m_value
+        flag_band_edge = bool(np.isfinite(band_edge_metric) and band_edge_metric >= float(used_abslogm) * 0.9)
+        quality_flags = {
+            "flag_asof_close_fallback": flag_asof_close_fallback,
+            "flag_expiry_close_fallback": flag_expiry_close_fallback,
+            "flag_expiry_saturday_fallback": flag_expiry_saturday_fallback,
+            "flag_quote_close_fallback": flag_quote_close_fallback,
+            "flag_split_event_context": flag_split_event_context,
+            "flag_prn_monotone_adjusted": flag_prn_monotone_adjusted,
+            "flag_wide_rel_spread": flag_wide_rel_spread,
+            "flag_low_chain_used": flag_low_chain_used,
+            "flag_thin_prn_band": flag_thin_prn_band,
+            "flag_missing_rv": flag_missing_rv,
+            "flag_band_edge": flag_band_edge,
+        }
+        quality_issue_count = compute_quality_issue_count(quality_flags)
+        if quality_issue_count == 0:
+            quality_bucket = "clean"
+        elif quality_issue_count <= 2:
+            quality_bucket = "watch"
+        else:
+            quality_bucket = "noisy"
 
         tmp_rows.append(
             {
@@ -1421,12 +1681,17 @@ def process_one(
                 # strike + moneyness
                 "K": K_val,
                 "log_m": float(np.round(np.log(float(K_val) / float(S0_used)), 9)),
-                "abs_log_m": float(np.round(abs(np.log(float(K_val) / float(S0_used))), 9)),
+                "abs_log_m": abs_log_m_value,
                 "log_m_fwd": float(np.round(np.log(float(K_val) / float(forward_used)), 9)) if np.isfinite(forward_used) and forward_used > 0 else np.nan,
-                "abs_log_m_fwd": float(np.round(abs(np.log(float(K_val) / float(forward_used))), 9)) if np.isfinite(forward_used) and forward_used > 0 else np.nan,
+                "abs_log_m_fwd": abs_log_m_fwd_value,
 
                 # vol proxy
+                "rv5": float(np.round(rv5_used, 8)) if np.isfinite(rv5_used) else np.nan,
+                "rv10": float(np.round(rv10_used, 8)) if np.isfinite(rv10_used) else np.nan,
                 "rv20": float(np.round(rv20_used, 8)) if np.isfinite(rv20_used) else np.nan,
+                "rv5_over_rv10": float(np.round(rv5_over_rv10, 8)) if np.isfinite(rv5_over_rv10) else np.nan,
+                "rv5_over_rv20": float(np.round(rv5_over_rv20, 8)) if np.isfinite(rv5_over_rv20) else np.nan,
+                "rv10_over_rv20": float(np.round(rv10_over_rv20, 8)) if np.isfinite(rv10_over_rv20) else np.nan,
 
                 # pRN (+ audit raw targets)
                 "pRN": p,
@@ -1458,6 +1723,9 @@ def process_one(
                 "dropped_insane": diag_curve.get("dropped_insane"),
                 "prn_monotone_adj_intervals": bool(diag_prn.get("monotone_adjusted_intervals")),
                 "prn_monotone_adj_targets": bool(diag_prn.get("monotone_adjusted_targets")),
+                "quality_issue_count": quality_issue_count,
+                "quality_bucket": quality_bucket,
+                **quality_flags,
                 # dependence-aware cluster keys used for weighting v3
                 "cluster_week": cluster_week,
                 "cluster_snapshot": cluster_snapshot,
@@ -1475,9 +1743,33 @@ def process_one(
             "detail": f"kept={len(tmp_rows)} need={cfg.min_strikes_in_prn_band} inside={n_band_inside} used_abslogm={used_abslogm:.4f} spot_scale={spot_scale_used} moneyness_ref={moneyness_ref}",
         }
 
+    flag_thin_prn_band = bool(len(tmp_rows) <= int(cfg.min_strikes_in_prn_band) + 1)
     med_dk, min_dk = strike_spacing_stats(np.array([r["K"] for r in tmp_rows], dtype=float))
 
     for rr in tmp_rows:
+        quality_flags = {
+            "flag_asof_close_fallback": flag_asof_close_fallback,
+            "flag_expiry_close_fallback": flag_expiry_close_fallback,
+            "flag_expiry_saturday_fallback": flag_expiry_saturday_fallback,
+            "flag_quote_close_fallback": flag_quote_close_fallback,
+            "flag_split_event_context": flag_split_event_context,
+            "flag_prn_monotone_adjusted": flag_prn_monotone_adjusted,
+            "flag_wide_rel_spread": flag_wide_rel_spread,
+            "flag_low_chain_used": flag_low_chain_used,
+            "flag_thin_prn_band": flag_thin_prn_band,
+            "flag_missing_rv": flag_missing_rv,
+            "flag_band_edge": bool(rr.get("flag_band_edge", False)),
+        }
+        quality_issue_count = compute_quality_issue_count(quality_flags)
+        if quality_issue_count == 0:
+            quality_bucket = "clean"
+        elif quality_issue_count <= 2:
+            quality_bucket = "watch"
+        else:
+            quality_bucket = "noisy"
+        rr.update(quality_flags)
+        rr["quality_issue_count"] = quality_issue_count
+        rr["quality_bucket"] = quality_bucket
         rr["weight_group_key"] = rr["cluster_snapshot"]
         rr["group_id"] = rr["cluster_snapshot"]
         rr["median_dK"] = float(np.round(med_dk, 6)) if np.isfinite(med_dk) else np.nan
@@ -1823,6 +2115,24 @@ def _sanity_report_and_optional_drop(out_df: pd.DataFrame, drops: List[dict], cf
 # ----------------------------
 # Main
 # ----------------------------
+
+from option_chain import exact_builder as shared_exact_builder
+
+Config = shared_exact_builder.Config
+DividendHistory = shared_exact_builder.DividendHistory
+ThetaClient = shared_exact_builder.ThetaClient
+compute_prn_config_hash = shared_exact_builder.compute_prn_config_hash
+parse_weekdays = shared_exact_builder.parse_weekdays
+parse_dte_list = shared_exact_builder.parse_dte_list
+resolve_dte_list = shared_exact_builder.resolve_dte_list
+dates_in_range_by_weekday = shared_exact_builder.dates_in_range_by_weekday
+build_schedule_entries = shared_exact_builder.build_schedule_entries
+preload_dividend_histories = shared_exact_builder.preload_dividend_histories
+progress_update_interval = shared_exact_builder.progress_update_interval
+build_live_telemetry = shared_exact_builder.build_live_telemetry
+update_live_telemetry_for_job = shared_exact_builder.update_live_telemetry_for_job
+emit_live_telemetry = shared_exact_builder.emit_live_telemetry
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -2175,6 +2485,7 @@ def main() -> None:
         max_expiry = end
     expiries_count = len({exp for _, exp, _ in schedule_entries})
     asof_hint = f"dte={dte_list}" if dte_list else f"asof_weekdays={asof_weekdays}"
+    live_telemetry = build_live_telemetry(tickers, len(schedule_entries))
     print(
         f"[PLAN] mode={schedule_mode} range={start}..{end} expiries={expiries_count} "
         f"asof={asof_hint} tickers={len(tickers)}"
@@ -2212,14 +2523,22 @@ def main() -> None:
             f"[CFG] sanity_report={cfg.sanity_report} sanity_drop={cfg.sanity_drop} "
             f"abs_logm_max={cfg.sanity_abs_logm_max} K/S in [{cfg.sanity_k_over_s_min},{cfg.sanity_k_over_s_max}]"
         )
+    emit_live_telemetry(live_telemetry)
 
     # Preload stock closes for the whole range + cushion (asof forward + expiry backward fallbacks)
     back_pad = max(0, int(cfg.max_backward_days_for_expiry_close))
     fwd_pad = max(4, int(cfg.max_forward_days_for_asof))
     preload_start = min(start, min_asof, min_expiry - timedelta(days=back_pad))
     preload_end = max(end, max_expiry, max_asof + timedelta(days=fwd_pad))
+    live_telemetry["phase"] = "preloading_stock"
+    emit_live_telemetry(live_telemetry)
     print(f"[STOCK] Preloading closes for {preload_start}..{preload_end} (pad fwd={fwd_pad} back={back_pad}) ...")
-    raw_closes_by_ticker, adj_closes_by_ticker, split_counts = preload_stock_closes(
+    (
+        raw_closes_by_ticker,
+        adj_closes_by_ticker,
+        split_counts,
+        split_dates_by_ticker,
+    ) = preload_stock_closes(
         theta=theta,
         tickers=tickers,
         start=preload_start,
@@ -2232,6 +2551,8 @@ def main() -> None:
     if missing:
         print(f"[STOCK] ⚠️ No close data for: {missing}")
 
+    live_telemetry["phase"] = "preloading_dividends"
+    emit_live_telemetry(live_telemetry)
     dividend_histories = preload_dividend_histories(
         tickers=tickers,
         start=preload_start,
@@ -2244,6 +2565,8 @@ def main() -> None:
 
     rows: List[dict] = []
     drops: List[dict] = []
+    live_telemetry["phase"] = "building"
+    emit_live_telemetry(live_telemetry)
 
     # Jobs = for each expiry/asof snapshot, for each ticker.
     def jobs():
@@ -2252,6 +2575,7 @@ def main() -> None:
                 yield (t, week_monday, expiry_date, asof_target)
 
     total_jobs = len(schedule_entries) * len(tickers)
+    progress_every = progress_update_interval(total_jobs)
     done = 0
     kept_groups = 0
 
@@ -2268,6 +2592,7 @@ def main() -> None:
                 raw_closes_by_ticker=raw_closes_by_ticker,
                 adj_closes_by_ticker=adj_closes_by_ticker,
                 split_event_counts=split_counts,
+                split_event_dates_by_ticker=split_dates_by_ticker,
                 dividend_histories=dividend_histories,
                 option_chain_cache=option_chain_cache,
                 cache_lock=cache_lock,
@@ -2297,19 +2622,25 @@ def main() -> None:
                 rows.extend(rws)
             if drop_log is not None:
                 drops.append(drop_log)
+            update_live_telemetry_for_job(live_telemetry, t, rws, drop_log)
 
-            if done % 100 == 0 or done == total_jobs:
+            if done % progress_every == 0 or done == total_jobs:
                 print(
                     f"[PROGRESS] {done}/{total_jobs} jobs | groups_kept={kept_groups} | rows={len(rows)} | last={t} week={mon} asof_target={asof_target}"
                 )
+                emit_live_telemetry(live_telemetry)
 
     if not rows:
         print("[RESULT] No rows produced.")
         if args.write_drops and drops:
             pd.DataFrame(drops).to_csv(drops_path, index=False)
             print(f"[WRITE] drops: {drops_path}")
+        live_telemetry["phase"] = "finished"
+        emit_live_telemetry(live_telemetry)
         return
 
+    live_telemetry["phase"] = "finalizing"
+    emit_live_telemetry(live_telemetry)
     out_df = pd.DataFrame(rows)
 
     # parse + sort
@@ -2470,6 +2801,8 @@ def main() -> None:
         f"max={float(out_df['weight_final'].max()):.6g}"
     )
 
+    live_telemetry["phase"] = "writing_outputs"
+    emit_live_telemetry(live_telemetry)
     train_view_path = os.path.join(run_dir, train_view_out_name)
     snapshot_path = os.path.join(run_dir, snapshot_out_name)
     prn_view_path = os.path.join(run_dir, prn_view_out_name)
@@ -2523,6 +2856,9 @@ def main() -> None:
         drops_df = pd.DataFrame(drops) if drops else pd.DataFrame(columns=["ticker", "week_monday", "week_friday", "asof_target", "drop_reason", "detail"])
         drops_df.to_csv(drops_path, index=False)
         print(f"[WRITE] drops: {drops_path}")
+
+    live_telemetry["phase"] = "finished"
+    emit_live_telemetry(live_telemetry)
 
 
 if __name__ == "__main__":

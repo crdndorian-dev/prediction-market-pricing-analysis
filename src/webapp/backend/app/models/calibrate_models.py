@@ -191,7 +191,10 @@ class CalibrateModelRunRequest(BaseModel):
     auto_drop_near_constant: Optional[bool] = Field(default=None)
     random_state: Optional[int] = Field(default=None)
     metrics_top_tickers: Optional[int] = Field(default=None)
-    enable_x_abs_m: Optional[bool] = Field(default=None, description="Enable x_abs_m interaction feature")
+    enable_x_abs_m: Optional[bool] = Field(
+        default=None,
+        description="Deprecated legacy field. Any supplied value is rejected.",
+    )
     group_reweight: Optional[str] = Field(
         default=None,
         description="Group reweighting mode: none or chain_snapshot",
@@ -259,6 +262,12 @@ class CalibrateModelRunRequest(BaseModel):
             )
         return v
 
+    @validator("enable_x_abs_m")
+    def validate_enable_x_abs_m(cls, v):
+        if v is not None:
+            raise ValueError("enable_x_abs_m is no longer supported for option-chain calibration.")
+        return v
+
     @validator("model_kind")
     def validate_model_kind_with_two_stage(cls, v, values):
         """Validate that two_stage_mode cannot be used with mixed-only model kind."""
@@ -295,7 +304,7 @@ class AutoSearchConfig(BaseModel):
     )
     allow_risky_features: bool = Field(
         default=False,
-        description="Allow risky features (had_*, prn_raw_gap) in search grid.",
+        description="Deprecated legacy field. Any true value is rejected.",
     )
     advanced_interactions: bool = Field(
         default=False,
@@ -333,6 +342,12 @@ class AutoSearchConfig(BaseModel):
         default=None,
         description="Maximum allowed worst-fold delta logloss in outer CV.",
     )
+
+    @validator("allow_risky_features")
+    def validate_allow_risky_features(cls, v):
+        if v:
+            raise ValueError("allow_risky_features is no longer supported for option-chain auto-search.")
+        return v
 
 
 class AutoModelRunRequest(BaseModel):
@@ -619,6 +634,16 @@ class FeatureStat(BaseModel):
     nunique: int = Field(..., description="Number of unique values")
 
 
+class SelectableFeatureDescriptor(BaseModel):
+    name: str
+    label: str
+    kind: Literal["numeric", "categorical"]
+    group: str
+    order: int
+    default_selected: bool = False
+    mutex_group: Optional[str] = None
+
+
 class RegimeInfo(BaseModel):
     tdays_mode: Optional[List[int]] = Field(None, description="Most common T_days values")
     is_weekly: Optional[bool] = Field(None, description="True if dataset is weekly regime")
@@ -628,5 +653,9 @@ class RegimeInfo(BaseModel):
 class DatasetFeaturesResponse(BaseModel):
     dataset: str = Field(..., description="Dataset name/path")
     available_columns: List[str] = Field(..., description="All column names in dataset")
+    selectable_features: List[SelectableFeatureDescriptor] = Field(
+        default_factory=list,
+        description="Registry-backed selectable calibration features present in the dataset",
+    )
     feature_stats: Dict[str, FeatureStat] = Field(..., description="Statistics per column")
     regime_info: RegimeInfo = Field(..., description="Regime detection info")

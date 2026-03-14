@@ -4,8 +4,13 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from app.models.datasets import (
+    DatasetRowDetailResponse,
+    DatasetAuditResponse,
     DatasetBackfillRequest,
     DatasetBackfillResponse,
+    DatasetCleanupPreviewResponse,
+    DatasetCleanupRequest,
+    DatasetCleanupResponse,
     DatasetJobStatus,
     DatasetListResponse,
     DatasetPreviewResponse,
@@ -15,6 +20,9 @@ from app.models.datasets import (
     DatasetRunSummary,
 )
 from app.services.datasets import (
+    apply_dataset_cleanup,
+    get_dataset_row_detail,
+    audit_dataset_file,
     backfill_dataset_for_polymarket,
     cancel_dataset_job,
     get_dataset_job,
@@ -22,6 +30,7 @@ from app.services.datasets import (
     start_dataset_job,
     delete_dataset_run,
     list_dataset_runs,
+    preview_dataset_cleanup,
     preview_dataset_file,
     get_dataset_file_path,
     rename_dataset_run,
@@ -94,6 +103,36 @@ def backfill_dataset_route(payload: DatasetBackfillRequest) -> DatasetBackfillRe
         raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
+@router.post("/runs/cleanup/preview", response_model=DatasetCleanupPreviewResponse)
+def preview_dataset_cleanup_route(
+    payload: DatasetCleanupRequest,
+) -> DatasetCleanupPreviewResponse:
+    try:
+        return preview_dataset_cleanup(payload)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/runs/cleanup", response_model=DatasetCleanupResponse)
+def apply_dataset_cleanup_route(
+    payload: DatasetCleanupRequest,
+) -> DatasetCleanupResponse:
+    try:
+        ensure_no_active_jobs()
+        return apply_dataset_cleanup(payload)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        status = 409 if "Another job is already running" in str(exc) else 500
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+
 @router.get("/runs/preview", response_model=DatasetPreviewResponse)
 def preview_dataset_file_route(
     path: str = Query(...),
@@ -102,6 +141,29 @@ def preview_dataset_file_route(
 ) -> DatasetPreviewResponse:
     try:
         return preview_dataset_file(path, limit=limit, mode=mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/runs/audit", response_model=DatasetAuditResponse)
+def audit_dataset_file_route(path: str = Query(...)) -> DatasetAuditResponse:
+    try:
+        return audit_dataset_file(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/runs/row", response_model=DatasetRowDetailResponse)
+def dataset_row_detail_route(
+    path: str = Query(...),
+    row_id: str = Query(...),
+) -> DatasetRowDetailResponse:
+    try:
+        return get_dataset_row_detail(path, row_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

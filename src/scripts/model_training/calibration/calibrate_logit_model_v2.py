@@ -10,12 +10,13 @@ from __future__ import annotations
 import argparse
 import sys
 
-from support.script_paths import REPO_ROOT, SRC_ROOT, prepend_sys_path
+from support.script_paths import REPO_ROOT, SCRIPTS_ROOT, SRC_ROOT, prepend_sys_path
 
 prepend_sys_path(REPO_ROOT)
 prepend_sys_path(SRC_ROOT)
+prepend_sys_path(SCRIPTS_ROOT)
 
-from calibration.calibrate_v2_core import main as core_main
+from model_training.calibration.calibrate_v2_core import main as core_main
 
 SCRIPT_VERSION = "v2.0.0"
 

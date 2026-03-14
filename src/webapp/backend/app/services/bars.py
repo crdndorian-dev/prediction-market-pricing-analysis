@@ -16,6 +16,7 @@ from app.models.bars import (
     ByStrikeResponse,
     StrikeSeries,
 )
+from app.services.polymarket_quality import load_market_quality_map
 from app.services.run_csv_files import (
     combined_run_csv_size,
     get_run_csv_paths,
@@ -380,6 +381,7 @@ def get_bars_by_strike(request: ByStrikeRequest) -> ByStrikeResponse:
     run_id = run_dir.name
     event_slug_map = _load_event_slugs(run_dir)
     gamma_volume_map = _load_gamma_volumes(run_dir)
+    market_quality_map = load_market_quality_map(run_dir)
 
     time_min_ms = _parse_timestamp(request.time_min) if request.time_min else None
     time_max_ms = _parse_timestamp(request.time_max) if request.time_max else None
@@ -513,6 +515,8 @@ def get_bars_by_strike(request: ByStrikeRequest) -> ByStrikeResponse:
         quality = "good"
         if vol is not None and vol < LOW_VOLUME_THRESHOLD:
             quality = "low_volume"
+        elif stale_ratio >= 0.35:
+            quality = "stale"
         elif mid_cluster_ratio >= SUSPECT_CLUSTER_RATIO and max_jump >= SUSPECT_JUMP_THRESHOLD:
             quality = "suspect"
         elif total < density_threshold and max_jump >= SUSPECT_JUMP_THRESHOLD:
@@ -534,6 +538,7 @@ def get_bars_by_strike(request: ByStrikeRequest) -> ByStrikeResponse:
             midprice_cluster_ratio=round(mid_cluster_ratio, 3),
             max_jump=round(max_jump, 4),
             quality=quality,
+            market_quality=market_quality_map.get(str(m["market_id"])) if m["market_id"] else None,
         ))
 
     log.info(

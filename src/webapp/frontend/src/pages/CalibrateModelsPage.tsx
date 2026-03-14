@@ -35,6 +35,7 @@ import {
   type ModelFilesListResponse,
   type ModelRunSummary,
   type RegimePreviewResponse,
+  type SelectableFeatureDescriptor,
   type WeightingPreviewResponse,
 } from "../api/calibrateModels";
 import PipelineStatusCard from "../components/PipelineStatusCard";
@@ -119,7 +120,6 @@ type CalibrateFormState = {
   dropPrnAbove: string;
 
   autoMaxTrials: string;
-  autoAllowRisky: boolean;
   autoAdvancedSearch: boolean;
   autoOuterFolds: string;
   autoOuterTestWeeks: string;
@@ -175,14 +175,10 @@ const C_GRID_PRESETS: Record<string, string> = {
 
 const AUTO_FEATURE_SETS = [
   ["x_logit_prn"],
-  ["x_logit_prn", "rv5"],
-  ["x_logit_prn", "rv10"],
   ["x_logit_prn", "rv20"],
   ["x_logit_prn", "abs_log_m_fwd"],
   ["x_logit_prn", "rv20", "abs_log_m_fwd"],
-  ["x_logit_prn", "rv20", "rv5_over_rv20"],
-  ["x_logit_prn", "rv20", "rv10_over_rv20"],
-  ["x_logit_prn", "rv20", "abs_log_m_fwd", "log_rel_spread"],
+  ["x_logit_prn", "rv20", "abs_log_m_fwd", "rel_spread_median"],
 ];
 const AUTO_C_VALUES = [0.003, 0.01, 0.03, 0.1, 0.3];
 const AUTO_CAL_METHODS: CalibrationMethod[] = ["none", "platt"];
@@ -204,58 +200,10 @@ const TIME_REGIME_OPTIONS: Array<{
 ];
 
 const BASE_FEATURE = "x_logit_prn";
-const FEATURE_OPTIONS = [
-  "log_m_fwd",
-  "abs_log_m_fwd",
-  "rv5",
-  "rv10",
-  "rv20",
-  "rv20_sqrtT",
-  "rv5_over_rv20",
-  "rv5_over_rv10",
-  "rv10_over_rv20",
-  "log_m_fwd_over_volT",
-  "log_rel_spread",
-  "had_fallback",
-  "had_intrinsic_drop",
-  "had_band_clip",
-  "prn_raw_gap",
-  "dividend_yield",
-  "x_m",
-  "x_abs_m",
-] as const;
-const FEATURE_OPTION_SET = new Set<string>(FEATURE_OPTIONS);
-const CATEGORICAL_FEATURE_OPTIONS = ["spot_scale_used"] as const;
-const CATEGORICAL_FEATURE_LABELS: Record<string, string> = {
-  spot_scale_used: "Spot split scale adjusted",
-};
-const CATEGORICAL_FEATURE_OPTION_SET = new Set<string>(CATEGORICAL_FEATURE_OPTIONS);
-const FEATURE_CATEGORIES: Array<{ title: string; items: readonly string[] }> = [
-  { title: "Moneyness", items: ["log_m_fwd", "abs_log_m_fwd", "log_m_fwd_over_volT"] },
-  { title: "Volatility", items: ["rv5", "rv10", "rv20", "rv20_sqrtT"] },
-  { title: "Volatility Regime", items: ["rv5_over_rv20", "rv5_over_rv10", "rv10_over_rv20"] },
-  { title: "Market Quality", items: ["log_rel_spread", "prn_raw_gap", "dividend_yield"] },
-  { title: "Coverage and Sanity", items: ["had_fallback", "had_intrinsic_drop", "had_band_clip"] },
-  { title: "Interactions", items: ["x_m", "x_abs_m"] },
-];
-const FEATURE_DEPENDENCIES: Record<string, string[]> = {
-  x_m: ["log_m_fwd"],
-  x_abs_m: ["abs_log_m_fwd"],
-};
-const FEATURE_MUTUAL_EXCLUSIVE_GROUPS: string[][] = [
-  ["rv20", "rv20_sqrtT"],
-  ["log_m_fwd", "abs_log_m_fwd"],
-  ["x_m", "x_abs_m"],
-];
 const DEFAULT_SELECTED_FEATURES = [
   "log_m_fwd",
   "rv20",
-  "log_m_fwd_over_volT",
-  "log_rel_spread",
-  "had_fallback",
-  "had_intrinsic_drop",
-  "had_band_clip",
-  "prn_raw_gap",
+  "rel_spread_median",
   "dividend_yield",
 ];
 
@@ -341,7 +289,6 @@ const defaultForm = (): CalibrateFormState => ({
   dropPrnAbove: "0.999",
 
   autoMaxTrials: "",
-  autoAllowRisky: false,
   autoAdvancedSearch: false,
   autoOuterFolds: "0",
   autoOuterTestWeeks: "8",
@@ -1969,8 +1916,7 @@ const loadStoredForm = (): CalibrateFormState | null => {
         : [...DEFAULT_SELECTED_FEATURES],
       selectedCategoricalFeatures: Array.isArray(parsed.selectedCategoricalFeatures)
         ? parsed.selectedCategoricalFeatures.filter(
-            (feature): feature is string =>
-              typeof feature === "string" && CATEGORICAL_FEATURE_OPTION_SET.has(feature),
+            (feature): feature is string => typeof feature === "string",
           )
         : [],
     };
@@ -2038,93 +1984,42 @@ const getTickerSummaryText = (dataset?: DatasetFileSummary): string => {
 const getTimeRegime = (key: TimeRegimeKey) =>
   TIME_REGIME_OPTIONS.find((option) => option.key === key) ?? TIME_REGIME_OPTIONS[0];
 
-const featureOrderIndex = new Map<string, number>(
-  FEATURE_OPTIONS.map((feature, index) => [feature, index]),
-);
-const categoricalFeatureOrderIndex = new Map<string, number>(
-  CATEGORICAL_FEATURE_OPTIONS.map((feature, index) => [feature, index]),
-);
-
 const normalizeFeatureSelection = (
   features: string[],
   availableSet: Set<string>,
+  orderIndex: Map<string, number>,
+  mutexGroupByFeature: Map<string, string> = new Map(),
 ): string[] => {
-  const selected = new Set(
-    features.filter((feature) => FEATURE_OPTION_SET.has(feature) && availableSet.has(feature)),
-  );
-
-  let changed = true;
-  while (changed) {
-    changed = false;
-
-    for (const [feature, deps] of Object.entries(FEATURE_DEPENDENCIES)) {
-      if (!selected.has(feature)) continue;
-      for (const dep of deps) {
-        if (selected.has(dep)) continue;
-        if (availableSet.has(dep)) {
-          selected.add(dep);
-          changed = true;
-        } else {
-          selected.delete(feature);
-          changed = true;
-          break;
-        }
-      }
+  const deduped = Array.from(new Set(features.filter((feature) => availableSet.has(feature))));
+  const activeMutexSelections = new Map<string, string>();
+  deduped.forEach((feature) => {
+    const mutexGroup = mutexGroupByFeature.get(feature);
+    if (mutexGroup) {
+      activeMutexSelections.set(mutexGroup, feature);
     }
-
-    for (const group of FEATURE_MUTUAL_EXCLUSIVE_GROUPS) {
-      const chosen = group.filter((feature) => selected.has(feature));
-      if (chosen.length <= 1) continue;
-      const keep =
-        features.find((candidate) => chosen.includes(candidate)) ??
-        chosen[0];
-      chosen.forEach((feature) => {
-        if (feature === keep) return;
-        if (selected.delete(feature)) {
-          dropDependentFeatures(selected, feature);
-          changed = true;
-        }
-      });
-    }
-  }
-
-  return Array.from(selected).sort(
+  });
+  return deduped
+    .filter((feature) => {
+      const mutexGroup = mutexGroupByFeature.get(feature);
+      return !mutexGroup || activeMutexSelections.get(mutexGroup) === feature;
+    })
+    .sort(
     (left, right) =>
-      (featureOrderIndex.get(left) ?? Number.MAX_SAFE_INTEGER) -
-      (featureOrderIndex.get(right) ?? Number.MAX_SAFE_INTEGER),
+      (orderIndex.get(left) ?? Number.MAX_SAFE_INTEGER) -
+      (orderIndex.get(right) ?? Number.MAX_SAFE_INTEGER),
   );
 };
 
 const normalizeCategoricalSelection = (
   features: string[],
   availableSet: Set<string>,
+  orderIndex: Map<string, number>,
 ): string[] => {
-  const selected = Array.from(
-    new Set(
-      features.filter(
-        (feature) =>
-          CATEGORICAL_FEATURE_OPTION_SET.has(feature) && availableSet.has(feature),
-      ),
-    ),
-  );
-  return selected.sort(
+  return Array.from(new Set(features.filter((feature) => availableSet.has(feature)))).sort(
     (left, right) =>
-      (categoricalFeatureOrderIndex.get(left) ?? Number.MAX_SAFE_INTEGER) -
-      (categoricalFeatureOrderIndex.get(right) ?? Number.MAX_SAFE_INTEGER),
+      (orderIndex.get(left) ?? Number.MAX_SAFE_INTEGER) -
+      (orderIndex.get(right) ?? Number.MAX_SAFE_INTEGER),
   );
-};
-
-const dropDependentFeatures = (selected: Set<string>, removed: string) => {
-  const queue = [removed];
-  while (queue.length > 0) {
-    const current = queue.pop()!;
-    Object.entries(FEATURE_DEPENDENCIES).forEach(([feature, deps]) => {
-      if (!selected.has(feature)) return;
-      if (!deps.includes(current)) return;
-      selected.delete(feature);
-      queue.push(feature);
-    });
-  }
 };
 
 const LatexBlock = ({ latex }: { latex: string }) => {
@@ -2168,7 +2063,8 @@ export default function CalibrateModelsPage() {
   const [lastRunResult, setLastRunResult] = useState<CalibrateModelRunResponse | null>(() => loadStoredResult());
   const [regimePreview, setRegimePreview] = useState<RegimePreviewResponse | null>(null);
   const [regimePreviewError, setRegimePreviewError] = useState<string | null>(null);
-  const [availableFeatureColumns, setAvailableFeatureColumns] = useState<string[]>([]);
+  const [, setAvailableFeatureColumns] = useState<string[]>([]);
+  const [selectableFeatures, setSelectableFeatures] = useState<SelectableFeatureDescriptor[]>([]);
   const [featureError, setFeatureError] = useState<string | null>(null);
   const [featuresLoading, setFeaturesLoading] = useState(false);
 
@@ -2209,6 +2105,7 @@ export default function CalibrateModelsPage() {
     () => datasets.find((item) => item.path === form.datasetPath),
     [datasets, form.datasetPath],
   );
+  const selectedDatasetPath = selectedDataset?.path ?? "";
   const availableWeeks = useMemo(
     () => computeAvailableWeeks(selectedDataset ?? null),
     [selectedDataset],
@@ -2218,8 +2115,79 @@ export default function CalibrateModelsPage() {
     [form.timeRegime],
   );
   const isAuto = form.runMode === "auto";
+  const selectableNumericFeatures = useMemo(
+    () =>
+      selectableFeatures
+        .filter((feature) => feature.kind === "numeric")
+        .slice()
+        .sort((left, right) => left.order - right.order),
+    [selectableFeatures],
+  );
+  const selectableCategoricalFeatures = useMemo(
+    () =>
+      selectableFeatures
+        .filter((feature) => feature.kind === "categorical")
+        .slice()
+        .sort((left, right) => left.order - right.order),
+    [selectableFeatures],
+  );
+  const featureOrderIndex = useMemo(
+    () => new Map<string, number>(selectableNumericFeatures.map((feature, index) => [feature.name, index])),
+    [selectableNumericFeatures],
+  );
+  const categoricalFeatureOrderIndex = useMemo(
+    () =>
+      new Map<string, number>(
+        selectableCategoricalFeatures.map((feature, index) => [feature.name, index]),
+      ),
+    [selectableCategoricalFeatures],
+  );
+  const selectableFeatureSet = useMemo(
+    () => new Set<string>(selectableNumericFeatures.map((feature) => feature.name)),
+    [selectableNumericFeatures],
+  );
+  const selectableCategoricalSet = useMemo(
+    () => new Set<string>(selectableCategoricalFeatures.map((feature) => feature.name)),
+    [selectableCategoricalFeatures],
+  );
+  const featureCategoryOptions = useMemo(() => {
+    const grouped = new Map<string, SelectableFeatureDescriptor[]>();
+    selectableNumericFeatures.forEach((feature) => {
+      const bucket = grouped.get(feature.group);
+      if (bucket) {
+        bucket.push(feature);
+      } else {
+        grouped.set(feature.group, [feature]);
+      }
+    });
+    return Array.from(grouped.entries()).map(([title, items]) => ({ title, items }));
+  }, [selectableNumericFeatures]);
+  const mutexGroupByFeature = useMemo(() => {
+    const groups = new Map<string, string>();
+    selectableNumericFeatures.forEach((feature) => {
+      if (feature.mutex_group) {
+        groups.set(feature.name, feature.mutex_group);
+      }
+    });
+    return groups;
+  }, [selectableNumericFeatures]);
+  const defaultSelectableFeatures = useMemo(() => {
+    const metadataDefaults = selectableNumericFeatures
+      .filter((feature) => feature.default_selected)
+      .map((feature) => feature.name);
+    const defaults = metadataDefaults.length ? metadataDefaults : DEFAULT_SELECTED_FEATURES;
+    return normalizeFeatureSelection(
+      defaults,
+      selectableFeatureSet,
+      featureOrderIndex,
+      mutexGroupByFeature,
+    );
+  }, [featureOrderIndex, mutexGroupByFeature, selectableFeatureSet, selectableNumericFeatures]);
 
-  const canRecommendSplit = Boolean(form.datasetPath && availableWeeks != null && availableWeeks > 0);
+  const canRecommendSplit = Boolean(selectedDataset && availableWeeks != null && availableWeeks > 0);
+  const hasValidModelDirName =
+    form.modelDirName.trim().length === 0 || Boolean(sanitizeModelDirName(form.modelDirName));
+  const basicSettingsReady = hasValidModelDirName && Boolean(selectedDataset);
 
   const hasLiveJob = Boolean(
     jobId && (!jobStatus || jobStatus.status === "queued" || jobStatus.status === "running"),
@@ -2496,9 +2464,15 @@ export default function CalibrateModelsPage() {
         setDatasets(response.datasets);
         setDatasetError(null);
         const paths = new Set(response.datasets.map((d) => d.path));
-        const stale = form.datasetPath && !paths.has(form.datasetPath);
-        if ((!form.datasetPath || stale) && response.datasets.length) {
-          setForm((prev) => ({ ...prev, datasetPath: response.datasets[0].path }));
+        const hasCurrentSelection = form.datasetPath && paths.has(form.datasetPath);
+        if (!hasCurrentSelection) {
+          setForm((prev) => {
+            const nextDatasetPath = response.datasets[0]?.path ?? "";
+            if (prev.datasetPath === nextDatasetPath) {
+              return prev;
+            }
+            return { ...prev, datasetPath: nextDatasetPath };
+          });
         }
       })
       .catch((error: Error) => {
@@ -2547,14 +2521,14 @@ export default function CalibrateModelsPage() {
   }, [selectedFilePath]);
 
   useEffect(() => {
-    if (!form.datasetPath) {
+    if (!selectedDatasetPath) {
       setAvailableTickers([]);
       setTickersError(null);
       return;
     }
     let cancelled = false;
     setTickersLoading(true);
-    fetchDatasetTickers(form.datasetPath)
+    fetchDatasetTickers(selectedDatasetPath)
       .then((response) => {
         if (cancelled) return;
         setAvailableTickers(response.tickers);
@@ -2591,36 +2565,63 @@ export default function CalibrateModelsPage() {
     return () => {
       cancelled = true;
     };
-  }, [form.datasetPath]);
+  }, [selectedDatasetPath]);
 
   useEffect(() => {
-    if (!form.datasetPath) {
+    if (!selectedDatasetPath) {
       setAvailableFeatureColumns([]);
+      setSelectableFeatures([]);
       setFeatureError(null);
       return;
     }
     let cancelled = false;
     setFeaturesLoading(true);
-    fetchDatasetFeatures(form.datasetPath)
+    fetchDatasetFeatures(selectedDatasetPath)
       .then((response) => {
         if (cancelled) return;
         const columns = response.available_columns ?? [];
+        const nextSelectableFeatures = response.selectable_features ?? [];
         setAvailableFeatureColumns(columns);
+        setSelectableFeatures(nextSelectableFeatures);
         setFeatureError(null);
         const available = new Set(
-          FEATURE_OPTIONS.filter((feature) => columns.length === 0 || columns.includes(feature)),
+          nextSelectableFeatures
+            .filter((feature) => feature.kind === "numeric")
+            .map((feature) => feature.name),
         );
         const availableCategorical = new Set(
-          CATEGORICAL_FEATURE_OPTIONS.filter(
-            (feature) => columns.length === 0 || columns.includes(feature),
-          ),
+          nextSelectableFeatures
+            .filter((feature) => feature.kind === "categorical")
+            .map((feature) => feature.name),
+        );
+        const numericOrder = new Map(
+          nextSelectableFeatures
+            .filter((feature) => feature.kind === "numeric")
+            .sort((left, right) => left.order - right.order)
+            .map((feature, index) => [feature.name, index] as const),
+        );
+        const categoricalOrder = new Map(
+          nextSelectableFeatures
+            .filter((feature) => feature.kind === "categorical")
+            .sort((left, right) => left.order - right.order)
+            .map((feature, index) => [feature.name, index] as const),
         );
         setForm((prev) => ({
           ...prev,
-          selectedFeatures: normalizeFeatureSelection(prev.selectedFeatures, available),
+          selectedFeatures: normalizeFeatureSelection(
+            prev.selectedFeatures,
+            available,
+            numericOrder,
+            new Map(
+              nextSelectableFeatures
+                .filter((feature) => feature.kind === "numeric" && feature.mutex_group)
+                .map((feature) => [feature.name, feature.mutex_group!] as const),
+            ),
+          ),
           selectedCategoricalFeatures: normalizeCategoricalSelection(
             prev.selectedCategoricalFeatures,
             availableCategorical,
+            categoricalOrder,
           ),
         }));
       })
@@ -2628,6 +2629,7 @@ export default function CalibrateModelsPage() {
         if (cancelled) return;
         setFeatureError(error.message);
         setAvailableFeatureColumns([]);
+        setSelectableFeatures([]);
       })
       .finally(() => {
         if (!cancelled) {
@@ -2638,10 +2640,52 @@ export default function CalibrateModelsPage() {
     return () => {
       cancelled = true;
     };
-  }, [form.datasetPath]);
+  }, [selectedDatasetPath]);
 
   useEffect(() => {
-    if (!form.datasetPath) {
+    if (selectableFeatures.length === 0) {
+      return;
+    }
+    setForm((prev) => {
+      const nextSelectedFeatures = normalizeFeatureSelection(
+        prev.selectedFeatures,
+        selectableFeatureSet,
+        featureOrderIndex,
+        mutexGroupByFeature,
+      );
+      const nextSelectedCategorical = normalizeCategoricalSelection(
+        prev.selectedCategoricalFeatures,
+        selectableCategoricalSet,
+        categoricalFeatureOrderIndex,
+      );
+      const featuresUnchanged =
+        nextSelectedFeatures.length === prev.selectedFeatures.length &&
+        nextSelectedFeatures.every((feature, index) => feature === prev.selectedFeatures[index]);
+      const categoricalUnchanged =
+        nextSelectedCategorical.length === prev.selectedCategoricalFeatures.length &&
+        nextSelectedCategorical.every(
+          (feature, index) => feature === prev.selectedCategoricalFeatures[index],
+        );
+      if (featuresUnchanged && categoricalUnchanged) {
+        return prev;
+      }
+      return {
+        ...prev,
+        selectedFeatures: nextSelectedFeatures,
+        selectedCategoricalFeatures: nextSelectedCategorical,
+      };
+    });
+  }, [
+    categoricalFeatureOrderIndex,
+    featureOrderIndex,
+    mutexGroupByFeature,
+    selectableFeatures.length,
+    selectableCategoricalSet,
+    selectableFeatureSet,
+  ]);
+
+  useEffect(() => {
+    if (!selectedDatasetPath) {
       setRegimePreview(null);
       setRegimePreviewError(null);
       return;
@@ -2649,7 +2693,7 @@ export default function CalibrateModelsPage() {
 
     const timeout = window.setTimeout(() => {
       previewCalibrationRegime({
-        csv: form.datasetPath,
+        csv: selectedDatasetPath,
         tdaysAllowed: String(selectedTimeRegime.tdays),
         asofDowAllowed: selectedTimeRegime.asofDow,
       })
@@ -2664,7 +2708,7 @@ export default function CalibrateModelsPage() {
     }, 300);
 
     return () => window.clearTimeout(timeout);
-  }, [form.datasetPath, selectedTimeRegime.asofDow, selectedTimeRegime.tdays]);
+  }, [selectedDatasetPath, selectedTimeRegime.asofDow, selectedTimeRegime.tdays]);
 
   const handleSelectTicker = useCallback(
     (bucket: "trainTickers" | "foundationTickers", ticker: string) => {
@@ -2695,15 +2739,6 @@ export default function CalibrateModelsPage() {
 
   const setRecommendedDefaults = useCallback(() => {
     const base = availableTickers.length ? availableTickers : DEFAULT_TRADING_UNIVERSE;
-    const recommendedFeatureSet = new Set<string>(
-      (availableFeatureColumns.length === 0
-        ? FEATURE_OPTIONS
-        : FEATURE_OPTIONS.filter((feature) => availableFeatureColumns.includes(feature))
-      ).filter((feature) => {
-        const deps = FEATURE_DEPENDENCIES[feature] ?? [];
-        return deps.every((dep) => availableFeatureColumns.length === 0 || availableFeatureColumns.includes(dep));
-      }),
-    );
     setForm((prev) => ({
       ...prev,
       splitStrategy: "walk_forward",
@@ -2718,7 +2753,7 @@ export default function CalibrateModelsPage() {
       calibrationMethod: "none",
       selectionObjective: "logloss",
       timeRegime: "thu_1",
-      selectedFeatures: normalizeFeatureSelection(DEFAULT_SELECTED_FEATURES, recommendedFeatureSet),
+      selectedFeatures: defaultSelectableFeatures,
       selectedCategoricalFeatures: [],
       tradingUniverseTickers: [...base],
       trainTickers: [...base],
@@ -2749,11 +2784,14 @@ export default function CalibrateModelsPage() {
       dropPrnBelow: "0.001",
       dropPrnAbove: "0.999",
     }));
-  }, [availableFeatureColumns, availableTickers, selectedDataset?.available_grouping_keys]);
+  }, [availableTickers, defaultSelectableFeatures, selectedDataset?.available_grouping_keys]);
 
   const validateForm = useCallback((): string | null => {
-    if (!form.datasetPath) {
+    if (!selectedDataset) {
       return "Select a training dataset.";
+    }
+    if (featuresLoading) {
+      return "Feature metadata is still loading.";
     }
 
     const sanitizedName = sanitizeModelDirName(form.modelDirName || defaultModelName());
@@ -2803,7 +2841,7 @@ export default function CalibrateModelsPage() {
     const trainingSet = new Set(form.trainTickers);
     const invalidFoundation = form.foundationTickers.filter((ticker) => !trainingSet.has(ticker));
     if (invalidFoundation.length) {
-      return `Foundation tickers must be a subset of training tickers (invalid: ${invalidFoundation.join(", ")}).`;
+      return `Remove invalid foundation tickers: ${invalidFoundation.join(", ")}.`;
     }
 
     if (form.cGridPreset === "custom") {
@@ -2816,34 +2854,23 @@ export default function CalibrateModelsPage() {
       }
     }
 
-    const availableFeatureSet = new Set<string>(
-      availableFeatureColumns.length === 0
-        ? FEATURE_OPTIONS
-        : FEATURE_OPTIONS.filter((feature) => availableFeatureColumns.includes(feature)),
+    const normalizedFeatures = normalizeFeatureSelection(
+      form.selectedFeatures,
+      selectableFeatureSet,
+      featureOrderIndex,
+      mutexGroupByFeature,
     );
-    const availableCategoricalSet = new Set<string>(
-      availableFeatureColumns.length === 0
-        ? CATEGORICAL_FEATURE_OPTIONS
-        : CATEGORICAL_FEATURE_OPTIONS.filter((feature) => availableFeatureColumns.includes(feature)),
+    const invalidFeatures = form.selectedFeatures.filter(
+      (feature) => !normalizedFeatures.includes(feature),
     );
-    const normalizedFeatures = normalizeFeatureSelection(form.selectedFeatures, availableFeatureSet);
-    for (const [feature, deps] of Object.entries(FEATURE_DEPENDENCIES)) {
-      if (!normalizedFeatures.includes(feature)) continue;
-      const missingDeps = deps.filter((dep) => !normalizedFeatures.includes(dep));
-      if (missingDeps.length > 0) {
-        return `${feature} requires ${missingDeps.join(", ")}.`;
-      }
-    }
-    for (const group of FEATURE_MUTUAL_EXCLUSIVE_GROUPS) {
-      const chosen = group.filter((feature) => normalizedFeatures.includes(feature));
-      if (chosen.length > 1) {
-        return `Select only one of ${group.join(" or ")}.`;
-      }
+    if (invalidFeatures.length) {
+      return `Selected optional features not available: ${invalidFeatures.join(", ")}.`;
     }
 
     const normalizedCategorical = normalizeCategoricalSelection(
       form.selectedCategoricalFeatures,
-      availableCategoricalSet,
+      selectableCategoricalSet,
+      categoricalFeatureOrderIndex,
     );
     const invalidCategorical = form.selectedCategoricalFeatures.filter(
       (feature) => !normalizedCategorical.includes(feature),
@@ -2879,12 +2906,22 @@ export default function CalibrateModelsPage() {
     }
 
     return null;
-  }, [availableFeatureColumns, availableWeeks, form]);
+  }, [
+    availableWeeks,
+    categoricalFeatureOrderIndex,
+    featureOrderIndex,
+    featuresLoading,
+    form,
+    mutexGroupByFeature,
+    selectableCategoricalSet,
+    selectableFeatureSet,
+    selectedDataset,
+  ]);
 
   useEffect(() => {
-    const issue = validateForm();
+    const issue = selectedDataset ? validateForm() : null;
     setGuardrailWarning(issue);
-  }, [validateForm]);
+  }, [selectedDataset, validateForm]);
 
   const buildManualPayload = useCallback(() => {
     const selectedWeightCol =
@@ -2898,30 +2935,25 @@ export default function CalibrateModelsPage() {
       form.cGridPreset === "custom"
         ? form.cGridCustom.trim()
         : C_GRID_PRESETS[form.cGridPreset];
-    const availableFeatureSet = new Set<string>(
-      availableFeatureColumns.length === 0
-        ? FEATURE_OPTIONS
-        : FEATURE_OPTIONS.filter((feature) => availableFeatureColumns.includes(feature)),
+    const normalizedSelectedFeatures = normalizeFeatureSelection(
+      form.selectedFeatures,
+      selectableFeatureSet,
+      featureOrderIndex,
+      mutexGroupByFeature,
     );
-    const availableCategoricalSet = new Set<string>(
-      availableFeatureColumns.length === 0
-        ? CATEGORICAL_FEATURE_OPTIONS
-        : CATEGORICAL_FEATURE_OPTIONS.filter((feature) => availableFeatureColumns.includes(feature)),
-    );
-    const normalizedSelectedFeatures = normalizeFeatureSelection(form.selectedFeatures, availableFeatureSet);
     const normalizedCategorical = normalizeCategoricalSelection(
       form.selectedCategoricalFeatures,
-      availableCategoricalSet,
+      selectableCategoricalSet,
+      categoricalFeatureOrderIndex,
     );
     const features = joinCsv([BASE_FEATURE, ...normalizedSelectedFeatures]);
     const categoricalFeatures = joinCsv(normalizedCategorical);
-    const enableXAbsM = normalizedSelectedFeatures.includes("x_abs_m");
     const resolvedBootstrapGroup = form.bootstrapEnabled
       ? resolveBootstrapGroupValue(form.bootstrapGroup, selectedDataset?.available_grouping_keys)
       : form.bootstrapGroup;
 
     return {
-      csv: form.datasetPath,
+      csv: selectedDatasetPath,
       outName: sanitizeModelDirName(form.modelDirName || defaultModelName()),
       runMode: "manual" as const,
       targetCol: DEFAULT_TARGET_COL,
@@ -2931,7 +2963,6 @@ export default function CalibrateModelsPage() {
       weightColStrategy: form.weightColStrategy,
       features,
       categoricalFeatures,
-      enableXAbsM,
       foundationTickers: joinCsv(form.foundationTickers),
       foundationWeight: parseOptionalFloat(form.foundationWeight),
       tickerIntercepts: form.tickerInterceptMode,
@@ -3003,9 +3034,14 @@ export default function CalibrateModelsPage() {
       },
     };
   }, [
-    availableFeatureColumns,
+    categoricalFeatureOrderIndex,
+    featureOrderIndex,
     form,
+    mutexGroupByFeature,
+    selectableCategoricalSet,
+    selectableFeatureSet,
     selectedDataset?.available_grouping_keys,
+    selectedDatasetPath,
     selectedTimeRegime.asofDow,
     selectedTimeRegime.tdays,
   ]);
@@ -3072,7 +3108,6 @@ export default function CalibrateModelsPage() {
         tradingUniverseUpweight: AUTO_UPWEIGHTS,
         foundationWeight: AUTO_FOUNDATION_WEIGHTS,
         tickerIntercepts: Array.from(AUTO_TICKER_INTERCEPTS),
-        allowRiskyFeatures: form.autoAllowRisky,
         advancedInteractions: form.autoAdvancedSearch,
         maxTrials: maxTrials ?? undefined,
         selectionRule: "one_se",
@@ -3088,7 +3123,6 @@ export default function CalibrateModelsPage() {
   }, [
     buildManualPayload,
     form.autoAdvancedSearch,
-    form.autoAllowRisky,
     form.autoOuterFolds,
     form.autoOuterGapWeeks,
     form.autoOuterMaxWorstDelta,
@@ -3124,9 +3158,9 @@ export default function CalibrateModelsPage() {
   );
 
   const handlePreviewWeighting = useCallback(async () => {
-    if (!form.datasetPath) {
+    if (!selectedDatasetPath) {
       setWeightingPreview(null);
-      setWeightingPreviewError("Select a dataset first.");
+      setWeightingPreviewError(null);
       return;
     }
 
@@ -3134,7 +3168,7 @@ export default function CalibrateModelsPage() {
     setWeightingPreviewError(null);
     try {
       const response = await previewCalibrationWeighting({
-        csv: form.datasetPath,
+        csv: selectedDatasetPath,
         weightColStrategy: form.weightColStrategy,
         baseWeightSource: form.baseWeightSource,
         groupingKey: form.groupingKey || undefined,
@@ -3154,7 +3188,7 @@ export default function CalibrateModelsPage() {
     } finally {
       setWeightingPreviewLoading(false);
     }
-  }, [form]);
+  }, [form, selectedDatasetPath]);
 
   const handleRunJob = useCallback(async () => {
     if (anyJobRunning) {
@@ -3302,12 +3336,8 @@ export default function CalibrateModelsPage() {
         const relative = dataset.path.replace(/\\/g, "/");
         return csv === relative || csv.endsWith(relative);
       })?.path ?? csv;
-    const features = splitCsvValue(config.features).filter(
-      (feature) => feature !== BASE_FEATURE && FEATURE_OPTION_SET.has(feature),
-    );
-    const categorical = splitCsvValue(config.categorical_features).filter((feature) =>
-      CATEGORICAL_FEATURE_OPTION_SET.has(feature),
-    );
+    const features = splitCsvValue(config.features).filter((feature) => feature !== BASE_FEATURE);
+    const categorical = splitCsvValue(config.categorical_features);
     const cGrid =
       typeof regularization.c_grid === "string"
         ? regularization.c_grid
@@ -3320,6 +3350,8 @@ export default function CalibrateModelsPage() {
     const ciLevelValue = toNumber(bootstrap.ci_level);
     const nextModelName =
       sanitizeModelDirName(selectedModelId ? `${selectedModelId}-rerun` : defaultModelName()) || defaultModelName();
+    const shouldSanitizeLoadedFeatures =
+      matchedDataset === selectedDatasetPath && selectableFeatures.length > 0;
 
     setForm((prev) => ({
       ...prev,
@@ -3335,8 +3367,21 @@ export default function CalibrateModelsPage() {
           ? config.weight_col_strategy
           : prev.weightColStrategy,
       timeRegime: resolveTimeRegimeKey(config),
-      selectedFeatures: features,
-      selectedCategoricalFeatures: categorical,
+      selectedFeatures: shouldSanitizeLoadedFeatures
+        ? normalizeFeatureSelection(
+            features,
+            selectableFeatureSet,
+            featureOrderIndex,
+            mutexGroupByFeature,
+          )
+        : features,
+      selectedCategoricalFeatures: shouldSanitizeLoadedFeatures
+        ? normalizeCategoricalSelection(
+            categorical,
+            selectableCategoricalSet,
+            categoricalFeatureOrderIndex,
+          )
+        : categorical,
       splitStrategy: split.strategy === "single_holdout" ? "single_holdout" : "walk_forward",
       windowMode: split.window_mode === "expanding" ? "expanding" : "rolling",
       trainWindowWeeks: String(toNumber(split.train_window_weeks) ?? prev.trainWindowWeeks),
@@ -3411,7 +3456,17 @@ export default function CalibrateModelsPage() {
     setCancelError(null);
     setWorkspaceTab("run_job");
     setRunJobPanel("configuration");
-  }, [datasets, selectedModelId]);
+  }, [
+    categoricalFeatureOrderIndex,
+    datasets,
+    featureOrderIndex,
+    mutexGroupByFeature,
+    selectableCategoricalSet,
+    selectableFeatureSet,
+    selectableFeatures.length,
+    selectedDatasetPath,
+    selectedModelId,
+  ]);
 
   const openModelFile = useCallback(async (
     modelId: string,
@@ -3546,170 +3601,95 @@ export default function CalibrateModelsPage() {
     [models, modelCompare.right],
   );
 
-  const selectableFeatureOptions = useMemo(() => {
-    const availableSet = new Set<string>(
-      availableFeatureColumns.length === 0
-        ? FEATURE_OPTIONS
-        : FEATURE_OPTIONS.filter((feature) => availableFeatureColumns.includes(feature)),
-    );
-    return FEATURE_OPTIONS.filter((feature) => {
-      if (!availableSet.has(feature)) return false;
-      const deps = FEATURE_DEPENDENCIES[feature] ?? [];
-      return deps.every((dep) => availableSet.has(dep));
-    });
-  }, [availableFeatureColumns]);
-
-  const selectableCategoricalOptions = useMemo(
-    () =>
-      availableFeatureColumns.length === 0
-        ? Array.from(CATEGORICAL_FEATURE_OPTIONS)
-        : CATEGORICAL_FEATURE_OPTIONS.filter((feature) => availableFeatureColumns.includes(feature)),
-    [availableFeatureColumns],
-  );
-
-  const selectableFeatureSet = useMemo(
-    () => new Set<string>(selectableFeatureOptions),
-    [selectableFeatureOptions],
-  );
-
-  const selectableCategoricalSet = useMemo(
-    () => new Set<string>(selectableCategoricalOptions),
-    [selectableCategoricalOptions],
-  );
-
-  const featureCategoryOptions = useMemo(
-    () =>
-      FEATURE_CATEGORIES.map((category) => ({
-        title: category.title,
-        items: category.items.filter((feature) => selectableFeatureSet.has(feature)),
-      })).filter((category) => category.items.length > 0),
-    [selectableFeatureSet],
-  );
-
   const selectedFeatureList = useMemo(
-    () => normalizeFeatureSelection(form.selectedFeatures, selectableFeatureSet),
-    [form.selectedFeatures, selectableFeatureSet],
+    () =>
+      normalizeFeatureSelection(
+        form.selectedFeatures,
+        selectableFeatureSet,
+        featureOrderIndex,
+        mutexGroupByFeature,
+      ),
+    [featureOrderIndex, form.selectedFeatures, mutexGroupByFeature, selectableFeatureSet],
   );
 
   const selectedCategoricalList = useMemo(
     () =>
-      normalizeCategoricalSelection(form.selectedCategoricalFeatures, selectableCategoricalSet),
-    [form.selectedCategoricalFeatures, selectableCategoricalSet],
+      normalizeCategoricalSelection(
+        form.selectedCategoricalFeatures,
+        selectableCategoricalSet,
+        categoricalFeatureOrderIndex,
+      ),
+    [categoricalFeatureOrderIndex, form.selectedCategoricalFeatures, selectableCategoricalSet],
   );
 
-  const featureDependencyWarnings = useMemo(() => {
-    const warnings: string[] = [];
-    Object.entries(FEATURE_DEPENDENCIES).forEach(([feature, deps]) => {
-      if (!selectedFeatureList.includes(feature)) return;
-      const missingDeps = deps.filter((dep) => !selectedFeatureList.includes(dep));
-      if (missingDeps.length) {
-        warnings.push(`${feature} requires ${missingDeps.join(", ")}.`);
-      }
-    });
-    FEATURE_MUTUAL_EXCLUSIVE_GROUPS.forEach((group) => {
-      const chosen = group.filter((feature) => selectedFeatureList.includes(feature));
-      if (chosen.length > 1) {
-        warnings.push(`Select only one of ${group.join(" or ")}.`);
-      }
-    });
-    return warnings;
-  }, [selectedFeatureList]);
-
   const handleToggleFeature = useCallback((feature: string) => {
-    if (!FEATURE_OPTION_SET.has(feature)) return;
+    if (!selectableFeatureSet.has(feature)) return;
     setForm((prev) => {
-      const available = selectableFeatureSet;
-      const next = new Set(
-        normalizeFeatureSelection(prev.selectedFeatures, available),
+      const next = normalizeFeatureSelection(
+        prev.selectedFeatures,
+        selectableFeatureSet,
+        featureOrderIndex,
+        mutexGroupByFeature,
       );
-      if (next.has(feature)) {
-        next.delete(feature);
-        dropDependentFeatures(next, feature);
-      } else {
-        if (!available.has(feature)) {
-          return prev;
-        }
-        next.add(feature);
-        const activated = new Set<string>([feature]);
-        (FEATURE_DEPENDENCIES[feature] ?? []).forEach((dep) => {
-          if (available.has(dep)) {
-            next.add(dep);
-            activated.add(dep);
-          }
-        });
-        FEATURE_MUTUAL_EXCLUSIVE_GROUPS.forEach((group) => {
-          const chosen = group.filter((candidate) => next.has(candidate));
-          if (chosen.length <= 1) return;
-          const preferred = chosen.find((candidate) => activated.has(candidate)) ?? chosen[0];
-          chosen.forEach((candidate) => {
-            if (candidate === preferred) return;
-            next.delete(candidate);
-            dropDependentFeatures(next, candidate);
-          });
-        });
-        activated.forEach((activatedFeature) => {
-          (FEATURE_DEPENDENCIES[activatedFeature] ?? []).forEach((dep) => {
-            if (available.has(dep)) {
-              next.add(dep);
-            }
-          });
-        });
-        FEATURE_MUTUAL_EXCLUSIVE_GROUPS.forEach((group) => {
-          const chosen = group.filter((candidate) => next.has(candidate));
-          if (chosen.length <= 1) return;
-          const preferred = chosen.find((candidate) => activated.has(candidate)) ?? chosen[0];
-          chosen.forEach((candidate) => {
-            if (candidate === preferred) return;
-            next.delete(candidate);
-            dropDependentFeatures(next, candidate);
-          });
-        });
-        Object.entries(FEATURE_DEPENDENCIES).forEach(([candidate, deps]) => {
-          if (!next.has(candidate)) return;
-          if (!deps.every((dep) => next.has(dep))) {
-            next.delete(candidate);
-          }
-        });
+      if (next.includes(feature)) {
+        return {
+          ...prev,
+          selectedFeatures: next.filter((candidate) => candidate !== feature),
+        };
       }
+      const mutexGroup = mutexGroupByFeature.get(feature);
+      const withoutConflicts = mutexGroup
+        ? next.filter((candidate) => mutexGroupByFeature.get(candidate) !== mutexGroup)
+        : next;
       return {
         ...prev,
-        selectedFeatures: normalizeFeatureSelection(Array.from(next), available),
+        selectedFeatures: normalizeFeatureSelection(
+          [...withoutConflicts, feature],
+          selectableFeatureSet,
+          featureOrderIndex,
+          mutexGroupByFeature,
+        ),
       };
     });
-  }, [selectableFeatureSet]);
+  }, [featureOrderIndex, mutexGroupByFeature, selectableFeatureSet]);
 
   const handleToggleCategoricalFeature = useCallback((feature: string) => {
-    if (!CATEGORICAL_FEATURE_OPTION_SET.has(feature)) return;
+    if (!selectableCategoricalSet.has(feature)) return;
     setForm((prev) => {
-      const available = selectableCategoricalSet;
       const next = new Set(
-        normalizeCategoricalSelection(prev.selectedCategoricalFeatures, available),
+        normalizeCategoricalSelection(
+          prev.selectedCategoricalFeatures,
+          selectableCategoricalSet,
+          categoricalFeatureOrderIndex,
+        ),
       );
       if (next.has(feature)) {
         next.delete(feature);
-      } else if (available.has(feature)) {
+      } else {
         next.add(feature);
       }
       return {
         ...prev,
-        selectedCategoricalFeatures: normalizeCategoricalSelection(Array.from(next), available),
+        selectedCategoricalFeatures: normalizeCategoricalSelection(
+          Array.from(next),
+          selectableCategoricalSet,
+          categoricalFeatureOrderIndex,
+        ),
       };
     });
-  }, [selectableCategoricalSet]);
+  }, [categoricalFeatureOrderIndex, selectableCategoricalSet]);
 
   const handleSelectRecommendedFeatures = useCallback(() => {
     setForm((prev) => ({
       ...prev,
-      selectedFeatures: normalizeFeatureSelection(
-        DEFAULT_SELECTED_FEATURES,
-        selectableFeatureSet,
-      ),
+      selectedFeatures: defaultSelectableFeatures,
       selectedCategoricalFeatures: normalizeCategoricalSelection(
         prev.selectedCategoricalFeatures,
         selectableCategoricalSet,
+        categoricalFeatureOrderIndex,
       ),
     }));
-  }, [selectableCategoricalSet, selectableFeatureSet]);
+  }, [categoricalFeatureOrderIndex, defaultSelectableFeatures, selectableCategoricalSet]);
 
   const handleClearOptionalFeatures = useCallback(() => {
     setForm((prev) => ({ ...prev, selectedFeatures: [], selectedCategoricalFeatures: [] }));
@@ -3819,9 +3799,6 @@ export default function CalibrateModelsPage() {
                           Auto run
                         </button>
                       </div>
-                      <span className="field-hint">
-                        Auto run searches a curated grid under fixed splits and never tunes on test.
-                      </span>
                     </section>
 
                     <section className="section-card calibrate-section-card">
@@ -3907,13 +3884,10 @@ export default function CalibrateModelsPage() {
                               </button>
                             ))}
                           </div>
-                          <span className="field-hint">
-                            Select exactly one day regime. Monday/Tuesday/Wednesday/Thursday map to 4/3/2/1 DTE.
-                          </span>
                         </div>
                       </div>
 
-                      <div className="dataset-summary-grid">
+                      <div className="dataset-summary-grid calibrate-info-card-grid calibrate-info-card-grid-wide">
                         <div>
                           <span className="meta-label">Dataset ID</span>
                           <span>{selectedDataset?.dataset_id ?? selectedDataset?.name ?? "--"}</span>
@@ -3949,7 +3923,7 @@ export default function CalibrateModelsPage() {
                       </div>
                       {regimePreviewError ? <div className="error">{regimePreviewError}</div> : null}
                       {regimePreview ? (
-                        <div className="dataset-summary-grid">
+                        <div className="dataset-summary-grid calibrate-info-card-grid">
                           <div>
                             <span className="meta-label">Rows before regime filter</span>
                             <span>{regimePreview.rows_before.toLocaleString()}</span>
@@ -3966,964 +3940,935 @@ export default function CalibrateModelsPage() {
                       ) : null}
                     </section>
 
-                    <section className="section-card calibrate-section-card">
-                      <div className="calibrate-section-header-row">
-                        <h3 className="section-heading">Regression and Set Settings</h3>
-                        <div className="calibrate-inline-actions">
-                          {splitRecommended ? <span className="status-pill success">Recommended</span> : null}
-                          <button
-                            className="button ghost small"
-                            type="button"
-                            title="Uses dataset length and the selected DTE regime."
-                            onClick={handleApplyRecommendedSplit}
-                            disabled={!canRecommendSplit}
-                          >
-                            Apply recommended settings
-                          </button>
-                        </div>
-                      </div>
-                      {splitRecommendationWarning ? <div className="warning">{splitRecommendationWarning}</div> : null}
-                      <div className="fields-grid">
-                        <div className="field">
-                          <label htmlFor="splitStrategy">Split strategy</label>
-                          <select
-                            id="splitStrategy"
-                            className="input"
-                            value={form.splitStrategy}
-                            onChange={(event) =>
-                              setForm((prev) => ({
-                                ...prev,
-                                splitStrategy: event.target.value as SplitStrategy,
-                              }))
-                            }
-                          >
-                            <option value="walk_forward">walk_forward</option>
-                            <option value="single_holdout">single_holdout</option>
-                          </select>
-                        </div>
-                        <div className="field">
-                          <label htmlFor="windowMode">Window mode</label>
-                          <select
-                            id="windowMode"
-                            className="input"
-                            value={form.windowMode}
-                            onChange={(event) =>
-                              setForm((prev) => ({
-                                ...prev,
-                                windowMode: event.target.value as WindowMode,
-                              }))
-                            }
-                            disabled={form.splitStrategy !== "walk_forward"}
-                          >
-                            <option value="rolling">rolling</option>
-                            <option value="expanding">expanding</option>
-                          </select>
-                        </div>
-                        <div className="field">
-                          <label htmlFor="trainWindowWeeks">Train window (weeks)</label>
-                          <input
-                            id="trainWindowWeeks"
-                            className="input"
-                            inputMode="numeric"
-                            value={form.trainWindowWeeks}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, trainWindowWeeks: event.target.value }))
-                            }
-                            disabled={form.splitStrategy !== "walk_forward"}
-                          />
-                        </div>
-                        <div className="field">
-                          <label htmlFor="validationFolds">Validation folds</label>
-                          <input
-                            id="validationFolds"
-                            className="input"
-                            inputMode="numeric"
-                            value={form.validationFolds}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, validationFolds: event.target.value }))
-                            }
-                            disabled={form.splitStrategy !== "walk_forward"}
-                          />
-                        </div>
-                        <div className="field">
-                          <label htmlFor="validationWindowWeeks">Validation window (weeks)</label>
-                          <input
-                            id="validationWindowWeeks"
-                            className="input"
-                            inputMode="numeric"
-                            value={form.validationWindowWeeks}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, validationWindowWeeks: event.target.value }))
-                            }
-                            disabled={form.splitStrategy !== "walk_forward"}
-                          />
-                        </div>
-                        <div className="field">
-                          <label htmlFor="testWindowWeeks">Test window (weeks)</label>
-                          <input
-                            id="testWindowWeeks"
-                            className="input"
-                            inputMode="numeric"
-                            value={form.testWindowWeeks}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, testWindowWeeks: event.target.value }))
-                            }
-                          />
-                        </div>
-                        <div className="field">
-                          <label htmlFor="embargoDays">Embargo (days)</label>
-                          <input
-                            id="embargoDays"
-                            className="input"
-                            inputMode="numeric"
-                            value={form.embargoDays}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, embargoDays: event.target.value }))
-                            }
-                          />
-                          <span className="field-hint">
-                            Excludes near-boundary rows between train and validation/test windows.
-                          </span>
-                        </div>
-                        {!isAuto ? (
-                          <>
+                    {basicSettingsReady ? (
+                      <>
+                        <section className="section-card calibrate-section-card">
+                          <div className="calibrate-section-header-row">
+                            <h3 className="section-heading">Regression and Set Settings</h3>
+                            <div className="calibrate-inline-actions">
+                              {splitRecommended ? <span className="status-pill success">Recommended</span> : null}
+                              <button
+                                className="button ghost small"
+                                type="button"
+                                title="Uses dataset length and the selected DTE regime."
+                                onClick={handleApplyRecommendedSplit}
+                                disabled={!canRecommendSplit}
+                              >
+                                Apply recommended settings
+                              </button>
+                            </div>
+                          </div>
+                          {splitRecommendationWarning ? <div className="warning">{splitRecommendationWarning}</div> : null}
+                          <div className="fields-grid">
                             <div className="field">
-                              <label htmlFor="cGridPreset">C grid preset</label>
+                              <label htmlFor="splitStrategy">Split strategy</label>
                               <select
-                                id="cGridPreset"
+                                id="splitStrategy"
                                 className="input"
-                                value={form.cGridPreset}
-                                onChange={(event) => {
-                                  const preset = event.target.value as CalibrateFormState["cGridPreset"];
+                                value={form.splitStrategy}
+                                onChange={(event) =>
                                   setForm((prev) => ({
                                     ...prev,
-                                    cGridPreset: preset,
-                                    cGridCustom:
-                                      preset === "custom" ? prev.cGridCustom : C_GRID_PRESETS[preset],
-                                  }));
-                                }}
+                                    splitStrategy: event.target.value as SplitStrategy,
+                                  }))
+                                }
                               >
-                                <option value="coarse">coarse</option>
-                                <option value="standard">standard</option>
-                                <option value="wide">wide</option>
-                                <option value="custom">custom</option>
+                                <option value="walk_forward">walk_forward</option>
+                                <option value="single_holdout">single_holdout</option>
                               </select>
                             </div>
                             <div className="field">
-                              <label htmlFor="cGridCustom">C grid</label>
-                              <input
-                                id="cGridCustom"
+                              <label htmlFor="windowMode">Window mode</label>
+                              <select
+                                id="windowMode"
                                 className="input"
-                                value={form.cGridCustom}
+                                value={form.windowMode}
                                 onChange={(event) =>
-                                  setForm((prev) => ({ ...prev, cGridCustom: event.target.value, cGridPreset: "custom" }))
+                                  setForm((prev) => ({
+                                    ...prev,
+                                    windowMode: event.target.value as WindowMode,
+                                  }))
+                                }
+                                disabled={form.splitStrategy !== "walk_forward"}
+                              >
+                                <option value="rolling">rolling</option>
+                                <option value="expanding">expanding</option>
+                              </select>
+                            </div>
+                            <div className="field">
+                              <label htmlFor="trainWindowWeeks">Train window (weeks)</label>
+                              <input
+                                id="trainWindowWeeks"
+                                className="input"
+                                inputMode="numeric"
+                                value={form.trainWindowWeeks}
+                                onChange={(event) =>
+                                  setForm((prev) => ({ ...prev, trainWindowWeeks: event.target.value }))
+                                }
+                                disabled={form.splitStrategy !== "walk_forward"}
+                              />
+                            </div>
+                            <div className="field">
+                              <label htmlFor="validationFolds">Validation folds</label>
+                              <input
+                                id="validationFolds"
+                                className="input"
+                                inputMode="numeric"
+                                value={form.validationFolds}
+                                onChange={(event) =>
+                                  setForm((prev) => ({ ...prev, validationFolds: event.target.value }))
+                                }
+                                disabled={form.splitStrategy !== "walk_forward"}
+                              />
+                            </div>
+                            <div className="field">
+                              <label htmlFor="validationWindowWeeks">Validation window (weeks)</label>
+                              <input
+                                id="validationWindowWeeks"
+                                className="input"
+                                inputMode="numeric"
+                                value={form.validationWindowWeeks}
+                                onChange={(event) =>
+                                  setForm((prev) => ({ ...prev, validationWindowWeeks: event.target.value }))
+                                }
+                                disabled={form.splitStrategy !== "walk_forward"}
+                              />
+                            </div>
+                            <div className="field">
+                              <label htmlFor="testWindowWeeks">Test window (weeks)</label>
+                              <input
+                                id="testWindowWeeks"
+                                className="input"
+                                inputMode="numeric"
+                                value={form.testWindowWeeks}
+                                onChange={(event) =>
+                                  setForm((prev) => ({ ...prev, testWindowWeeks: event.target.value }))
                                 }
                               />
                             </div>
                             <div className="field">
-                              <label htmlFor="calibrationMethod">Calibration method</label>
-                              <select
-                                id="calibrationMethod"
+                              <label htmlFor="embargoDays">Embargo (days)</label>
+                              <input
+                                id="embargoDays"
                                 className="input"
-                                value={form.calibrationMethod}
+                                inputMode="numeric"
+                                value={form.embargoDays}
+                                onChange={(event) =>
+                                  setForm((prev) => ({ ...prev, embargoDays: event.target.value }))
+                                }
+                              />
+                            </div>
+                            {!isAuto ? (
+                              <>
+                                <div className="field">
+                                  <label htmlFor="cGridPreset">C grid preset</label>
+                                  <select
+                                    id="cGridPreset"
+                                    className="input"
+                                    value={form.cGridPreset}
+                                    onChange={(event) => {
+                                      const preset = event.target.value as CalibrateFormState["cGridPreset"];
+                                      setForm((prev) => ({
+                                        ...prev,
+                                        cGridPreset: preset,
+                                        cGridCustom:
+                                          preset === "custom" ? prev.cGridCustom : C_GRID_PRESETS[preset],
+                                      }));
+                                    }}
+                                  >
+                                    <option value="coarse">coarse</option>
+                                    <option value="standard">standard</option>
+                                    <option value="wide">wide</option>
+                                    <option value="custom">custom</option>
+                                  </select>
+                                </div>
+                                <div className="field">
+                                  <label htmlFor="cGridCustom">C grid</label>
+                                  <input
+                                    id="cGridCustom"
+                                    className="input"
+                                    value={form.cGridCustom}
+                                    onChange={(event) =>
+                                      setForm((prev) => ({ ...prev, cGridCustom: event.target.value, cGridPreset: "custom" }))
+                                    }
+                                  />
+                                </div>
+                                <div className="field">
+                                  <label htmlFor="calibrationMethod">Calibration method</label>
+                                  <select
+                                    id="calibrationMethod"
+                                    className="input"
+                                    value={form.calibrationMethod}
+                                    onChange={(event) =>
+                                      setForm((prev) => ({
+                                        ...prev,
+                                        calibrationMethod: event.target.value as CalibrationMethod,
+                                      }))
+                                    }
+                                  >
+                                    <option value="none">none</option>
+                                    <option value="platt">platt</option>
+                                  </select>
+                                </div>
+                                <div className="field">
+                                  <label htmlFor="selectionObjective">Selection objective</label>
+                                  <select
+                                    id="selectionObjective"
+                                    className="input"
+                                    value={form.selectionObjective}
+                                    onChange={(event) =>
+                                      setForm((prev) => ({
+                                        ...prev,
+                                        selectionObjective: event.target.value as SelectionObjective,
+                                      }))
+                                    }
+                                  >
+                                    <option value="logloss">logloss</option>
+                                    <option value="brier">brier</option>
+                                    <option value="ece_q">ece_q</option>
+                                  </select>
+                                </div>
+                              </>
+                            ) : null}
+                          </div>
+                          {isAuto ? (
+                            <span className="field-hint">
+                              Auto search varies C and calibration method. Selection objective is fixed to logloss.
+                            </span>
+                          ) : null}
+                        </section>
+
+                        {isAuto ? (
+                          <section className="section-card calibrate-section-card">
+                            <h3 className="section-heading">Auto Search Settings</h3>
+                            <div className="fields-grid">
+                              <div className="field">
+                                <label htmlFor="autoMaxTrials">Max trials (optional)</label>
+                                <input
+                                  id="autoMaxTrials"
+                                  className="input"
+                                  inputMode="numeric"
+                                  value={form.autoMaxTrials}
+                                  onChange={(event) =>
+                                    setForm((prev) => ({ ...prev, autoMaxTrials: event.target.value }))
+                                  }
+                                />
+                                <span className="field-hint">Leave blank to run the full curated grid.</span>
+                              </div>
+                            </div>
+                            <div className="calibrate-inline-actions">
+                              <label className="checkbox calibrate-checkbox-pill">
+                                <input
+                                  type="checkbox"
+                                  checked={form.autoAdvancedSearch}
+                                  onChange={(event) =>
+                                    setForm((prev) => ({ ...prev, autoAdvancedSearch: event.target.checked }))
+                                  }
+                                />
+                                Advanced search (ticker interactions)
+                              </label>
+                            </div>
+                            <div className="dataset-summary-grid calibrate-info-card-grid">
+                              <div>
+                                <span className="meta-label">Feature sets</span>
+                                <span>{AUTO_FEATURE_SETS.length} curated sets</span>
+                              </div>
+                              <div>
+                                <span className="meta-label">C values</span>
+                                <span>{AUTO_C_VALUES.join(", ")}</span>
+                              </div>
+                              <div>
+                                <span className="meta-label">Calibration</span>
+                                <span>{AUTO_CAL_METHODS.join(", ")}</span>
+                              </div>
+                              <div>
+                                <span className="meta-label">Upweights</span>
+                                <span>{AUTO_UPWEIGHTS.join(", ")}</span>
+                              </div>
+                            </div>
+                            <span className="field-hint">
+                              Auto search uses curated feature sets and varies core hyperparameters. Time regime and split settings are
+                              locked; selection is based on validation logloss unless outer backtests are enabled.
+                            </span>
+                          </section>
+                        ) : null}
+
+                        {isAuto ? (
+                          <section className="section-card calibrate-section-card">
+                            <h3 className="section-heading">Advanced Auto-Search</h3>
+                            <div className="fields-grid">
+                              <div className="field">
+                                <label htmlFor="autoOuterFolds">Outer folds</label>
+                                <input
+                                  id="autoOuterFolds"
+                                  className="input"
+                                  inputMode="numeric"
+                                  value={form.autoOuterFolds}
+                                  onChange={(event) =>
+                                    setForm((prev) => ({ ...prev, autoOuterFolds: event.target.value }))
+                                  }
+                                />
+                                <span className="field-hint">Set to 0 to disable nested backtest selection.</span>
+                              </div>
+                              <div className="field">
+                                <label htmlFor="autoOuterTestWeeks">Outer test weeks</label>
+                                <input
+                                  id="autoOuterTestWeeks"
+                                  className="input"
+                                  inputMode="numeric"
+                                  value={form.autoOuterTestWeeks}
+                                  onChange={(event) =>
+                                    setForm((prev) => ({ ...prev, autoOuterTestWeeks: event.target.value }))
+                                  }
+                                />
+                              </div>
+                              <div className="field">
+                                <label htmlFor="autoOuterGapWeeks">Outer gap weeks</label>
+                                <input
+                                  id="autoOuterGapWeeks"
+                                  className="input"
+                                  inputMode="numeric"
+                                  value={form.autoOuterGapWeeks}
+                                  onChange={(event) =>
+                                    setForm((prev) => ({ ...prev, autoOuterGapWeeks: event.target.value }))
+                                  }
+                                />
+                              </div>
+                              <div className="field">
+                                <label htmlFor="autoOuterSelectionMetric">Outer selection metric</label>
+                                <select
+                                  id="autoOuterSelectionMetric"
+                                  className="input"
+                                  value={form.autoOuterSelectionMetric}
+                                  onChange={(event) =>
+                                    setForm((prev) => ({
+                                      ...prev,
+                                      autoOuterSelectionMetric: event.target.value as AutoOuterSelectionMetric,
+                                    }))
+                                  }
+                                >
+                                  <option value="median_delta_logloss">median delta logloss</option>
+                                  <option value="worst_delta_logloss">worst-fold delta logloss</option>
+                                  <option value="mean_delta_logloss">mean delta logloss</option>
+                                </select>
+                              </div>
+                              <div className="field">
+                                <label htmlFor="autoOuterMinImproveFraction">Min improve fraction</label>
+                                <input
+                                  id="autoOuterMinImproveFraction"
+                                  className="input"
+                                  inputMode="decimal"
+                                  value={form.autoOuterMinImproveFraction}
+                                  onChange={(event) =>
+                                    setForm((prev) => ({
+                                      ...prev,
+                                      autoOuterMinImproveFraction: event.target.value,
+                                    }))
+                                  }
+                                />
+                              </div>
+                              <div className="field">
+                                <label htmlFor="autoOuterMaxWorstDelta">Max worst-fold delta</label>
+                                <input
+                                  id="autoOuterMaxWorstDelta"
+                                  className="input"
+                                  inputMode="decimal"
+                                  value={form.autoOuterMaxWorstDelta}
+                                  onChange={(event) =>
+                                    setForm((prev) => ({
+                                      ...prev,
+                                      autoOuterMaxWorstDelta: event.target.value,
+                                    }))
+                                  }
+                                />
+                              </div>
+                            </div>
+                            <span className="field-hint">
+                              Outer backtests run an extra time-series loop inside training. Expect higher runtime but
+                              more stable generalization.
+                            </span>
+                          </section>
+                        ) : null}
+
+                        {!isAuto ? (
+                          <section className="section-card calibrate-section-card">
+                            <div className="calibrate-section-header-row">
+                              <h3 className="section-heading">Feature Selection</h3>
+                              <div className="calibrate-inline-actions">
+                                <button
+                                  className="button ghost small"
+                                  type="button"
+                                  onClick={handleSelectRecommendedFeatures}
+                                >
+                                  Recommended
+                                </button>
+                                <button
+                                  className="button ghost small"
+                                  type="button"
+                                  onClick={handleClearOptionalFeatures}
+                                >
+                                  Clear optional
+                                </button>
+                              </div>
+                            </div>
+                            {featuresLoading ? <div className="empty">Loading feature options…</div> : null}
+                            {featureError ? <div className="error">{featureError}</div> : null}
+                            <div className="feature-category-grid">
+                              {featureCategoryOptions.map((category) => (
+                                <div key={category.title} className="feature-category-card">
+                                  <h4 className="feature-category-title">{category.title}</h4>
+                                  <div className="feature-chip-grid">
+                                    {category.items.map((feature) => {
+                                      const selected = selectedFeatureList.includes(feature.name);
+                                      const title = feature.label || feature.name;
+                                      return (
+                                        <button
+                                          key={feature.name}
+                                          type="button"
+                                          className={`feature-chip ${selected ? "selected" : ""}`}
+                                          onClick={() => handleToggleFeature(feature.name)}
+                                          title={title}
+                                        >
+                                          {feature.name}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              ))}
+                              {selectableCategoricalFeatures.length ? (
+                                <div className="feature-category-card">
+                                  <h4 className="feature-category-title">Categorical</h4>
+                                  <div className="feature-chip-grid">
+                                    {selectableCategoricalFeatures.map((feature) => {
+                                      const selected = selectedCategoricalList.includes(feature.name);
+                                      return (
+                                        <button
+                                          key={feature.name}
+                                          type="button"
+                                          className={`feature-chip ${selected ? "selected" : ""}`}
+                                          onClick={() => handleToggleCategoricalFeature(feature.name)}
+                                          title={feature.label || feature.name}
+                                        >
+                                          {feature.name}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              ) : null}
+                            </div>
+                            <div className="dataset-summary-grid calibrate-info-card-grid">
+                              <div>
+                                <span className="meta-label">Base feature</span>
+                                <span>{BASE_FEATURE}</span>
+                              </div>
+                              <div>
+                                <span className="meta-label">Selected optional</span>
+                                <span>{selectedFeatureList.length}</span>
+                              </div>
+                              <div>
+                                <span className="meta-label">Selected categorical</span>
+                                <span>{selectedCategoricalList.length}</span>
+                              </div>
+                              <div>
+                                <span className="meta-label">Final feature count</span>
+                                <span>{selectedFeatureList.length + selectedCategoricalList.length + 1}</span>
+                              </div>
+                              <div>
+                                <span className="meta-label">Available optional</span>
+                                <span>{selectableNumericFeatures.length}</span>
+                              </div>
+                            </div>
+                          </section>
+                        ) : null}
+
+                        <section className="section-card calibrate-section-card">
+                          <div className="calibrate-section-header-row">
+                            <h3 className="section-heading">Model Structure</h3>
+                            {!isAuto ? (
+                              <button className="button ghost" type="button" onClick={setRecommendedDefaults}>
+                                Recommended defaults
+                              </button>
+                            ) : null}
+                          </div>
+                          <div className="fields-grid">
+                            {!isAuto ? (
+                              <>
+                                <div className="field">
+                                  <label htmlFor="foundationWeight">Foundation weight</label>
+                                  <input
+                                    id="foundationWeight"
+                                    className="input"
+                                    inputMode="decimal"
+                                    value={form.foundationWeight}
+                                    onChange={(event) =>
+                                      setForm((prev) => ({ ...prev, foundationWeight: event.target.value }))
+                                    }
+                                  />
+                                </div>
+                                <div className="field">
+                                  <label htmlFor="tickerInterceptMode">Ticker intercept mode</label>
+                                  <select
+                                    id="tickerInterceptMode"
+                                    className="input"
+                                    value={form.tickerInterceptMode}
+                                    onChange={(event) =>
+                                      setForm((prev) => ({
+                                        ...prev,
+                                        tickerInterceptMode: event.target.value as TickerInterceptMode,
+                                      }))
+                                    }
+                                  >
+                                    <option value="none">none</option>
+                                    <option value="all">all</option>
+                                    <option value="non_foundation">non_foundation</option>
+                                  </select>
+                                </div>
+                              </>
+                            ) : null}
+                            <div className="field">
+                              <label htmlFor="minSupportIntercepts">Min support (intercepts)</label>
+                              <input
+                                id="minSupportIntercepts"
+                                className="input"
+                                inputMode="numeric"
+                                value={form.minSupportIntercepts}
+                                onChange={(event) =>
+                                  setForm((prev) => ({ ...prev, minSupportIntercepts: event.target.value }))
+                                }
+                              />
+                            </div>
+                            <div className="field">
+                              <label htmlFor="minSupportInteractions">Min support (interactions)</label>
+                              <input
+                                id="minSupportInteractions"
+                                className="input"
+                                inputMode="numeric"
+                                value={form.minSupportInteractions}
+                                onChange={(event) =>
+                                  setForm((prev) => ({ ...prev, minSupportInteractions: event.target.value }))
+                                }
+                                disabled={!form.perTickerInteractions && !isAuto}
+                              />
+                            </div>
+                          </div>
+
+                          {!isAuto ? (
+                            <label className="checkbox calibrate-checkbox-pill">
+                              <input
+                                type="checkbox"
+                                checked={form.perTickerInteractions}
+                                onChange={(event) =>
+                                  setForm((prev) => ({ ...prev, perTickerInteractions: event.target.checked }))
+                                }
+                              />
+                              Enable per-ticker interactions (advanced)
+                            </label>
+                          ) : null}
+                          {isAuto ? (
+                            <span className="field-hint">
+                              Foundation weight, ticker intercepts, and interactions are selected by auto search.
+                            </span>
+                          ) : null}
+
+                          <div className="ticker-selection-grid">
+                            <div className="ticker-selection-card">
+                              <div className="ticker-selection-header">
+                                <span className="meta-label">Training tickers</span>
+                                <span>{form.trainTickers.length} selected</span>
+                              </div>
+                              {tickersLoading ? <div className="empty">Loading tickers…</div> : null}
+                              {tickersError ? <div className="error">{tickersError}</div> : null}
+                              <div className="ticker-chip-grid">
+                                {(availableTickers.length ? availableTickers : DEFAULT_TRADING_UNIVERSE).map((ticker) => {
+                                  const selected = form.trainTickers.includes(ticker);
+                                  return (
+                                    <button
+                                      key={`train-${ticker}`}
+                                      type="button"
+                                      className={`ticker-chip ${selected ? "selected" : ""}`}
+                                      onClick={() => handleSelectTicker("trainTickers", ticker)}
+                                    >
+                                      {ticker}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+
+                            <div className="ticker-selection-card">
+                              <div className="ticker-selection-header">
+                                <span className="meta-label">Foundation tickers</span>
+                                <span>{form.foundationTickers.length} selected</span>
+                              </div>
+                              <div className="ticker-chip-grid">
+                                {form.trainTickers.map((ticker) => {
+                                  const selected = form.foundationTickers.includes(ticker);
+                                  return (
+                                    <button
+                                      key={`foundation-${ticker}`}
+                                      type="button"
+                                      className={`ticker-chip ${selected ? "selected" : ""}`}
+                                      onClick={() => handleSelectTicker("foundationTickers", ticker)}
+                                    >
+                                      {ticker}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          </div>
+                        </section>
+
+                        <section className="section-card calibrate-section-card">
+                          <h3 className="section-heading">Weights and Groups</h3>
+                          <div className="fields-grid">
+                            <div className="field">
+                              <label htmlFor="baseWeightSource">Base weight source</label>
+                              <select
+                                id="baseWeightSource"
+                                className="input"
+                                value={form.baseWeightSource}
                                 onChange={(event) =>
                                   setForm((prev) => ({
                                     ...prev,
-                                    calibrationMethod: event.target.value as CalibrationMethod,
+                                    baseWeightSource: event.target.value as BaseWeightSource,
+                                  }))
+                                }
+                              >
+                                <option value="dataset_weight">dataset_weight</option>
+                                <option value="uniform">uniform</option>
+                              </select>
+                            </div>
+                            <div className="field">
+                              <label htmlFor="groupingKey">Grouping key</label>
+                              <select
+                                id="groupingKey"
+                                className="input"
+                                value={form.groupingKey}
+                                onChange={(event) =>
+                                  setForm((prev) => ({ ...prev, groupingKey: event.target.value }))
+                                }
+                              >
+                                {selectedGroupingKeys.length === 0 ? (
+                                  <option value="group_id">group_id</option>
+                                ) : (
+                                  selectedGroupingKeys.map((key) => (
+                                    <option key={key} value={key}>{key}</option>
+                                  ))
+                                )}
+                              </select>
+                            </div>
+                            <div className="field">
+                              <label htmlFor="renorm">Renorm</label>
+                              <select
+                                id="renorm"
+                                className="input"
+                                value={form.renorm}
+                                onChange={(event) =>
+                                  setForm((prev) => ({ ...prev, renorm: event.target.value as "mean1" }))
+                                }
+                              >
+                                <option value="mean1">mean1</option>
+                              </select>
+                            </div>
+                            {!isAuto ? (
+                              <div className="field">
+                                <label htmlFor="tradingUniverseUpweight">Trading-universe upweight</label>
+                                <input
+                                  id="tradingUniverseUpweight"
+                                  className="input"
+                                  inputMode="decimal"
+                                  value={form.tradingUniverseUpweight}
+                                  onChange={(event) =>
+                                    setForm((prev) => ({ ...prev, tradingUniverseUpweight: event.target.value }))
+                                  }
+                                />
+                              </div>
+                            ) : null}
+                            <div className="field">
+                              <label htmlFor="tickerBalanceMode">Ticker balancing</label>
+                              <select
+                                id="tickerBalanceMode"
+                                className="input"
+                                value={form.tickerBalanceMode}
+                                onChange={(event) =>
+                                  setForm((prev) => ({
+                                    ...prev,
+                                    tickerBalanceMode: event.target.value as TickerBalanceMode,
                                   }))
                                 }
                               >
                                 <option value="none">none</option>
-                                <option value="platt">platt</option>
+                                <option value="sqrt_inv_clipped">sqrt_inv_clipped</option>
                               </select>
                             </div>
-                            <div className="field">
-                              <label htmlFor="selectionObjective">Selection objective</label>
-                              <select
-                                id="selectionObjective"
-                                className="input"
-                                value={form.selectionObjective}
+                          </div>
+
+                          <div className="calibrate-inline-actions calibrate-weight-actions-row">
+                            <label className="checkbox calibrate-checkbox-pill">
+                              <input
+                                type="checkbox"
+                                checked={form.groupEqualization}
                                 onChange={(event) =>
-                                  setForm((prev) => ({
-                                    ...prev,
-                                    selectionObjective: event.target.value as SelectionObjective,
-                                  }))
+                                  setForm((prev) => ({ ...prev, groupEqualization: event.target.checked }))
                                 }
-                              >
-                                <option value="logloss">logloss</option>
-                                <option value="brier">brier</option>
-                                <option value="ece_q">ece_q</option>
-                              </select>
-                            </div>
-                          </>
-                        ) : null}
-                      </div>
-                      {isAuto ? (
-                        <span className="field-hint">
-                          Auto search varies C and calibration method. Selection objective is fixed to logloss.
-                        </span>
-                      ) : null}
-                    </section>
-
-                    {isAuto ? (
-                      <section className="section-card calibrate-section-card">
-                        <h3 className="section-heading">Auto Search Settings</h3>
-                        <div className="fields-grid">
-                          <div className="field">
-                            <label htmlFor="autoMaxTrials">Max trials (optional)</label>
-                            <input
-                              id="autoMaxTrials"
-                              className="input"
-                              inputMode="numeric"
-                              value={form.autoMaxTrials}
-                              onChange={(event) =>
-                                setForm((prev) => ({ ...prev, autoMaxTrials: event.target.value }))
-                              }
-                            />
-                            <span className="field-hint">Leave blank to run the full curated grid.</span>
-                          </div>
-                        </div>
-                        <div className="calibrate-inline-actions">
-                          <label className="checkbox calibrate-checkbox-pill">
-                            <input
-                              type="checkbox"
-                              checked={form.autoAllowRisky}
-                              onChange={(event) =>
-                                setForm((prev) => ({ ...prev, autoAllowRisky: event.target.checked }))
-                              }
-                            />
-                            Allow risky features
-                          </label>
-                          <label className="checkbox calibrate-checkbox-pill">
-                            <input
-                              type="checkbox"
-                              checked={form.autoAdvancedSearch}
-                              onChange={(event) =>
-                                setForm((prev) => ({ ...prev, autoAdvancedSearch: event.target.checked }))
-                              }
-                            />
-                            Advanced search (ticker interactions)
-                          </label>
-                        </div>
-                        <div className="dataset-summary-grid">
-                          <div>
-                            <span className="meta-label">Feature sets</span>
-                            <span>{AUTO_FEATURE_SETS.length} curated sets</span>
-                          </div>
-                          <div>
-                            <span className="meta-label">C values</span>
-                            <span>{AUTO_C_VALUES.join(", ")}</span>
-                          </div>
-                          <div>
-                            <span className="meta-label">Calibration</span>
-                            <span>{AUTO_CAL_METHODS.join(", ")}</span>
-                          </div>
-                          <div>
-                            <span className="meta-label">Upweights</span>
-                            <span>{AUTO_UPWEIGHTS.join(", ")}</span>
-                          </div>
-                        </div>
-                        <span className="field-hint">
-                          Auto search uses curated feature sets and varies core hyperparameters. Time regime and split settings are
-                          locked; selection is based on validation logloss unless outer backtests are enabled.
-                        </span>
-                      </section>
-                    ) : null}
-
-                    {isAuto ? (
-                      <section className="section-card calibrate-section-card">
-                        <h3 className="section-heading">Advanced Auto-Search</h3>
-                        <div className="fields-grid">
-                          <div className="field">
-                            <label htmlFor="autoOuterFolds">Outer folds</label>
-                            <input
-                              id="autoOuterFolds"
-                              className="input"
-                              inputMode="numeric"
-                              value={form.autoOuterFolds}
-                              onChange={(event) =>
-                                setForm((prev) => ({ ...prev, autoOuterFolds: event.target.value }))
-                              }
-                            />
-                            <span className="field-hint">Set to 0 to disable nested backtest selection.</span>
-                          </div>
-                          <div className="field">
-                            <label htmlFor="autoOuterTestWeeks">Outer test weeks</label>
-                            <input
-                              id="autoOuterTestWeeks"
-                              className="input"
-                              inputMode="numeric"
-                              value={form.autoOuterTestWeeks}
-                              onChange={(event) =>
-                                setForm((prev) => ({ ...prev, autoOuterTestWeeks: event.target.value }))
-                              }
-                            />
-                          </div>
-                          <div className="field">
-                            <label htmlFor="autoOuterGapWeeks">Outer gap weeks</label>
-                            <input
-                              id="autoOuterGapWeeks"
-                              className="input"
-                              inputMode="numeric"
-                              value={form.autoOuterGapWeeks}
-                              onChange={(event) =>
-                                setForm((prev) => ({ ...prev, autoOuterGapWeeks: event.target.value }))
-                              }
-                            />
-                          </div>
-                          <div className="field">
-                            <label htmlFor="autoOuterSelectionMetric">Outer selection metric</label>
-                            <select
-                              id="autoOuterSelectionMetric"
-                              className="input"
-                              value={form.autoOuterSelectionMetric}
-                              onChange={(event) =>
-                                setForm((prev) => ({
-                                  ...prev,
-                                  autoOuterSelectionMetric: event.target.value as AutoOuterSelectionMetric,
-                                }))
-                              }
-                            >
-                              <option value="median_delta_logloss">median delta logloss</option>
-                              <option value="worst_delta_logloss">worst-fold delta logloss</option>
-                              <option value="mean_delta_logloss">mean delta logloss</option>
-                            </select>
-                          </div>
-                          <div className="field">
-                            <label htmlFor="autoOuterMinImproveFraction">Min improve fraction</label>
-                            <input
-                              id="autoOuterMinImproveFraction"
-                              className="input"
-                              inputMode="decimal"
-                              value={form.autoOuterMinImproveFraction}
-                              onChange={(event) =>
-                                setForm((prev) => ({
-                                  ...prev,
-                                  autoOuterMinImproveFraction: event.target.value,
-                                }))
-                              }
-                            />
-                          </div>
-                          <div className="field">
-                            <label htmlFor="autoOuterMaxWorstDelta">Max worst-fold delta</label>
-                            <input
-                              id="autoOuterMaxWorstDelta"
-                              className="input"
-                              inputMode="decimal"
-                              value={form.autoOuterMaxWorstDelta}
-                              onChange={(event) =>
-                                setForm((prev) => ({
-                                  ...prev,
-                                  autoOuterMaxWorstDelta: event.target.value,
-                                }))
-                              }
-                            />
-                          </div>
-                        </div>
-                        <span className="field-hint">
-                          Outer backtests run an extra time-series loop inside training. Expect higher runtime but
-                          more stable generalization.
-                        </span>
-                      </section>
-                    ) : null}
-
-                    {!isAuto ? (
-                      <section className="section-card calibrate-section-card">
-                        <div className="calibrate-section-header-row">
-                          <h3 className="section-heading">Feature Selection</h3>
-                          <div className="calibrate-inline-actions">
+                              />
+                              Per-group equalization
+                            </label>
                             <button
-                              className="button ghost small"
+                              className="button light"
                               type="button"
-                              onClick={handleSelectRecommendedFeatures}
+                              onClick={() => void handlePreviewWeighting()}
+                              disabled={weightingPreviewLoading}
                             >
-                              Recommended
-                            </button>
-                            <button
-                              className="button ghost small"
-                              type="button"
-                              onClick={handleClearOptionalFeatures}
-                            >
-                              Clear optional
+                              {weightingPreviewLoading ? "Previewing…" : "Preview weights"}
                             </button>
                           </div>
-                        </div>
-                        <p className="calibrate-mode-note">
-                          Base feature <code>{BASE_FEATURE}</code> is always included. Dependencies and exclusivity
-                          rules are enforced automatically.
-                        </p>
-                        {featuresLoading ? <div className="empty">Loading feature options…</div> : null}
-                        {featureError ? <div className="error">{featureError}</div> : null}
-                        <div className="feature-category-grid">
-                          {featureCategoryOptions.map((category) => (
-                            <div key={category.title} className="feature-category-card">
-                              <h4 className="feature-category-title">{category.title}</h4>
-                              <div className="feature-chip-grid">
-                                {category.items.map((feature) => {
-                                  const selected = selectedFeatureList.includes(feature);
-                                  const deps = FEATURE_DEPENDENCIES[feature] ?? [];
-                                  const label = deps.length
-                                    ? `${feature} (requires ${deps.join(", ")})`
-                                    : feature;
-                                  return (
-                                    <button
-                                      key={feature}
-                                      type="button"
-                                      className={`feature-chip ${selected ? "selected" : ""}`}
-                                      onClick={() => handleToggleFeature(feature)}
-                                      title={label}
-                                    >
-                                      {feature}
-                                    </button>
-                                  );
-                                })}
+
+                          {weightingPreviewError ? <div className="error">{weightingPreviewError}</div> : null}
+                          {weightingPreview ? (
+                            <div className="weight-preview-panel">
+                              <div className="weight-preview-grid">
+                                <div>
+                                  <span className="meta-label">Selected weight</span>
+                                  <span>{weightingPreview.selected_weight_column ?? "uniform"}</span>
+                                </div>
+                                <div>
+                                  <span className="meta-label">Min / mean / max</span>
+                                  <span>
+                                    {weightingPreview.min_weight.toFixed(4)} / {weightingPreview.mean_weight.toFixed(4)} / {weightingPreview.max_weight.toFixed(4)}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="meta-label">Group sum (min / mean / max)</span>
+                                  <span>
+                                    {weightingPreview.group_sum_min?.toFixed(4) ?? "--"} / {weightingPreview.group_sum_mean?.toFixed(4) ?? "--"} / {weightingPreview.group_sum_max?.toFixed(4) ?? "--"}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="meta-label">Groups by split</span>
+                                  <span>
+                                    train={weightingPreview.split_group_counts.train ?? 0}, val={weightingPreview.split_group_counts.val ?? 0}, test={weightingPreview.split_group_counts.test ?? 0}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="meta-label">Rows by split</span>
+                                  <span>
+                                    train={weightingPreview.split_row_counts.train ?? 0}, val={weightingPreview.split_row_counts.val ?? 0}, test={weightingPreview.split_row_counts.test ?? 0}
+                                  </span>
+                                </div>
                               </div>
-                            </div>
-                          ))}
-                          {selectableCategoricalOptions.length ? (
-                            <div className="feature-category-card">
-                              <h4 className="feature-category-title">Categorical</h4>
-                              <div className="feature-chip-grid">
-                                {selectableCategoricalOptions.map((feature) => {
-                                  const selected = selectedCategoricalList.includes(feature);
-                                  const label = CATEGORICAL_FEATURE_LABELS[feature] ?? feature;
-                                  return (
-                                    <button
-                                      key={feature}
-                                      type="button"
-                                      className={`feature-chip ${selected ? "selected" : ""}`}
-                                      onClick={() => handleToggleCategoricalFeature(feature)}
-                                      title={feature}
-                                    >
-                                      {label}
-                                    </button>
-                                  );
-                                })}
-                              </div>
+                              {weightingPreview.warnings.length ? (
+                                <div className="warning">
+                                  {weightingPreview.warnings.join(" ")}
+                                </div>
+                              ) : null}
                             </div>
                           ) : null}
-                        </div>
-                        <div className="dataset-summary-grid">
-                          <div>
-                            <span className="meta-label">Base feature</span>
-                            <span>{BASE_FEATURE}</span>
-                          </div>
-                          <div>
-                            <span className="meta-label">Selected optional</span>
-                            <span>{selectedFeatureList.length}</span>
-                          </div>
-                          <div>
-                            <span className="meta-label">Selected categorical</span>
-                            <span>{selectedCategoricalList.length}</span>
-                          </div>
-                          <div>
-                            <span className="meta-label">Final feature count</span>
-                            <span>{selectedFeatureList.length + selectedCategoricalList.length + 1}</span>
-                          </div>
-                          <div>
-                            <span className="meta-label">Enable x_abs_m flag</span>
-                            <span>{selectedFeatureList.includes("x_abs_m") ? "yes" : "no"}</span>
-                          </div>
-                        </div>
-                        {featureDependencyWarnings.length ? (
-                          <div className="warning">{featureDependencyWarnings.join(" ")}</div>
-                        ) : null}
-                      </section>
-                    ) : null}
+                        </section>
 
-                    <section className="section-card calibrate-section-card">
-                      <div className="calibrate-section-header-row">
-                        <h3 className="section-heading">Model Structure</h3>
-                        {!isAuto ? (
-                          <button className="button ghost" type="button" onClick={setRecommendedDefaults}>
-                            Recommended defaults
-                          </button>
-                        ) : null}
-                      </div>
-                      <div className="fields-grid">
-                        {!isAuto ? (
-                          <>
+                        <section className="section-card calibrate-section-card">
+                          <h3 className="section-heading">Bootstrap and Confidence</h3>
+                          <label className="checkbox calibrate-checkbox-pill">
+                            <input
+                              type="checkbox"
+                              checked={form.bootstrapEnabled}
+                              onChange={(event) =>
+                                setForm((prev) => ({ ...prev, bootstrapEnabled: event.target.checked }))
+                              }
+                            />
+                            Enable bootstrap confidence intervals
+                          </label>
+
+                          <div className="fields-grid">
                             <div className="field">
-                              <label htmlFor="foundationWeight">Foundation weight</label>
-                              <input
-                                id="foundationWeight"
-                                className="input"
-                                inputMode="decimal"
-                                value={form.foundationWeight}
-                                onChange={(event) =>
-                                  setForm((prev) => ({ ...prev, foundationWeight: event.target.value }))
-                                }
-                              />
-                              <span className="field-hint">Safe range: 1.0 to 3.0 (hard cap 5.0).</span>
-                            </div>
-                            <div className="field">
-                              <label htmlFor="tickerInterceptMode">Ticker intercept mode</label>
+                              <label htmlFor="bootstrapGroup">Bootstrap group key</label>
                               <select
-                                id="tickerInterceptMode"
+                                id="bootstrapGroup"
                                 className="input"
-                                value={form.tickerInterceptMode}
+                                value={form.bootstrapGroup}
                                 onChange={(event) =>
                                   setForm((prev) => ({
                                     ...prev,
-                                    tickerInterceptMode: event.target.value as TickerInterceptMode,
+                                    bootstrapGroup: event.target.value as BootstrapGroupMode,
+                                  }))
+                                }
+                                disabled={!form.bootstrapEnabled}
+                              >
+                                <option value="contract_id">contract_id</option>
+                                <option value="group_id">group_id</option>
+                                <option value="ticker_day">ticker_day</option>
+                                <option value="day">day</option>
+                                <option value="iid">iid</option>
+                                <option value="auto">auto</option>
+                              </select>
+                            </div>
+                            <div className="field">
+                              <label htmlFor="bootstrapDraws">Bootstrap draws (B)</label>
+                              <input
+                                id="bootstrapDraws"
+                                className="input"
+                                inputMode="numeric"
+                                value={form.bootstrapDraws}
+                                onChange={(event) =>
+                                  setForm((prev) => ({ ...prev, bootstrapDraws: event.target.value }))
+                                }
+                                disabled={!form.bootstrapEnabled}
+                              />
+                            </div>
+                            <div className="field">
+                              <label htmlFor="bootstrapSeed">Bootstrap seed</label>
+                              <input
+                                id="bootstrapSeed"
+                                className="input"
+                                inputMode="numeric"
+                                value={form.bootstrapSeed}
+                                onChange={(event) =>
+                                  setForm((prev) => ({ ...prev, bootstrapSeed: event.target.value }))
+                                }
+                                disabled={!form.bootstrapEnabled}
+                              />
+                            </div>
+                            <div className="field">
+                              <label htmlFor="ciLevel">Confidence level</label>
+                              <select
+                                id="ciLevel"
+                                className="input"
+                                value={form.ciLevel}
+                                onChange={(event) =>
+                                  setForm((prev) => ({
+                                    ...prev,
+                                    ciLevel: Number(event.target.value) as 90 | 95 | 99,
                                   }))
                                 }
                               >
-                                <option value="none">none</option>
-                                <option value="all">all</option>
-                                <option value="non_foundation">non_foundation</option>
+                                <option value={90}>90%</option>
+                                <option value={95}>95%</option>
+                                <option value={99}>99%</option>
                               </select>
                             </div>
-                          </>
-                        ) : null}
-                        <div className="field">
-                          <label htmlFor="minSupportIntercepts">Min support (intercepts)</label>
-                          <input
-                            id="minSupportIntercepts"
-                            className="input"
-                            inputMode="numeric"
-                            value={form.minSupportIntercepts}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, minSupportIntercepts: event.target.value }))
-                            }
-                          />
-                        </div>
-                        <div className="field">
-                          <label htmlFor="minSupportInteractions">Min support (interactions)</label>
-                          <input
-                            id="minSupportInteractions"
-                            className="input"
-                            inputMode="numeric"
-                            value={form.minSupportInteractions}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, minSupportInteractions: event.target.value }))
-                            }
-                            disabled={!form.perTickerInteractions && !isAuto}
-                          />
-                        </div>
-                      </div>
-
-                      {!isAuto ? (
-                        <label className="checkbox calibrate-checkbox-pill">
-                          <input
-                            type="checkbox"
-                            checked={form.perTickerInteractions}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, perTickerInteractions: event.target.checked }))
-                            }
-                          />
-                          Enable per-ticker interactions (advanced)
-                        </label>
-                      ) : null}
-                      {isAuto ? (
-                        <span className="field-hint">
-                          Foundation weight, ticker intercepts, and interactions are selected by auto search.
-                        </span>
-                      ) : null}
-
-                      <p className="calibrate-mode-note">
-                        Training tickers define which symbols are fit by the model. Foundation tickers are a subset of
-                        training tickers that receive extra influence via <code>foundation weight</code>.
-                      </p>
-
-                      <div className="ticker-selection-grid">
-                        <div className="ticker-selection-card">
-                          <div className="ticker-selection-header">
-                            <span className="meta-label">Training tickers</span>
-                            <span>{form.trainTickers.length} selected</span>
                           </div>
-                          {tickersLoading ? <div className="empty">Loading tickers…</div> : null}
-                          {tickersError ? <div className="error">{tickersError}</div> : null}
-                          <div className="ticker-chip-grid">
-                            {(availableTickers.length ? availableTickers : DEFAULT_TRADING_UNIVERSE).map((ticker) => {
-                              const selected = form.trainTickers.includes(ticker);
-                              return (
-                                <button
-                                  key={`train-${ticker}`}
-                                  type="button"
-                                  className={`ticker-chip ${selected ? "selected" : ""}`}
-                                  onClick={() => handleSelectTicker("trainTickers", ticker)}
-                                >
-                                  {ticker}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
 
-                        <div className="ticker-selection-card">
-                          <div className="ticker-selection-header">
-                            <span className="meta-label">Foundation tickers</span>
-                            <span>{form.foundationTickers.length} selected</span>
+                          <div className="toggle-grid">
+                            <label className="checkbox calibrate-checkbox-pill">
+                              <input
+                                type="checkbox"
+                                checked={form.perSplitReporting}
+                                onChange={(event) =>
+                                  setForm((prev) => ({ ...prev, perSplitReporting: event.target.checked }))
+                                }
+                              />
+                              Per-split reporting
+                            </label>
+                            <label className="checkbox calibrate-checkbox-pill">
+                              <input
+                                type="checkbox"
+                                checked={form.perFoldReporting}
+                                onChange={(event) =>
+                                  setForm((prev) => ({ ...prev, perFoldReporting: event.target.checked }))
+                                }
+                              />
+                              Per-fold reporting
+                            </label>
+                            <label className="checkbox calibrate-checkbox-pill">
+                              <input
+                                type="checkbox"
+                                checked={form.splitTimeline}
+                                onChange={(event) =>
+                                  setForm((prev) => ({ ...prev, splitTimeline: event.target.checked }))
+                                }
+                              />
+                              Split timeline viewer
+                            </label>
+                            <label className="checkbox calibrate-checkbox-pill">
+                              <input
+                                type="checkbox"
+                                checked={form.perFoldDeltaChart}
+                                onChange={(event) =>
+                                  setForm((prev) => ({ ...prev, perFoldDeltaChart: event.target.checked }))
+                                }
+                              />
+                              Per-fold delta chart
+                            </label>
+                            <label className="checkbox calibrate-checkbox-pill">
+                              <input
+                                type="checkbox"
+                                checked={form.perGroupDeltaDistribution}
+                                onChange={(event) =>
+                                  setForm((prev) => ({ ...prev, perGroupDeltaDistribution: event.target.checked }))
+                                }
+                              />
+                              Per-group delta distribution
+                            </label>
                           </div>
-                          <div className="ticker-chip-grid">
-                            {form.trainTickers.map((ticker) => {
-                              const selected = form.foundationTickers.includes(ticker);
-                              return (
-                                <button
-                                  key={`foundation-${ticker}`}
-                                  type="button"
-                                  className={`ticker-chip ${selected ? "selected" : ""}`}
-                                  onClick={() => handleSelectTicker("foundationTickers", ticker)}
-                                >
-                                  {ticker}
-                                </button>
-                              );
-                            })}
-                          </div>
-                          <span className="field-hint">
-                            Foundation tickers must be a subset of training tickers.
-                          </span>
-                        </div>
-                      </div>
-                    </section>
 
-                    <section className="section-card calibrate-section-card">
-                      <h3 className="section-heading">Weights and Groups</h3>
-                      <div className="fields-grid">
-                        <div className="field">
-                          <label htmlFor="baseWeightSource">Base weight source</label>
-                          <select
-                            id="baseWeightSource"
-                            className="input"
-                            value={form.baseWeightSource}
-                            onChange={(event) =>
-                              setForm((prev) => ({
-                                ...prev,
-                                baseWeightSource: event.target.value as BaseWeightSource,
-                              }))
-                            }
-                          >
-                            <option value="dataset_weight">dataset_weight</option>
-                            <option value="uniform">uniform</option>
-                          </select>
-                        </div>
-                        <div className="field">
-                          <label htmlFor="groupingKey">Grouping key</label>
-                          <select
-                            id="groupingKey"
-                            className="input"
-                            value={form.groupingKey}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, groupingKey: event.target.value }))
-                            }
-                          >
-                            {selectedGroupingKeys.length === 0 ? (
-                              <option value="group_id">group_id</option>
-                            ) : (
-                              selectedGroupingKeys.map((key) => (
-                                <option key={key} value={key}>{key}</option>
-                              ))
-                            )}
-                          </select>
-                        </div>
-                        <div className="field">
-                          <label htmlFor="renorm">Renorm</label>
-                          <select
-                            id="renorm"
-                            className="input"
-                            value={form.renorm}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, renorm: event.target.value as "mean1" }))
-                            }
-                          >
-                            <option value="mean1">mean1</option>
-                          </select>
-                        </div>
-                        {!isAuto ? (
-                          <div className="field">
-                            <label htmlFor="tradingUniverseUpweight">Trading-universe upweight</label>
-                            <input
-                              id="tradingUniverseUpweight"
-                              className="input"
-                              inputMode="decimal"
-                              value={form.tradingUniverseUpweight}
-                              onChange={(event) =>
-                                setForm((prev) => ({ ...prev, tradingUniverseUpweight: event.target.value }))
-                              }
-                            />
-                          </div>
-                        ) : null}
-                        <div className="field">
-                          <label htmlFor="tickerBalanceMode">Ticker balancing</label>
-                          <select
-                            id="tickerBalanceMode"
-                            className="input"
-                            value={form.tickerBalanceMode}
-                            onChange={(event) =>
-                              setForm((prev) => ({
-                                ...prev,
-                                tickerBalanceMode: event.target.value as TickerBalanceMode,
-                              }))
-                            }
-                          >
-                            <option value="none">none</option>
-                            <option value="sqrt_inv_clipped">sqrt_inv_clipped</option>
-                          </select>
-                        </div>
-                      </div>
-
-                      <div className="calibrate-inline-actions calibrate-weight-actions-row">
-                        <label className="checkbox calibrate-checkbox-pill">
-                          <input
-                            type="checkbox"
-                            checked={form.groupEqualization}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, groupEqualization: event.target.checked }))
-                            }
-                          />
-                          Per-group equalization
-                        </label>
-                        <button
-                          className="button light"
-                          type="button"
-                          onClick={() => void handlePreviewWeighting()}
-                          disabled={weightingPreviewLoading}
-                        >
-                          {weightingPreviewLoading ? "Previewing…" : "Preview weights"}
-                        </button>
-                      </div>
-
-                      {weightingPreviewError ? <div className="error">{weightingPreviewError}</div> : null}
-                      {weightingPreview ? (
-                        <div className="weight-preview-panel">
-                          <div className="weight-preview-grid">
-                            <div>
-                              <span className="meta-label">Selected weight</span>
-                              <span>{weightingPreview.selected_weight_column ?? "uniform"}</span>
-                            </div>
-                            <div>
-                              <span className="meta-label">Min / mean / max</span>
-                              <span>
-                                {weightingPreview.min_weight.toFixed(4)} / {weightingPreview.mean_weight.toFixed(4)} / {weightingPreview.max_weight.toFixed(4)}
-                              </span>
-                            </div>
-                            <div>
-                              <span className="meta-label">Group sum (min / mean / max)</span>
-                              <span>
-                                {weightingPreview.group_sum_min?.toFixed(4) ?? "--"} / {weightingPreview.group_sum_mean?.toFixed(4) ?? "--"} / {weightingPreview.group_sum_max?.toFixed(4) ?? "--"}
-                              </span>
-                            </div>
-                            <div>
-                              <span className="meta-label">Groups by split</span>
-                              <span>
-                                train={weightingPreview.split_group_counts.train ?? 0}, val={weightingPreview.split_group_counts.val ?? 0}, test={weightingPreview.split_group_counts.test ?? 0}
-                              </span>
-                            </div>
-                            <div>
-                              <span className="meta-label">Rows by split</span>
-                              <span>
-                                train={weightingPreview.split_row_counts.train ?? 0}, val={weightingPreview.split_row_counts.val ?? 0}, test={weightingPreview.split_row_counts.test ?? 0}
-                              </span>
-                            </div>
-                          </div>
-                          {weightingPreview.warnings.length ? (
+                          {weightingPreview && (weightingPreview.split_group_counts.val ?? 0) < 30 ? (
                             <div className="warning">
-                              {weightingPreview.warnings.join(" ")}
+                              Estimated validation groups are low for reliable confidence intervals.
                             </div>
                           ) : null}
-                        </div>
-                      ) : null}
-                    </section>
+                        </section>
 
-                    <section className="section-card calibrate-section-card">
-                      <h3 className="section-heading">Bootstrap and Confidence</h3>
-                      <label className="checkbox calibrate-checkbox-pill">
-                        <input
-                          type="checkbox"
-                          checked={form.bootstrapEnabled}
-                          onChange={(event) =>
-                            setForm((prev) => ({ ...prev, bootstrapEnabled: event.target.checked }))
-                          }
-                        />
-                        Enable bootstrap confidence intervals
-                      </label>
-
-                      <div className="fields-grid">
-                        <div className="field">
-                          <label htmlFor="bootstrapGroup">Bootstrap group key</label>
-                          <select
-                            id="bootstrapGroup"
-                            className="input"
-                            value={form.bootstrapGroup}
-                            onChange={(event) =>
-                              setForm((prev) => ({
-                                ...prev,
-                                bootstrapGroup: event.target.value as BootstrapGroupMode,
-                              }))
-                            }
-                            disabled={!form.bootstrapEnabled}
-                          >
-                            <option value="contract_id">contract_id</option>
-                            <option value="group_id">group_id</option>
-                            <option value="ticker_day">ticker_day</option>
-                            <option value="day">day</option>
-                            <option value="iid">iid</option>
-                            <option value="auto">auto</option>
-                          </select>
-                        </div>
-                        <div className="field">
-                          <label htmlFor="bootstrapDraws">Bootstrap draws (B)</label>
-                          <input
-                            id="bootstrapDraws"
-                            className="input"
-                            inputMode="numeric"
-                            value={form.bootstrapDraws}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, bootstrapDraws: event.target.value }))
-                            }
-                            disabled={!form.bootstrapEnabled}
-                          />
-                        </div>
-                        <div className="field">
-                          <label htmlFor="bootstrapSeed">Bootstrap seed</label>
-                          <input
-                            id="bootstrapSeed"
-                            className="input"
-                            inputMode="numeric"
-                            value={form.bootstrapSeed}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, bootstrapSeed: event.target.value }))
-                            }
-                            disabled={!form.bootstrapEnabled}
-                          />
-                        </div>
-                        <div className="field">
-                          <label htmlFor="ciLevel">Confidence level</label>
-                          <select
-                            id="ciLevel"
-                            className="input"
-                            value={form.ciLevel}
-                            onChange={(event) =>
-                              setForm((prev) => ({
-                                ...prev,
-                                ciLevel: Number(event.target.value) as 90 | 95 | 99,
-                              }))
-                            }
-                          >
-                            <option value={90}>90%</option>
-                            <option value={95}>95%</option>
-                            <option value={99}>99%</option>
-                          </select>
-                        </div>
-                      </div>
-
-                      <div className="toggle-grid">
-                        <label className="checkbox calibrate-checkbox-pill">
-                          <input
-                            type="checkbox"
-                            checked={form.perSplitReporting}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, perSplitReporting: event.target.checked }))
-                            }
-                          />
-                          Per-split reporting
-                        </label>
-                        <label className="checkbox calibrate-checkbox-pill">
-                          <input
-                            type="checkbox"
-                            checked={form.perFoldReporting}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, perFoldReporting: event.target.checked }))
-                            }
-                          />
-                          Per-fold reporting
-                        </label>
-                        <label className="checkbox calibrate-checkbox-pill">
-                          <input
-                            type="checkbox"
-                            checked={form.splitTimeline}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, splitTimeline: event.target.checked }))
-                            }
-                          />
-                          Split timeline viewer
-                        </label>
-                        <label className="checkbox calibrate-checkbox-pill">
-                          <input
-                            type="checkbox"
-                            checked={form.perFoldDeltaChart}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, perFoldDeltaChart: event.target.checked }))
-                            }
-                          />
-                          Per-fold delta chart
-                        </label>
-                        <label className="checkbox calibrate-checkbox-pill">
-                          <input
-                            type="checkbox"
-                            checked={form.perGroupDeltaDistribution}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, perGroupDeltaDistribution: event.target.checked }))
-                            }
-                          />
-                          Per-group delta distribution
-                        </label>
-                      </div>
-
-                      {weightingPreview && (weightingPreview.split_group_counts.val ?? 0) < 30 ? (
-                        <div className="warning">
-                          Estimated validation groups are low for reliable confidence intervals.
-                        </div>
-                      ) : null}
-                    </section>
-
-                    <section className="section-card calibrate-section-card">
-                      <h3 className="section-heading">Additional filters</h3>
-                      <div className="fields-grid">
-                        <div className="field">
-                          <label htmlFor="maxAbsLogm">Maximum absolute log moneyness</label>
-                          <input
-                            id="maxAbsLogm"
-                            className="input"
-                            value={form.maxAbsLogm}
-                            onChange={(event) =>
-                              setForm((prev) => ({ ...prev, maxAbsLogm: event.target.value }))
-                            }
-                            placeholder="0.4"
-                          />
-                        </div>
-                        <div className="field">
-                          <label>pRN bounds filter</label>
-                          <label className="checkbox calibrate-checkbox-pill calibrate-inline-filter-toggle">
-                            <input
-                              type="checkbox"
-                              checked={form.dropPrnExtremes}
-                              onChange={(event) =>
-                                setForm((prev) => ({ ...prev, dropPrnExtremes: event.target.checked }))
-                              }
-                            />
-                            Drop pRN extremes
-                          </label>
-                        </div>
-                      </div>
-                      {form.dropPrnExtremes ? (
-                        <div className="inline-fields calibrate-prn-bounds-row">
-                          <div className="field">
-                            <label htmlFor="dropPrnBelow">Drop pRN below</label>
-                            <input
-                              id="dropPrnBelow"
-                              className="input"
-                              value={form.dropPrnBelow}
-                              onChange={(event) =>
-                                setForm((prev) => ({ ...prev, dropPrnBelow: event.target.value }))
-                              }
-                            />
+                        <section className="section-card calibrate-section-card">
+                          <h3 className="section-heading">Additional filters</h3>
+                          <div className="fields-grid">
+                            <div className="field">
+                              <label htmlFor="maxAbsLogm">Maximum absolute log moneyness</label>
+                              <input
+                                id="maxAbsLogm"
+                                className="input"
+                                value={form.maxAbsLogm}
+                                onChange={(event) =>
+                                  setForm((prev) => ({ ...prev, maxAbsLogm: event.target.value }))
+                                }
+                                placeholder="0.4"
+                              />
+                            </div>
+                            <div className="field">
+                              <label>pRN bounds filter</label>
+                              <label className="checkbox calibrate-checkbox-pill calibrate-inline-filter-toggle">
+                                <input
+                                  type="checkbox"
+                                  checked={form.dropPrnExtremes}
+                                  onChange={(event) =>
+                                    setForm((prev) => ({ ...prev, dropPrnExtremes: event.target.checked }))
+                                  }
+                                />
+                                Drop pRN extremes
+                              </label>
+                            </div>
                           </div>
-                          <div className="field">
-                            <label htmlFor="dropPrnAbove">Drop pRN above</label>
-                            <input
-                              id="dropPrnAbove"
-                              className="input"
-                              value={form.dropPrnAbove}
-                              onChange={(event) =>
-                                setForm((prev) => ({ ...prev, dropPrnAbove: event.target.value }))
-                              }
-                            />
-                          </div>
-                        </div>
-                      ) : null}
-                    </section>
+                          {form.dropPrnExtremes ? (
+                            <div className="inline-fields calibrate-prn-bounds-row">
+                              <div className="field">
+                                <label htmlFor="dropPrnBelow">Drop pRN below</label>
+                                <input
+                                  id="dropPrnBelow"
+                                  className="input"
+                                  value={form.dropPrnBelow}
+                                  onChange={(event) =>
+                                    setForm((prev) => ({ ...prev, dropPrnBelow: event.target.value }))
+                                  }
+                                />
+                              </div>
+                              <div className="field">
+                                <label htmlFor="dropPrnAbove">Drop pRN above</label>
+                                <input
+                                  id="dropPrnAbove"
+                                  className="input"
+                                  value={form.dropPrnAbove}
+                                  onChange={(event) =>
+                                    setForm((prev) => ({ ...prev, dropPrnAbove: event.target.value }))
+                                  }
+                                />
+                              </div>
+                            </div>
+                          ) : null}
+                        </section>
+                      </>
+                    ) : null}
 
                     {runError ? <div className="error">{runError}</div> : null}
                     {guardrailWarning ? <div className="warning">{guardrailWarning}</div> : null}

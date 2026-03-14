@@ -31,6 +31,7 @@ from app.services.process_runtime import (
     clear_runtime_file,
     spawn_managed_process,
 )
+from app.services.polymarket_quality import load_market_quality_map
 from app.services.run_csv_files import dedupe_merged_dataframe, get_run_csv_paths
 from app.services.script_entrypoints import POLYMARKET_MARKETS_REFRESH_SCRIPT
 
@@ -636,17 +637,20 @@ def get_markets_series(
     if df.empty:
         raise FileNotFoundError("No series rows for the requested ticker/threshold/week")
 
+    market_quality_map = load_market_quality_map(run_dir)
     flags = _col_flags(df)
     points = [_build_series_point(row, flags) for _, row in df.iterrows()]
 
+    market_id = str(df["market_id"].iloc[0]) if "market_id" in df.columns else None
     response = MarketsSeriesResponse(
         run_id=run_dir.name,
         ticker=ticker,
         threshold=threshold,
         week_friday=week_key,
-        market_id=str(df["market_id"].iloc[0]) if "market_id" in df.columns else None,
+        market_id=market_id,
         event_id=str(df["event_id"].iloc[0]) if "event_id" in df.columns else None,
         points=points,
+        market_quality=market_quality_map.get(market_id or ""),
     )
     _cache_put(_SERIES_CACHE, cache_key, response)
     return response
@@ -696,20 +700,23 @@ def get_markets_series_by_ticker(
     df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
     df = df.dropna(subset=["timestamp_utc"])
 
+    market_quality_map = load_market_quality_map(run_dir)
     flags = _col_flags(df)
     strikes: List[MarketsSeriesResponse] = []
     for threshold, group in df.groupby("threshold", dropna=True):
         group = group.sort_values("timestamp_utc")
         points = [_build_series_point(row, flags) for _, row in group.iterrows()]
+        market_id = str(group["market_id"].iloc[0]) if "market_id" in group.columns else None
         strikes.append(
             MarketsSeriesResponse(
                 run_id=run_dir.name,
                 ticker=ticker,
                 threshold=float(threshold),
                 week_friday=week_key,
-                market_id=str(group["market_id"].iloc[0]) if "market_id" in group.columns else None,
+                market_id=market_id,
                 event_id=str(group["event_id"].iloc[0]) if "event_id" in group.columns else None,
                 points=points,
+                market_quality=market_quality_map.get(market_id or ""),
             )
         )
 
@@ -718,6 +725,11 @@ def get_markets_series_by_ticker(
         ticker=ticker,
         week_friday=week_key,
         strikes=sorted(strikes, key=lambda item: item.threshold),
+        market_quality={
+            market_id: quality
+            for market_id, quality in market_quality_map.items()
+            if quality.ticker == ticker and quality.week_friday == week_key
+        },
     )
     _cache_put(_SERIES_BY_TICKER_CACHE, cache_key, response)
     return response
