@@ -43,11 +43,14 @@ The project places particular emphasis on dataset design, temporal consistency, 
 
 - Prerequisites: Python 3.11+, Node.js 20+ (Node 22 works too), and Java only if you plan to run the Theta Terminal data source.
 - Environment (recommended for Polymarket pages): `cp config/polymarket_subgraph.env.sample .env`, set `GRAPH_API_KEY` in `.env`, and optionally override `POLYMARKET_SUBGRAPH_ID`, `ORDERBOOK_SUBGRAPH_ID`, `PNL_SUBGRAPH_ID`, or `POLYMARKET_SUBGRAPH_URL`.
-- Quickstart (recommended): run the script and open the Vite URL it prints (usually `http://localhost:5173`). The script starts FastAPI on `http://localhost:8000` or the first free port in `8000-8050` and wires the frontend to that API.
+- Quickstart (recommended): run the script and open the Vite URL it prints (usually `http://localhost:5173`). The script starts FastAPI on `http://localhost:8000` or the first free port in `8000-8050` and wires the frontend to that API.  
+
   ```bash
   ./run-webapp.sh
   ```
-- Manual setup (backend):
+
+- Manual setup (backend):  
+
   ```bash
   cd src/webapp/backend
   python -m venv .venv
@@ -56,12 +59,15 @@ The project places particular emphasis on dataset design, temporal consistency, 
   pip install fastapi uvicorn numpy pandas requests yfinance scipy
   uvicorn main:app --reload --port 8000
   ```
+
 - Manual setup (frontend):
+
   ```bash
   cd src/webapp/frontend
   npm install
   VITE_API_BASE_URL="http://localhost:8000" npm run dev
   ```
+
 - Notes: `run-webapp.sh` loads `.env` if present and otherwise falls back to `config/polymarket_subgraph.env.sample`. If you do not set `GRAPH_API_KEY`, Polymarket subgraph jobs will fail but the UI still loads. On Windows, use WSL or follow the manual setup steps. For more webapp details, see `src/webapp/README.md`.
 
 # Configuration
@@ -75,8 +81,7 @@ The project places particular emphasis on dataset design, temporal consistency, 
 
 # Script layout
 
-- Maintained CLIs live under `src/scripts/entrypoints/`, with implementations grouped by stage under `src/scripts/`.
-- Temporary or one-off scripts are archived under `deadcode/src/scripts/` instead of staying at `src/scripts/` root.
+- Maintained CLIs live under `src/scripts/entrypoints/`, with implementations grouped by stage under `src/scripts/`.  
 
 # Future work
 
