@@ -5,8 +5,6 @@ Run the full data ingestion, calibration, and analysis workflow on your machine 
 
 ## Project team
 
-Replace the collaborator placeholders below with the final details when ready.
-
 **Lead author**  
 Name : Dorian Cardon  
 Role : Project lead  
