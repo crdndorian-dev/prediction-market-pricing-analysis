@@ -8,16 +8,16 @@ Run the full data ingestion, calibration, and analysis workflow on your machine 
 Replace the collaborator placeholders below with the final details when ready.
 
 **Lead author**  
-Name : Dorian Cardon
-Role : Project lead
+Name : Dorian Cardon  
+Role : Project lead  
 Year : 2025 - current  
-Contact : crdn.dorian@gmail.com
-GitHub : https://github.com/crdndorian-dev
+Contact : crdn.dorian@gmail.com  
+GitHub : https://github.com/crdndorian-dev  
 
 **Collaborator**  
-Name : Paul Mieussens
-Joined : March 2026
-GitHub : https://github/paulmatthewmieussens
+Name : Paul Mieussens  
+Joined : March 2026  
+GitHub : https://github/paulmatthewmieussens  
 
 # Abstract
 
