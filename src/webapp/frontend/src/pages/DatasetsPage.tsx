@@ -389,14 +389,6 @@ const shareBarWidth = (share?: number | null, minVisiblePercent = 6): string => 
   return `${Math.max(minVisiblePercent, percent)}%`;
 };
 
-type HeatmapMetric = "rows" | "issues" | "flagged";
-
-const HEATMAP_METRIC_OPTIONS: { value: HeatmapMetric; label: string }[] = [
-  { value: "rows", label: "Coverage" },
-  { value: "issues", label: "Issue load" },
-  { value: "flagged", label: "Flagged share" },
-];
-
 type CleanupCriteriaFormState = {
   mode: "quality_buckets" | "flags";
   qualityBuckets: Array<"clean" | "watch" | "noisy">;
@@ -1074,7 +1066,6 @@ export default function DatasetsPage() {
     useState<DatasetAuditResponse | null>(null);
   const [auditError, setAuditError] = useState<string | null>(null);
   const [auditLoading, setAuditLoading] = useState(false);
-  const [heatmapMetric, setHeatmapMetric] = useState<HeatmapMetric>("issues");
   const [activeRunAuditResponse, setActiveRunAuditResponse] =
     useState<DatasetAuditResponse | null>(null);
   const [activeRunAuditError, setActiveRunAuditError] = useState<string | null>(null);
@@ -1477,25 +1468,6 @@ export default function DatasetsPage() {
       jobStatus?.status === "failed" ||
       jobStatus?.status === "cancelled",
   );
-  const heatmapTickers = useMemo(() => {
-    if (!auditResponse) return [];
-    return auditResponse.top_problem_tickers.map((item) => item.ticker);
-  }, [auditResponse]);
-  const heatmapCellMap = useMemo(() => {
-    if (!auditResponse) {
-      return new Map<string, NonNullable<DatasetAuditResponse["heatmap_cells"]>[number]>();
-    }
-    return new Map(
-      auditResponse.heatmap_cells.map((cell) => [
-        `${cell.ticker}__${cell.asof_date}`,
-        cell,
-      ]),
-    );
-  }, [auditResponse]);
-  const heatmapMaxRows = useMemo(() => {
-    if (!auditResponse || auditResponse.heatmap_cells.length === 0) return 1;
-    return Math.max(...auditResponse.heatmap_cells.map((cell) => cell.row_count), 1);
-  }, [auditResponse]);
 
   useEffect(() => {
     if (!jobStatus || jobStatus.status !== "finished") return;
@@ -4152,92 +4124,6 @@ export default function DatasetsPage() {
                                 emptyMessage="Ticker-level diagnostics are unavailable."
                               />
                               <RvSurfaceAuditCard auditResponse={auditResponse} />
-                                  <section className="dataset-audit-card dataset-audit-card-wide">
-                                    <div className="dataset-audit-card-header">
-                                      <h3>Coverage heatmap</h3>
-                                      <div className="dataset-preview-controls">
-                                        <label className="dataset-preview-control">
-                                          <span className="meta-label">Metric</span>
-                                          <select
-                                            className="input"
-                                            value={heatmapMetric}
-                                            onChange={(event) =>
-                                              setHeatmapMetric(event.target.value as HeatmapMetric)
-                                            }
-                                          >
-                                            {HEATMAP_METRIC_OPTIONS.map((option) => (
-                                              <option key={option.value} value={option.value}>
-                                                {option.label}
-                                              </option>
-                                            ))}
-                                          </select>
-                                        </label>
-                                      </div>
-                                    </div>
-                                    {auditResponse.heatmap_dates.length > 0 &&
-                                    heatmapTickers.length > 0 ? (
-                                      <div className="dataset-audit-heatmap-wrap">
-                                        <div
-                                          className="dataset-audit-heatmap-grid"
-                                          style={{
-                                            gridTemplateColumns: `minmax(72px, auto) repeat(${auditResponse.heatmap_dates.length}, minmax(1.75rem, 1.75rem))`,
-                                          }}
-                                        >
-                                          <div className="dataset-audit-heatmap-corner">Ticker</div>
-                                          {auditResponse.heatmap_dates.map((date) => (
-                                            <div
-                                              key={date}
-                                              className="dataset-audit-heatmap-date"
-                                              title={date}
-                                            >
-                                              {date.slice(5)}
-                                            </div>
-                                          ))}
-                                          {heatmapTickers.map((ticker) => (
-                                            <div key={ticker} className="dataset-audit-heatmap-row">
-                                              <div key={`${ticker}-label`} className="dataset-audit-heatmap-ticker">
-                                                {ticker}
-                                              </div>
-                                              {auditResponse.heatmap_dates.map((date) => {
-                                                const cell = heatmapCellMap.get(`${ticker}__${date}`);
-                                                let intensity = 0;
-                                                if (cell) {
-                                                  if (heatmapMetric === "rows") {
-                                                    intensity = cell.row_count / heatmapMaxRows;
-                                                  } else if (heatmapMetric === "flagged") {
-                                                    intensity = cell.flagged_share ?? 0;
-                                                  } else {
-                                                    intensity = Math.min((cell.avg_issue_count ?? 0) / 3, 1);
-                                                  }
-                                                }
-                                                return (
-                                                  <button
-                                                    key={`${ticker}-${date}`}
-                                                    type="button"
-                                                    className={`dataset-audit-heatmap-cell${
-                                                      cell?.quality_bucket ? ` ${cell.quality_bucket}` : ""
-                                                    }`}
-                                                    style={{ opacity: cell ? Math.max(0.18, intensity) : 0.08 }}
-                                                    title={
-                                                      cell
-                                                        ? `${ticker} ${date}: ${cell.row_count} rows, ${formatNumeric(cell.avg_issue_count, 2)} avg issues, ${formatPercent(cell.flagged_share)} flagged`
-                                                        : `${ticker} ${date}: no rows`
-                                                    }
-                                                  >
-                                                    {cell ? cell.row_count : ""}
-                                                  </button>
-                                                );
-                                              })}
-                                            </div>
-                                          ))}
-                                        </div>
-                                      </div>
-                                    ) : (
-                                      <div className="dataset-preview-empty">
-                                        Heatmap coverage is unavailable for this dataset.
-                                      </div>
-                                    )}
-                                  </section>
                                 </div>
                               </>
                             ) : null}

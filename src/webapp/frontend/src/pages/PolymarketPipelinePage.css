@@ -885,11 +885,11 @@
 .polymarket-run-item {
   border: 1px solid var(--outline);
   border-radius: var(--radius-2xl);
-  background: var(--surface-panel);
+  background: var(--surface-soft);
   padding: var(--space-4);
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-3);
   transition: background-color 140ms ease, border-color 140ms ease,
     color 140ms ease;
 }
@@ -902,31 +902,23 @@
 
 .polymarket-run-item.is-active {
   border-color: var(--accent-active);
-  background: color-mix(in srgb, var(--accent-fill) 35%, white);
-}
-
-.polymarket-run-top {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: var(--space-4);
-  flex-wrap: wrap;
 }
 
 .polymarket-run-toggle {
-  flex: 1;
-  min-width: min(100%, 420px);
+  width: 100%;
   border: 0;
   background: transparent;
   color: inherit;
   -webkit-appearance: none;
   appearance: none;
-  padding: 0;
+  padding: var(--space-2);
   margin: 0;
   display: flex;
   align-items: flex-start;
+  justify-content: space-between;
   gap: var(--space-3);
   text-align: left;
+  font: inherit;
   cursor: pointer;
 }
 
@@ -943,43 +935,16 @@
 }
 
 .polymarket-run-main {
-  flex: 1;
-  min-width: min(100%, 420px);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-
-.polymarket-run-title-row {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-3);
-}
-
-.polymarket-run-title-group {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  min-width: 0;
 }
 
-.polymarket-run-badges {
+.polymarket-run-heading {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
   align-items: center;
-}
-
-.polymarket-run-tag {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.15rem 0.5rem;
-  border-radius: var(--radius-full);
-  border: 1px solid var(--accent-active);
-  background: var(--accent-fill);
-  color: var(--ink-900);
-  font-size: var(--text-xs);
-  font-weight: 600;
 }
 
 .status-pill.cancelled {
@@ -992,39 +957,6 @@
   background: rgba(245, 165, 36, 0.14);
   border-color: rgba(245, 165, 36, 0.34);
   color: #8f5a00;
-}
-
-.run-status-dot {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  margin-top: 0.28rem;
-}
-
-.run-status-dot.success {
-  background: #3ad29f;
-}
-
-.run-status-dot.running {
-  background: #2f9c95;
-}
-
-.run-status-dot.failed {
-  background: #ec4e20;
-}
-
-.run-status-dot.cancelled {
-  background: #f5a524;
-}
-
-.run-status-dot.pending {
-  background: #f5a524;
-}
-
-.run-status-dot.unknown {
-  background: #94a3b8;
 }
 
 .polymarket-run-pending-notice {
@@ -1055,30 +987,6 @@
   max-width: 60ch;
 }
 
-.run-id-mono {
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  color: var(--ink-500);
-  word-break: break-all;
-}
-
-.run-active-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.15rem 0.5rem;
-  border-radius: var(--radius-full);
-  border: 1px solid var(--outline);
-  background: var(--surface);
-  font-size: var(--text-xs);
-  font-weight: 600;
-}
-
-.run-active-badge {
-  border-color: var(--accent-active);
-  background: var(--accent-fill);
-  color: var(--ink-900);
-}
-
 .polymarket-run-title {
   font-size: var(--text-md);
   font-weight: 600;
@@ -1087,41 +995,14 @@
   overflow-wrap: anywhere;
 }
 
-.polymarket-run-metrics {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: var(--space-3);
-}
-
-.polymarket-run-metrics > div {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  text-align: center;
-  gap: 0.2rem;
-  padding: var(--space-3);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--outline);
-  background: var(--surface);
-  min-width: 0;
-}
-
-.polymarket-run-metrics > div > span {
-  width: 100%;
-  text-align: center;
-}
-
-.polymarket-run-metrics > div > span:last-child {
-  color: var(--ink-800);
-  overflow-wrap: anywhere;
-  line-height: 1.35;
-}
-
-.polymarket-run-quality-chips {
+.polymarket-run-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2);
+  gap: var(--space-3);
+  font-size: var(--text-xs);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-600);
 }
 
 .polymarket-run-path {
@@ -1129,8 +1010,6 @@
   font-size: var(--text-xs);
   color: var(--ink-500);
   overflow-wrap: anywhere;
-  border-top: 1px dashed var(--outline);
-  padding-top: var(--space-2);
 }
 
 .polymarket-run-item.is-active .polymarket-run-path {
@@ -1139,10 +1018,19 @@
 
 .polymarket-run-actions {
   display: flex;
-  gap: var(--space-2);
   flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: flex-end;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.polymarket-run-chevron {
+  font-size: 1.1rem;
+  color: var(--ink-500);
+}
+
+.polymarket-run-item.is-open .polymarket-run-chevron {
+  transform: rotate(90deg);
+  color: var(--ink-700);
 }
 
 .polymarket-quality-audit-wrap {
@@ -1160,6 +1048,12 @@
   min-height: 32px;
   padding: 0.4rem 0.8rem;
   font-size: var(--text-sm);
+}
+
+.polymarket-run-actions .button.small,
+.polymarket-run-file-actions .button.small,
+.polymarket-rename-actions .button.small {
+  min-width: 140px;
 }
 
 .polymarket-run-footer {
@@ -1714,10 +1608,6 @@
 
   .polymarket-run-toggle {
     min-width: 100%;
-  }
-
-  .polymarket-run-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .polymarket-run-file {

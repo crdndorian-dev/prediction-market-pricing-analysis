@@ -251,15 +251,6 @@ export type DatasetAuditRow = {
   flags: string[];
 };
 
-export type DatasetAuditHeatmapCell = {
-  ticker: string;
-  asof_date: string;
-  row_count: number;
-  flagged_share?: number | null;
-  avg_issue_count?: number | null;
-  quality_bucket?: string | null;
-};
-
 export type DatasetAuditRvBucketSummary = {
   label: "low" | "mid" | "high";
   value_min?: number | null;
@@ -301,8 +292,6 @@ export type DatasetAuditResponse = {
   rv_feature_audit: DatasetAuditRvFeatureAudit[];
   top_problem_tickers: DatasetAuditTickerSummary[];
   timeline: DatasetAuditTimelinePoint[];
-  heatmap_dates: string[];
-  heatmap_cells: DatasetAuditHeatmapCell[];
   noisiest_rows: DatasetAuditRow[];
 };
 

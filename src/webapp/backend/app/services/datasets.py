@@ -25,7 +25,6 @@ from urllib.parse import urlparse
 from app.models.datasets import (
     DatasetAuditDistribution,
     DatasetAuditFlagSummary,
-    DatasetAuditHeatmapCell,
     DatasetAuditRvBucketSummary,
     DatasetAuditRvFeatureAudit,
     DatasetAuditResponse,
@@ -1549,15 +1548,6 @@ def _safe_iso_date(series) -> tuple[Optional[str], Optional[str]]:
     return parsed.min().date().isoformat(), parsed.max().date().isoformat()
 
 
-def _quality_bucket_from_issue_count(value: object) -> str:
-    numeric = _safe_float(value)
-    if numeric is None or numeric <= 0:
-        return "clean"
-    if numeric <= 2:
-        return "watch"
-    return "noisy"
-
-
 def _derive_rv_ratio(df: pd.DataFrame, numerator_col: str, denominator_col: str) -> pd.Series:
     numerator = pd.to_numeric(df[numerator_col], errors="coerce")
     denominator = pd.to_numeric(df[denominator_col], errors="coerce").replace(0, np.nan)
@@ -1781,8 +1771,6 @@ def audit_dataset_file(path_value: str) -> DatasetAuditResponse:
             )
 
     timeline: List[DatasetAuditTimelinePoint] = []
-    heatmap_dates: List[str] = []
-    heatmap_cells: List[DatasetAuditHeatmapCell] = []
     timeline_date_col = next((candidate for candidate in ["asof_date", "snapshot_date", "asof_target"] if candidate in columns), None)
     if timeline_date_col and row_count > 0:
         work = pd.DataFrame(
@@ -1819,33 +1807,6 @@ def audit_dataset_file(path_value: str) -> DatasetAuditResponse:
                     flagged_share=round(float(row["flagged_share"]), 6) if pd.notna(row["flagged_share"]) else None,
                 )
             )
-
-        heatmap_source = work.copy()
-        heatmap_source["ticker"] = df["ticker"].astype("string") if "ticker" in columns else "UNKNOWN"
-        available_dates = sorted({item.isoformat() for item in heatmap_source["audit_date"].dropna().tolist()})
-        heatmap_dates = available_dates[-40:]
-        if heatmap_dates:
-            heatmap_filtered = heatmap_source[
-                heatmap_source["audit_date"].astype("string").isin(heatmap_dates)
-            ].copy()
-            heatmap_grouped = heatmap_filtered.groupby(["ticker", "audit_date"], dropna=False).agg(
-                row_count=("ticker", "size"),
-                flagged_share=("flagged_any", "mean"),
-                avg_issue_count=("issue_count", "mean"),
-            ).reset_index()
-            for _, row in heatmap_grouped.iterrows():
-                avg_issue_count = round(float(row["avg_issue_count"]), 4) if pd.notna(row["avg_issue_count"]) else None
-                quality_bucket = _quality_bucket_from_issue_count(avg_issue_count)
-                heatmap_cells.append(
-                    DatasetAuditHeatmapCell(
-                        ticker=str(row["ticker"]),
-                        asof_date=row["audit_date"].isoformat(),
-                        row_count=int(row["row_count"]),
-                        flagged_share=round(float(row["flagged_share"]), 6) if pd.notna(row["flagged_share"]) else None,
-                        avg_issue_count=avg_issue_count,
-                        quality_bucket=quality_bucket,
-                    )
-                )
 
     noisiest_rows: List[DatasetAuditRow] = []
     if row_count > 0:
@@ -1900,8 +1861,6 @@ def audit_dataset_file(path_value: str) -> DatasetAuditResponse:
         rv_feature_audit=rv_feature_audit,
         top_problem_tickers=top_problem_tickers,
         timeline=timeline,
-        heatmap_dates=heatmap_dates,
-        heatmap_cells=heatmap_cells,
         noisiest_rows=noisiest_rows,
     )
 

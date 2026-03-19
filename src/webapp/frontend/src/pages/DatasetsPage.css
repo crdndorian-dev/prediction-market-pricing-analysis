@@ -1886,66 +1886,6 @@
   background: #fff;
 }
 
-.dataset-audit-heatmap-wrap {
-  overflow-x: auto;
-}
-
-.dataset-audit-heatmap-grid {
-  display: inline-grid;
-  grid-auto-flow: row;
-  gap: 0.35rem;
-  align-items: center;
-}
-
-.dataset-audit-heatmap-corner,
-.dataset-audit-heatmap-date,
-.dataset-audit-heatmap-ticker {
-  font-size: var(--text-xs);
-  color: var(--ink-500);
-}
-
-.dataset-audit-heatmap-date {
-  writing-mode: vertical-rl;
-  transform: rotate(180deg);
-  text-align: center;
-  min-height: 60px;
-}
-
-.dataset-audit-heatmap-row {
-  display: contents;
-}
-
-.dataset-audit-heatmap-ticker {
-  font-weight: 600;
-  color: var(--ink-700);
-}
-
-.dataset-audit-heatmap-cell {
-  width: 1.75rem;
-  height: 1.75rem;
-  border-radius: 0.45rem;
-  border: 1px solid rgba(15, 23, 42, 0.06);
-  background: #1a73e8;
-  color: var(--surface);
-  font-size: 0.6rem;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-}
-
-.dataset-audit-heatmap-cell.clean {
-  background: #3e9d68;
-}
-
-.dataset-audit-heatmap-cell.watch {
-  background: #d48b00;
-}
-
-.dataset-audit-heatmap-cell.noisy {
-  background: #b5344a;
-}
-
 .dataset-preview-header {
   display: flex;
   justify-content: space-between;
@@ -2185,11 +2125,6 @@
   .dataset-cleanup-preview-grid,
   .dataset-cleanup-summary-grid {
     grid-template-columns: 1fr;
-  }
-
-  .dataset-audit-heatmap-date {
-    min-height: 48px;
-    font-size: 0.62rem;
   }
 
   .dataset-audit-table-head {

@@ -1644,7 +1644,7 @@ const calibrateDoc = (
         Basic Settings, Regression and Set Settings, Model Structure, Weights and Groups, and Bootstrap and Confidence.
       </li>
       <li>
-        <code>Active Run</code> shows job status, stdout/stderr logs, metrics summary,
+        <code>Active Run</code> shows job status, stdout/stderr logs, the Stata-style diagnostics table,
         diagnostics availability, and artifact links.
       </li>
       <li>
@@ -1692,8 +1692,8 @@ const calibrateDoc = (
         <code>run_manifest.json</code> at run root.
       </li>
       <li>
-        Selected-model metrics and equations are displayed exactly like manual runs, sourced from
-        <code>selected_model/metrics.csv</code> and companion artifacts.
+        Selected-model diagnostics and equations are displayed exactly like manual runs, sourced from
+        <code>selected_model/diagnostics_table.json</code>, <code>selected_model/metrics.csv</code>, and companion artifacts.
       </li>
       <li>
         Artifact browsing is sectioned: <code>Selected Model</code> and <code>Auto Search</code>.
@@ -1786,7 +1786,7 @@ const calibrateDoc = (
         dataset actually contains the matching CSV column.
       </li>
       <li>
-        Numeric optional features are grouped as Moneyness, Volatility, Pricing, and Quality and Flags.
+        Numeric optional features are grouped as Moneyness, Volatility, and Pricing.
       </li>
       <li>
         Categorical optional features are listed separately and follow the same CSV-backed contract.
@@ -1796,8 +1796,8 @@ const calibrateDoc = (
         <code>log_m_fwd</code> vs <code>abs_log_m_fwd</code>.
       </li>
       <li>
-        Legacy engineered optional features are no longer part of the active option-chain
-        calibration contract.
+        Quality and cleanup columns remain visible in dataset inspection workflows, but they are not
+        selectable as regression inputs in calibration runs.
       </li>
     </ul>
 

@@ -1,10 +1,19 @@
 import { useLayoutEffect, useRef } from "react";
-import { BrowserRouter, NavLink, Navigate, Route, Routes } from "react-router-dom";
+import {
+  BrowserRouter,
+  NavLink,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+} from "react-router-dom";
 
 import "./App.css";
 import DashboardPage from "./pages/DashboardPage";
 import DatasetsPage from "./pages/DatasetsPage";
-import CalibrateModelsPage from "./pages/CalibrateModelsPage";
+import CalibrateModelsPage, {
+  CalibrationModelDetailPage,
+} from "./pages/CalibrateModelsPage";
 import PolymarketPipelinePage from "./pages/PolymarketPipelinePage";
 import BacktestsPage from "./pages/BacktestsPage";
 import MarketsPage from "./pages/MarketsPage";
@@ -17,8 +26,10 @@ import { MarketsJobProvider } from "./contexts/marketsJob";
 const linkClass = ({ isActive }: { isActive: boolean }) =>
   `nav-link${isActive ? " active" : ""}`;
 
-export default function App() {
+function AppLayout() {
   const navRef = useRef<HTMLElement | null>(null);
+  const location = useLocation();
+  const isWideMain = location.pathname.startsWith("/calibrate/models/");
 
   useLayoutEffect(() => {
     const nav = navRef.current;
@@ -48,76 +59,86 @@ export default function App() {
   }, []);
 
   return (
+    <div className="app-shell">
+      <nav className="app-nav" ref={navRef}>
+        <div className="app-nav-inner">
+          <div className="app-brand">
+            <div>
+              <div className="brand-title">Polymarket Pricing Analysis</div>
+              <div className="brand-subtitle">Local Pipeline Workbench</div>
+            </div>
+          </div>
+          <div className="nav-meta">
+            <span className="status-dot" />
+            Localhost
+          </div>
+        </div>
+        <div className="nav-links">
+          <NavLink to="/" end className={linkClass}>
+            Dashboard
+          </NavLink>
+          <NavLink to="/option-chain-history-builder" className={linkClass}>
+            Option Chain History Builder
+          </NavLink>
+          <NavLink to="/polymarket-history-builder" className={linkClass}>
+            Polymarket History Builder
+          </NavLink>
+          <NavLink to="/calibrate" className={linkClass}>
+            Calibrate
+          </NavLink>
+          <NavLink to="/markets" className={linkClass}>
+            Markets
+          </NavLink>
+          <NavLink to="/backtests" className={linkClass}>
+            Backtests
+          </NavLink>
+        </div>
+      </nav>
+      <main className={`app-main${isWideMain ? " app-main-wide" : ""}`}>
+        <Routes>
+          <Route path="/" element={<DashboardPage />} />
+          <Route
+            path="/option-chain-history-builder"
+            element={<DatasetsPage />}
+          />
+          <Route
+            path="/option-chain"
+            element={<Navigate to="/option-chain-history-builder" replace />}
+          />
+          <Route path="/calibrate" element={<CalibrateModelsPage />} />
+          <Route
+            path="/calibrate/models/:modelId"
+            element={<CalibrationModelDetailPage />}
+          />
+          <Route
+            path="/calibrate-models"
+            element={<Navigate to="/calibrate" replace />}
+          />
+          <Route path="/markets" element={<MarketsPage />} />
+          <Route
+            path="/polymarket-history-builder"
+            element={<PolymarketPipelinePage />}
+          />
+          <Route
+            path="/polymarket-pipeline"
+            element={<Navigate to="/polymarket-history-builder" replace />}
+          />
+          <Route path="/backtests" element={<BacktestsPage />} />
+        </Routes>
+      </main>
+    </div>
+  );
+}
+
+export default function App() {
+  return (
     <BrowserRouter>
       <DatasetJobProvider>
         <CalibrationJobProvider>
           <PolymarketHistoryJobProvider>
             <MarketMapJobProvider>
               <MarketsJobProvider>
-                <div className="app-shell">
-                  <nav className="app-nav" ref={navRef}>
-                    <div className="app-nav-inner">
-                      <div className="app-brand">
-                        <div>
-                          <div className="brand-title">Polymarket Pricing Analysis</div>
-                          <div className="brand-subtitle">Local Pipeline Workbench</div>
-                        </div>
-                      </div>
-                      <div className="nav-meta">
-                        <span className="status-dot" />
-                        Localhost
-                      </div>
-                    </div>
-                    <div className="nav-links">
-                      <NavLink to="/" end className={linkClass}>
-                        Dashboard
-                      </NavLink>
-                      <NavLink to="/option-chain-history-builder" className={linkClass}>
-                        Option Chain History Builder
-                      </NavLink>
-                      <NavLink to="/polymarket-history-builder" className={linkClass}>
-                        Polymarket History Builder
-                      </NavLink>
-                      <NavLink to="/calibrate" className={linkClass}>
-                        Calibrate
-                      </NavLink>
-                      <NavLink to="/markets" className={linkClass}>
-                        Markets
-                      </NavLink>
-                      <NavLink to="/backtests" className={linkClass}>
-                        Backtests
-                      </NavLink>
-                    </div>
-                  </nav>
-                  <main className="app-main">
-                    <Routes>
-                      <Route path="/" element={<DashboardPage />} />
-                      <Route
-                        path="/option-chain-history-builder"
-                        element={<DatasetsPage />}
-                      />
-                      <Route
-                        path="/option-chain"
-                        element={<Navigate to="/option-chain-history-builder" replace />}
-                      />
-                      <Route path="/calibrate" element={<CalibrateModelsPage />} />
-                      <Route
-                        path="/calibrate-models"
-                        element={<Navigate to="/calibrate" replace />}
-                      />
-                      <Route path="/markets" element={<MarketsPage />} />
-                      <Route
-                        path="/polymarket-history-builder"
-                        element={<PolymarketPipelinePage />}
-                      />
-                      <Route
-                        path="/polymarket-pipeline"
-                        element={<Navigate to="/polymarket-history-builder" replace />}
-                      />
-                      <Route path="/backtests" element={<BacktestsPage />} />
-                    </Routes>
-                  </main>
-                </div>
+                <AppLayout />
               </MarketsJobProvider>
             </MarketMapJobProvider>
           </PolymarketHistoryJobProvider>

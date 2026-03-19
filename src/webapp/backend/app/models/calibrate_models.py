@@ -484,6 +484,7 @@ class ModelDetailResponse(BaseModel):
     features_used: Optional[List[str]] = None
     categorical_features_used: Optional[List[str]] = None
     metrics_summary: Optional[Dict[str, SplitMetricSummary]] = None
+    stata_diagnostics: Optional[Dict[str, Any]] = None
     split_row_counts: Optional[Dict[str, int]] = None
     split_group_counts: Optional[Dict[str, int]] = None
     model_equation: Optional[str] = None
@@ -510,6 +511,7 @@ class CalibrateModelRunResponse(BaseModel):
     duration_s: float
     command: List[str]
     metrics_summary: Optional[Dict[str, SplitMetricSummary]] = None
+    stata_diagnostics: Optional[Dict[str, Any]] = None
     split_row_counts: Optional[Dict[str, int]] = None
     split_group_counts: Optional[Dict[str, int]] = None
     auto_out_dir: Optional[str] = None

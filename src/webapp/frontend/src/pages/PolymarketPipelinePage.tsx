@@ -1574,6 +1574,7 @@ export default function PolymarketPipelinePage() {
                           ? `${run.start_date} to ${run.end_date}`
                           : "--";
                       const displayLabel = (run.label ?? "").trim();
+                      const runTitle = displayLabel || run.run_id;
                       const csvFiles = sortRunCsvFiles(run.csv_files ?? []);
                       const artifactGroups = (run.artifact_groups ?? []).filter(
                         (group) => group.key !== "bars_history",
@@ -1595,6 +1596,14 @@ export default function PolymarketPipelinePage() {
                       const artifactCountLabel = fileCount
                         ? `${fileCount} file${fileCount === 1 ? "" : "s"}`
                         : "No files";
+                      const runMetaItems = [
+                        formatDateTime(run.created_at_utc),
+                        dateRangeLabel !== "--" ? dateRangeLabel : null,
+                        `${formatCount(run.markets)} market${run.markets === 1 ? "" : "s"}`,
+                        artifactCountLabel,
+                        formatSize(run.size_bytes),
+                        run.duration_s != null ? `${run.duration_s}s` : null,
+                      ].filter((value): value is string => Boolean(value));
                       const isRenaming = renamingRunId === run.run_id;
                       const isOpen = openRunId === run.run_id;
                       const isPreviewingRun =
@@ -1618,81 +1627,19 @@ export default function PolymarketPipelinePage() {
                         );
                       const runMainContent = (
                         <>
-                          <div className="polymarket-run-title-row">
-                            <span
-                              className={`run-status-dot ${statusClass}`}
-                              title={run.status}
-                            />
-                            <div className="polymarket-run-title-group">
-                              {displayLabel ? (
-                                <div className="polymarket-run-title">{displayLabel}</div>
-                              ) : null}
-                              <div className="polymarket-run-badges">
-                                {run.status !== "success" ? (
-                                  <span className={`status-pill ${statusClass}`}>
-                                    {statusLabel}
-                                  </span>
-                                ) : null}
-                                {run.is_active ? (
-                                  <span className="run-active-badge">Active</span>
-                                ) : null}
-                                {run.features_built ? (
-                                  <span className="polymarket-run-tag">Features</span>
-                                ) : null}
-                                {showPendingRunNotice ? (
-                                  <span className="polymarket-run-tag">Pending features</span>
-                                ) : null}
-                              </div>
-                              <div className="run-id-mono">{run.run_id}</div>
-                            </div>
+                          <div className="polymarket-run-heading">
+                            <div className="polymarket-run-title">{runTitle}</div>
+                            {run.status !== "success" ? (
+                              <span className={`status-pill ${statusClass}`}>
+                                {statusLabel}
+                              </span>
+                            ) : null}
                           </div>
-                          <div className="polymarket-run-metrics">
-                            <div>
-                              <span className="meta-label">Date range</span>
-                              <span>{dateRangeLabel}</span>
-                            </div>
-                            <div>
-                              <span className="meta-label">Markets</span>
-                              <span>{formatCount(run.markets)}</span>
-                            </div>
-                            <div>
-                              <span className="meta-label">Artifacts</span>
-                              <span>{artifactCountLabel}</span>
-                            </div>
-                            <div>
-                              <span className="meta-label">Size</span>
-                              <span>{formatSize(run.size_bytes)}</span>
-                            </div>
-                            <div>
-                              <span className="meta-label">Created</span>
-                              <span>{formatDateTime(run.created_at_utc)}</span>
-                            </div>
-                            <div>
-                              <span className="meta-label">Duration</span>
-                              <span>
-                                {run.duration_s != null ? `${run.duration_s}s` : "--"}
-                              </span>
-                            </div>
+                          <div className="polymarket-run-meta">
+                            {runMetaItems.map((item, index) => (
+                              <span key={`${run.run_id}-meta-${index}`}>{item}</span>
+                            ))}
                           </div>
-                          {run.quality_summary ? (
-                            <div className="polymarket-run-quality-chips">
-                              <span className="polymarket-run-tag">
-                                flagged {formatPercent(run.quality_summary.flagged_share)}
-                              </span>
-                              <span className="polymarket-run-tag">
-                                noisy {formatCount(run.quality_summary.bucket_counts.noisy)}
-                              </span>
-                              <span className="polymarket-run-tag">
-                                pRN missing{" "}
-                                {formatCount(run.quality_summary.prn_coverage_counts.missing ?? 0)}
-                              </span>
-                              {masterBarArtifacts.length > 0 ? (
-                                <span className="polymarket-run-tag">
-                                  bars {masterBarArtifacts.length}/2
-                                </span>
-                              ) : null}
-                            </div>
-                          ) : null}
                           <div className="polymarket-run-path">{run.run_dir}</div>
                         </>
                       );
@@ -1704,126 +1651,130 @@ export default function PolymarketPipelinePage() {
                             run.is_active ? "is-active" : ""
                           }${isOpen ? " is-open" : ""}`}
                         >
-                          <div className="polymarket-run-top">
-                            {isRenaming ? (
-                              <div className="polymarket-run-main polymarket-run-main--renaming">
-                                <div className="polymarket-rename-input-wrapper">
-                                  <input
-                                    className="input polymarket-rename-input"
-                                    type="text"
-                                    placeholder={run.run_id}
-                                    value={renameValue}
-                                    onChange={(event) =>
-                                      setRenameValue(event.target.value)
+                          {isRenaming ? (
+                            <div className="polymarket-run-main polymarket-run-main--renaming">
+                              <div className="polymarket-rename-input-wrapper">
+                                <input
+                                  className="input polymarket-rename-input"
+                                  type="text"
+                                  placeholder={run.run_id}
+                                  value={renameValue}
+                                  onChange={(event) =>
+                                    setRenameValue(event.target.value)
+                                  }
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Enter") {
+                                      handleConfirmRename(run.run_id);
+                                    } else if (event.key === "Escape") {
+                                      handleCancelRename();
                                     }
-                                    onKeyDown={(event) => {
-                                      if (event.key === "Enter") {
-                                        handleConfirmRename(run.run_id);
-                                      } else if (event.key === "Escape") {
-                                        handleCancelRename();
-                                      }
-                                    }}
-                                    autoFocus
-                                  />
-                                  {renameError ? (
-                                    <div className="error">{renameError}</div>
-                                  ) : null}
-                                  <div className="polymarket-rename-actions">
-                                    <button
-                                      className="button ghost small"
-                                      type="button"
-                                      onClick={() => handleConfirmRename(run.run_id)}
-                                      disabled={renameLoading}
-                                    >
-                                      {renameLoading ? "Saving…" : "Save"}
-                                    </button>
-                                    <button
-                                      className="button ghost small"
-                                      type="button"
-                                      onClick={handleCancelRename}
-                                      disabled={renameLoading}
-                                    >
-                                      Cancel
-                                    </button>
-                                  </div>
+                                  }}
+                                  autoFocus
+                                />
+                                {renameError ? (
+                                  <div className="error">{renameError}</div>
+                                ) : null}
+                                <div className="polymarket-rename-actions">
+                                  <button
+                                    className="button ghost small"
+                                    type="button"
+                                    onClick={() => handleConfirmRename(run.run_id)}
+                                    disabled={renameLoading}
+                                  >
+                                    {renameLoading ? "Saving…" : "Save"}
+                                  </button>
+                                  <button
+                                    className="button ghost small"
+                                    type="button"
+                                    onClick={handleCancelRename}
+                                    disabled={renameLoading}
+                                  >
+                                    Cancel
+                                  </button>
                                 </div>
+                              </div>
+                              {runMainContent}
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              className="polymarket-run-toggle"
+                              aria-expanded={hasDrawerContent ? isOpen : undefined}
+                              aria-controls={
+                                hasDrawerContent ? `polymarket-run-files-${run.run_id}` : undefined
+                              }
+                              onClick={() => {
+                                if (!hasDrawerContent) return;
+                                setOpenRunId((prev) =>
+                                  prev === run.run_id ? null : run.run_id,
+                                );
+                              }}
+                            >
+                              <div className="polymarket-run-main">
                                 {runMainContent}
                               </div>
-                            ) : (
-                              <button
-                                type="button"
-                                className="polymarket-run-toggle"
-                                aria-expanded={hasDrawerContent ? isOpen : undefined}
-                                aria-controls={
-                                  hasDrawerContent ? `polymarket-run-files-${run.run_id}` : undefined
-                                }
-                                onClick={() => {
-                                  if (!hasDrawerContent) return;
-                                  setOpenRunId((prev) =>
-                                    prev === run.run_id ? null : run.run_id,
-                                  );
-                                }}
-                              >
-                                <div className="polymarket-run-main">
-                                  {runMainContent}
-                                </div>
-                              </button>
-                            )}
+                              {hasDrawerContent ? (
+                                <span className="polymarket-run-chevron" aria-hidden="true">
+                                  ▸
+                                </span>
+                              ) : null}
+                            </button>
+                          )}
 
-                            <div className="polymarket-run-actions">
-                              {canBuildDecisionFeatures ? (
-                                <button
-                                  className="button light small"
-                                  type="button"
-                                  onClick={() => handleOpenFeaturesModal(run.run_id)}
-                                  disabled={
-                                    isBuildingFeatures ||
-                                    isRunning ||
-                                    anyJobRunning ||
-                                    isFeaturesBuildRunning
-                                  }
-                                  title={
-                                    "Build decision features for this run."
-                                  }
-                                >
-                                  {isBuildingFeatures
-                                    ? "Building features..."
-                                    : "Build decision features"}
-                                </button>
-                              ) : null}
-                              {!run.is_active ? (
-                                <button
-                                  className="button light small"
-                                  type="button"
-                                  onClick={() => handleSetActive(run.run_id)}
-                                  title="Set as active run"
-                                >
-                                  Activate
-                                </button>
-                              ) : null}
+                          <div className="polymarket-run-actions">
+                            {canBuildDecisionFeatures ? (
                               <button
                                 className="button light small"
                                 type="button"
-                                onClick={() => handleStartRename(run.run_id, displayLabel)}
-                                disabled={isRenaming || renameLoading}
-                                title="Rename run"
+                                onClick={() => handleOpenFeaturesModal(run.run_id)}
+                                disabled={
+                                  isBuildingFeatures ||
+                                  isRunning ||
+                                  anyJobRunning ||
+                                  isFeaturesBuildRunning
+                                }
+                                title="Build decision features for this run."
                               >
-                                Rename run
+                                {isBuildingFeatures
+                                  ? "Building features..."
+                                  : "Build decision features"}
                               </button>
-                              {!run.is_active ? (
-                                <button
-                                  className="button ghost danger small"
-                                  type="button"
-                                  onClick={() => {
-                                    setDeleteTarget(run.run_id);
-                                    setDeleteConfirmText("");
-                                  }}
-                                  title="Delete run"
-                                >
-                                  Delete
-                                </button>
-                              ) : null}
-                            </div>
+                            ) : null}
+                            {!run.is_active ? (
+                              <button
+                                className="button light small"
+                                type="button"
+                                onClick={() => handleSetActive(run.run_id)}
+                                title="Set as active run"
+                              >
+                                Activate
+                              </button>
+                            ) : null}
+                            <button
+                              className="button light small"
+                              type="button"
+                              onClick={() => handleStartRename(run.run_id, displayLabel)}
+                              disabled={isRenaming || renameLoading}
+                              title="Rename dataset"
+                            >
+                              Rename dataset
+                            </button>
+                            <button
+                              className="button ghost danger small"
+                              type="button"
+                              onClick={() => {
+                                setDeleteTarget(run.run_id);
+                                setDeleteConfirmText("");
+                              }}
+                              disabled={run.is_active}
+                              title={
+                                run.is_active
+                                  ? "Set another run active before deleting this dataset."
+                                  : "Delete dataset"
+                              }
+                            >
+                              Delete dataset
+                            </button>
                           </div>
 
                           {hasDrawerContent ? (

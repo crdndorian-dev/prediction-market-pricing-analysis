@@ -133,6 +133,10 @@
   gap: var(--space-8);
 }
 
+.app-main.app-main-wide {
+  max-width: min(1600px, calc(100vw - (var(--layout-edge) * 2)));
+}
+
 .page {
   width: 100%;
   display: flex;

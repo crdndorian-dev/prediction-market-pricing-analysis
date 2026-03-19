@@ -371,12 +371,39 @@ def _build_momentum_1d(bars_1h: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _normalize_market_id_values(values: pd.Series) -> pd.Series:
+    normalized = values.astype(str).str.strip()
+    return normalized.replace({"": pd.NA, "nan": pd.NA, "None": pd.NA, "<NA>": pd.NA})
+
+
+def _coalesce_prefer_existing(df: pd.DataFrame, column: str) -> pd.DataFrame:
+    dim_column = f"{column}_dim"
+    if dim_column not in df.columns:
+        return df
+    if column in df.columns:
+        df[column] = df[column].where(df[column].notna(), df[dim_column])
+        return df.drop(columns=[dim_column])
+    return df.rename(columns={dim_column: column})
+
+
 def _attach_dim_market(base: pd.DataFrame, dim_market: pd.DataFrame) -> pd.DataFrame:
+    if base.empty:
+        return base
+
+    base = base.copy()
+    base["market_id"] = _normalize_market_id_values(base["market_id"])
+
     dim = dim_market.copy()
-    dim["ticker"] = dim["ticker"].astype(str).str.upper()
-    dim["threshold"] = dim["threshold"].apply(normalize_threshold)
-    dim["expiry_date_utc"] = pd.to_datetime(dim["expiry_date_utc"], utc=True, errors="coerce")
-    dim["resolution_time_utc"] = pd.to_datetime(dim["resolution_time_utc"], utc=True, errors="coerce")
+    dim["market_id"] = _normalize_market_id_values(dim["market_id"])
+    if "ticker" in dim.columns:
+        dim["ticker"] = dim["ticker"].astype(str).str.upper()
+        dim["ticker"] = dim["ticker"].replace({"": pd.NA, "NAN": pd.NA, "NONE": pd.NA, "<NA>": pd.NA})
+    if "threshold" in dim.columns:
+        dim["threshold"] = dim["threshold"].apply(normalize_threshold)
+    if "expiry_date_utc" in dim.columns:
+        dim["expiry_date_utc"] = pd.to_datetime(dim["expiry_date_utc"], utc=True, errors="coerce")
+    if "resolution_time_utc" in dim.columns:
+        dim["resolution_time_utc"] = pd.to_datetime(dim["resolution_time_utc"], utc=True, errors="coerce")
 
     keep_cols = [
         "market_id",
@@ -387,9 +414,54 @@ def _attach_dim_market(base: pd.DataFrame, dim_market: pd.DataFrame) -> pd.DataF
         "resolution_time_utc",
     ]
     dim = dim[[c for c in keep_cols if c in dim.columns]]
+    dim = dim.dropna(subset=["market_id"]).drop_duplicates(subset=["market_id"], keep="last")
 
-    merged = base.merge(dim, on="market_id", how="left")
-    merged["expiry_date"] = merged["expiry_date_utc"].dt.date
+    merged = base.merge(dim, on="market_id", how="left", suffixes=("", "_dim"))
+    for column in ("condition_id", "ticker", "threshold", "expiry_date_utc", "resolution_time_utc"):
+        merged = _coalesce_prefer_existing(merged, column)
+
+    if "ticker" in merged.columns:
+        merged["ticker"] = merged["ticker"].astype(str).str.upper()
+        merged["ticker"] = merged["ticker"].replace({"": pd.NA, "NAN": pd.NA, "NONE": pd.NA, "<NA>": pd.NA})
+    if "threshold" in merged.columns:
+        merged["threshold"] = merged["threshold"].apply(normalize_threshold)
+    if "expiry_date_utc" in merged.columns:
+        merged["expiry_date_utc"] = pd.to_datetime(merged["expiry_date_utc"], utc=True, errors="coerce")
+    if "resolution_time_utc" in merged.columns:
+        merged["resolution_time_utc"] = pd.to_datetime(merged["resolution_time_utc"], utc=True, errors="coerce")
+    else:
+        merged["resolution_time_utc"] = pd.to_datetime(pd.Series(pd.NaT, index=merged.index), utc=True)
+
+    if "week_friday" in merged.columns:
+        week_friday = pd.to_datetime(merged["week_friday"], errors="coerce")
+        week_friday_resolution = (week_friday + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)).dt.tz_localize("UTC")
+        merged["resolution_time_utc"] = merged["resolution_time_utc"].where(
+            merged["resolution_time_utc"].notna(),
+            week_friday_resolution,
+        )
+
+    expiry_ts: Optional[pd.Series] = None
+    if "expiry_date_utc" in merged.columns:
+        expiry_ts = pd.to_datetime(merged["expiry_date_utc"], utc=True, errors="coerce")
+    if "resolution_time_utc" in merged.columns:
+        resolution_ts = pd.to_datetime(merged["resolution_time_utc"], utc=True, errors="coerce")
+        expiry_ts = resolution_ts if expiry_ts is None else expiry_ts.combine_first(resolution_ts)
+    if "week_friday" in merged.columns:
+        week_friday_expiry = pd.to_datetime(merged["week_friday"], errors="coerce").dt.tz_localize("UTC")
+        expiry_ts = week_friday_expiry if expiry_ts is None else expiry_ts.combine_first(week_friday_expiry)
+    merged["expiry_date"] = expiry_ts.dt.date if expiry_ts is not None else pd.NaT
+
+    required_cols = ("market_id", "ticker", "threshold", "expiry_date")
+    valid_mask = pd.Series(True, index=merged.index)
+    for column in required_cols:
+        if column in merged.columns:
+            valid_mask &= merged[column].notna()
+        else:
+            valid_mask &= False
+    dropped = int((~valid_mask).sum())
+    if dropped:
+        print(f"[features] Dropping {dropped} rows with incomplete market metadata after dim attach.")
+        merged = merged.loc[valid_mask].copy()
 
     return merged
 

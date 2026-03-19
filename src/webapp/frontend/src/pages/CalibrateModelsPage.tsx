@@ -7,6 +7,7 @@ import {
   type FormEvent,
 } from "react";
 import katex from "katex";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 
 import {
   cancelCalibrationJob,
@@ -36,17 +37,29 @@ import {
   type ModelRunSummary,
   type RegimePreviewResponse,
   type SelectableFeatureDescriptor,
+  type StataDiagnosticsPayload,
   type WeightingPreviewResponse,
 } from "../api/calibrateModels";
 import PipelineStatusCard from "../components/PipelineStatusCard";
 import PipelineProgressBar from "../components/PipelineProgressBar";
+import {
+  CalibrationCurveCard,
+  StataDiagnosticsPanel,
+  isStataDiagnosticsPayload,
+} from "../components/StataDiagnosticsPanel";
 import { useCalibrationJob } from "../contexts/calibrationJob";
 import { useAnyJobRunning } from "../contexts/jobGuard";
-import { CalibrateDocContent } from "./DocumentationContent";
+import {
+  buildRetiredFeatureNotice,
+  coerceWarningList,
+  findDiagnosticsSkipWarning,
+  stripRetiredFeatureSelections,
+} from "./calibrateFeaturePolicy";
+import { buildModelInspectorArtifactState } from "./calibrateModelInspector";
 import "katex/dist/katex.min.css";
 import "./CalibrateModelsPage.css";
 
-type WorkspaceTab = "run_job" | "models" | "documentation";
+type WorkspaceTab = "run_job" | "models";
 type RunJobPanel = "configuration" | "active_run";
 type RunMode = "manual" | "auto";
 type SplitStrategy = "walk_forward" | "single_holdout";
@@ -129,11 +142,6 @@ type CalibrateFormState = {
   autoOuterMaxWorstDelta: string;
 };
 
-type ModelCompareSelection = {
-  left: string | null;
-  right: string | null;
-};
-
 type RecommendedSplitFields = {
   splitStrategy: SplitStrategy;
   windowMode: WindowMode;
@@ -149,6 +157,7 @@ type RecommendedSplitFields = {
 
 const STORAGE_KEY = "polyedgetool.calibrate.v2.form";
 const LAST_RESULT_KEY = "polyedgetool.calibrate.v2.last_result";
+const PENDING_RUN_AGAIN_CONFIG_KEY = "polyedgetool.calibrate.v2.pendingRunAgainConfig";
 
 const DEFAULT_WEEK_COL = "week_friday";
 const DEFAULT_TICKER_COL = "ticker";
@@ -210,6 +219,48 @@ const DEFAULT_SELECTED_FEATURES = [
 const defaultModelName = () => {
   const stamp = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15);
   return `calibration-${stamp}`;
+};
+
+const parseWorkspaceTab = (search: string): WorkspaceTab => {
+  const params = new URLSearchParams(search);
+  return params.get("tab") === "models" ? "models" : "run_job";
+};
+
+const buildCalibrateTabHref = (tab: WorkspaceTab): string =>
+  tab === "models" ? "/calibrate?tab=models" : "/calibrate";
+
+const buildCalibrationModelDetailHref = (modelId: string): string =>
+  `/calibrate/models/${encodeURIComponent(modelId)}`;
+
+const loadPendingRunAgainConfig = (): Record<string, unknown> | null => {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = sessionStorage.getItem(PENDING_RUN_AGAIN_CONFIG_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // ignore storage failures
+  }
+  return null;
+};
+
+const storePendingRunAgainConfig = (config: Record<string, unknown>) => {
+  try {
+    sessionStorage.setItem(PENDING_RUN_AGAIN_CONFIG_KEY, JSON.stringify(config));
+  } catch {
+    // ignore storage failures
+  }
+};
+
+const clearPendingRunAgainConfig = () => {
+  try {
+    sessionStorage.removeItem(PENDING_RUN_AGAIN_CONFIG_KEY);
+  } catch {
+    // ignore storage failures
+  }
 };
 
 const resolveBootstrapGroupValue = (
@@ -631,8 +682,11 @@ const recommendSplitConfig = ({
 };
 
 const ARTIFACT_DESCRIPTIONS: Record<string, string> = {
+  "diagnostics_table.json": "Informational shadow-model diagnostics and inferential tables.",
   "metrics.csv": "Split metrics for baseline vs model with deltas and confidence intervals.",
   "metrics_summary.json": "Summary metrics across validation and test splits.",
+  "coefficient_diagnostics.csv": "Coefficient diagnostics with inferential statistics from the shadow GLM.",
+  "marginal_effects.csv": "Average marginal effects table from the shadow GLM.",
   "split_timeline.json": "Walk-forward fold timeline and embargoed spans.",
   "fold_deltas.csv": "Per-fold delta metrics for validation windows.",
   "group_delta_distribution.csv": "Distribution of per-group delta logloss in test split.",
@@ -662,8 +716,11 @@ const ARTIFACT_DESCRIPTIONS: Record<string, string> = {
 };
 
 const ARTIFACT_TITLES: Record<string, string> = {
+  "diagnostics_table.json": "Inferred model diagnostics",
   "metrics.csv": "Metrics",
   "metrics_summary.json": "Metrics Summary",
+  "coefficient_diagnostics.csv": "Coefficient Diagnostics",
+  "marginal_effects.csv": "Marginal Effects",
   "split_timeline.json": "Split Timeline",
   "fold_deltas.csv": "Fold Delta",
   "group_delta_distribution.csv": "Group Delta Distribution",
@@ -694,10 +751,20 @@ const ARTIFACT_TITLES: Record<string, string> = {
   "trial_result.json": "Trial Result",
 };
 
-const HIDDEN_ARTIFACT_NAMES = new Set<string>(["auto_search_no_viable.json"]);
+const INFERRED_DIAGNOSTICS_DISCLAIMER =
+  "Informational only: these inferred statistics come from a shadow statistical model, not from the production ML model optimized for logloss.";
 
-const DEFAULT_ARTIFACT_FILE_NAME = "metrics.csv";
+const HIDDEN_ARTIFACT_NAMES = new Set<string>(["auto_search_no_viable.json"]);
 const DEFAULT_CHART_WIDTH = 960;
+const GENERAL_EQUATION_NOTE_PREFIXES = [
+  "displayed coefficients are the base logistic layer;",
+  "base logistic layer is fit with sklearn logisticregression",
+  "compact equation uses ticker-dependent placeholder terms;",
+  "equation is shown in transformed model basis",
+  "categorical one-hot encoding uses drop-first reference levels",
+  "stage b final probabilities may apply an additional platt calibration transform",
+  "stage b logistic layer uses sklearn logisticregression",
+] as const;
 
 const fileBaseName = (path: string | null | undefined): string => {
   if (!path) return "";
@@ -707,9 +774,6 @@ const fileBaseName = (path: string | null | undefined): string => {
 };
 
 const artifactFilePath = (file: ModelFileSummary): string => file.relative_path ?? file.name;
-
-const isDefaultArtifactFile = (file: ModelFileSummary | null | undefined): boolean =>
-  !!file && fileBaseName(artifactFilePath(file)) === DEFAULT_ARTIFACT_FILE_NAME;
 
 const humanizeLabel = (value: string): string =>
   value
@@ -721,6 +785,14 @@ const humanizeLabel = (value: string): string =>
 const isHiddenArtifactPath = (path: string | null | undefined): boolean =>
   HIDDEN_ARTIFACT_NAMES.has(fileBaseName(path));
 
+const normalizeNote = (value: string): string =>
+  value.trim().replace(/\s+/g, " ").toLowerCase();
+
+const isGeneralEquationNote = (note: string): boolean => {
+  const normalized = normalizeNote(note);
+  return GENERAL_EQUATION_NOTE_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+};
+
 const artifactDisplayTitle = (path: string | null | undefined): string => {
   const base = fileBaseName(path);
   if (!base) return "Artifact";
@@ -730,6 +802,27 @@ const artifactDisplayTitle = (path: string | null | undefined): string => {
 
 const formatFileSizeLabel = (sizeBytes: number): string =>
   sizeBytes < 1024 ? `${sizeBytes} B` : `${(sizeBytes / 1024).toFixed(1)} KB`;
+
+const compactMetaLine = (...values: Array<string | null | undefined>): string => {
+  const visible = values
+    .map((value) => value?.trim())
+    .filter((value): value is string => Boolean(value));
+  return visible.join(" • ");
+};
+
+const formatModelRange = (
+  start?: string | null,
+  end?: string | null,
+): string =>
+  start && end ? `${start} → ${end}` : "--";
+
+const formatModelListMeta = (model: ModelRunSummary): string =>
+  compactMetaLine(
+    model.dataset_id ?? "--",
+    `split=${model.split_strategy ?? "--"}`,
+    `C=${model.c_value != null ? formatMaybe(model.c_value) : "--"}`,
+    `calib=${model.calibration_method ?? "--"}`,
+  );
 
 const isProbablyNumeric = (value: string): boolean => {
   const trimmed = value.trim();
@@ -878,6 +971,7 @@ const ArtifactFileButton = ({
   meta,
   isActive = false,
   disabled = false,
+  className,
   onClick,
 }: {
   titlePath: string;
@@ -885,11 +979,12 @@ const ArtifactFileButton = ({
   meta: string;
   isActive?: boolean;
   disabled?: boolean;
+  className?: string;
   onClick: () => void;
 }) => (
   <button
     type="button"
-    className={`file-item ${isActive ? "active" : ""}`}
+    className={`file-item${className ? ` ${className}` : ""}${isActive ? " active" : ""}`}
     onClick={onClick}
     disabled={disabled}
   >
@@ -1058,7 +1153,10 @@ const JsonSectionView = ({
 
 const EquationNotes = ({ spec }: { spec?: ModelDetailResponse["model_equation_spec"] | null }) => {
   const notes = Array.isArray(spec?.notes)
-    ? spec.notes.filter((note): note is string => typeof note === "string" && note.trim().length > 0)
+    ? spec.notes.filter(
+        (note): note is string =>
+          typeof note === "string" && note.trim().length > 0 && !isGeneralEquationNote(note),
+      )
     : [];
   if (!notes.length) return null;
   return (
@@ -1800,17 +1898,6 @@ const describeAutoSelection = ({
   return "No selected model";
 };
 
-const formatThresholdValue = (value: unknown): string => {
-  const numeric = toNumber(value);
-  if (numeric != null) return formatChartNumber(numeric);
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (value == null) return "--";
-  const text = String(value).trim();
-  return text || "--";
-};
-
-const METRIC_INTERPRETATION_COPY = "Val metrics are pooled across all validation folds. Fold acceptance uses fold-level deltas from fold_deltas.csv.";
-
 const formatTimestamp = (value?: string | null): string => {
   if (!value) return "Unknown";
   const date = new Date(value);
@@ -1824,93 +1911,12 @@ const formatTimestamp = (value?: string | null): string => {
   });
 };
 
-const AutoSelectionSummaryCard = ({
-  summary,
-  validationFolds,
-}: {
-  summary: NonNullable<ModelDetailResponse["auto_selection_summary"]>;
-  validationFolds: number | null;
-}) => {
-  const reasons = Array.isArray(summary.no_viable_reasons)
-    ? summary.no_viable_reasons.filter((reason): reason is string => typeof reason === "string" && reason.trim().length > 0)
-    : [];
-  const acceptanceEntries = Object.entries(summary.acceptance ?? {}).filter(([, value]) => value != null);
-  const outerEntries = Object.entries(summary.outer_cv ?? {}).filter(([, value]) => value != null);
-  const foldGate = summary.fold_gate_summary ?? null;
-  const showPooledNote = (validationFolds ?? 0) > 1;
-
-  return (
-    <div className="auto-selection-summary-card">
-      <div className="auto-selection-summary-header">
-        <span className="meta-label">Auto-selection status</span>
-        <span className={`status-pill ${summary.status === "selected" ? "success" : "failed"}`}>
-          {autoStatusPillLabel(summary.status)}
-        </span>
-      </div>
-      <div className="auto-selection-summary-copy">
-        {describeAutoSelection({
-          status: summary.status,
-          selectedTrialId: summary.selected_trial_id,
-          hasSelectedModel: summary.has_selected_model,
-        })}
-      </div>
-      {showPooledNote ? (
-        <div className="auto-selection-summary-note">{METRIC_INTERPRETATION_COPY}</div>
-      ) : null}
-      {foldGate && foldGate.n_folds != null ? (
-        <div className="auto-selection-summary-note">
-          Acceptance gates: {foldGate.improved_folds ?? 0}/{foldGate.n_folds} folds improved, worst fold delta{" "}
-          {formatMetricValue(foldGate.worst_delta_logloss)}.
-        </div>
-      ) : null}
-      {reasons.length ? (
-        <div className="auto-selection-summary-section">
-          <span className="meta-label">Rejection reasons</span>
-          <ul className="auto-selection-summary-list">
-            {reasons.map((reason) => (
-              <li key={reason}>{reason}</li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      {acceptanceEntries.length ? (
-        <div className="auto-selection-summary-section">
-          <span className="meta-label">Acceptance thresholds</span>
-          <div className="auto-selection-threshold-grid">
-            {acceptanceEntries.map(([key, value]) => (
-              <div key={key} className="auto-selection-threshold-item">
-                <span className="meta-label">{humanizeLabel(key)}</span>
-                <span>{formatThresholdValue(value)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
-      {outerEntries.length && (summary.outer_cv?.enabled || outerEntries.some(([key]) => key.startsWith("outer"))) ? (
-        <div className="auto-selection-summary-section">
-          <span className="meta-label">Outer CV</span>
-          <div className="auto-selection-threshold-grid">
-            {outerEntries.map(([key, value]) => (
-              <div key={key} className="auto-selection-threshold-item">
-                <span className="meta-label">{humanizeLabel(key)}</span>
-                <span>{formatThresholdValue(value)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
-    </div>
-  );
-};
-
-const loadStoredForm = (): CalibrateFormState | null => {
+const loadStoredForm = (): { form: CalibrateFormState | null; notice: string | null } => {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
+    if (!raw) return { form: null, notice: null };
     const parsed = JSON.parse(raw) as Partial<CalibrateFormState>;
-    return {
-      ...defaultForm(),
-      ...parsed,
+    const sanitizedSelections = stripRetiredFeatureSelections({
       selectedFeatures: Array.isArray(parsed.selectedFeatures)
         ? parsed.selectedFeatures.filter((feature): feature is string => typeof feature === "string")
         : [...DEFAULT_SELECTED_FEATURES],
@@ -1919,9 +1925,21 @@ const loadStoredForm = (): CalibrateFormState | null => {
             (feature): feature is string => typeof feature === "string",
           )
         : [],
+    });
+    return {
+      form: {
+        ...defaultForm(),
+        ...parsed,
+        selectedFeatures: sanitizedSelections.selectedFeatures,
+        selectedCategoricalFeatures: sanitizedSelections.selectedCategoricalFeatures,
+      },
+      notice: buildRetiredFeatureNotice(
+        sanitizedSelections.removedFeatures,
+        "Stored selection",
+      ),
     };
   } catch {
-    return null;
+    return { form: null, notice: null };
   }
 };
 
@@ -2049,11 +2067,21 @@ const LatexBlock = ({ latex }: { latex: string }) => {
 const metricsOrder = ["val", "test", "val_pool"];
 
 export default function CalibrateModelsPage() {
-  const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>("run_job");
+  const location = useLocation();
+  const navigate = useNavigate();
+  const requestedWorkspaceTab = useMemo(
+    () => parseWorkspaceTab(location.search),
+    [location.search],
+  );
+  const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>(requestedWorkspaceTab);
   const [runJobPanel, setRunJobPanel] = useState<RunJobPanel>("configuration");
   const [activeLog, setActiveLog] = useState<"stdout" | "stderr">("stdout");
 
-  const [form, setForm] = useState<CalibrateFormState>(() => loadStoredForm() ?? defaultForm());
+  const [storedFormState] = useState(() => loadStoredForm());
+  const [pendingRunAgainConfig, setPendingRunAgainConfig] = useState<Record<string, unknown> | null>(
+    () => loadPendingRunAgainConfig(),
+  );
+  const [form, setForm] = useState<CalibrateFormState>(() => storedFormState.form ?? defaultForm());
   const [datasets, setDatasets] = useState<DatasetFileSummary[]>([]);
   const [datasetError, setDatasetError] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
@@ -2066,6 +2094,9 @@ export default function CalibrateModelsPage() {
   const [, setAvailableFeatureColumns] = useState<string[]>([]);
   const [selectableFeatures, setSelectableFeatures] = useState<SelectableFeatureDescriptor[]>([]);
   const [featureError, setFeatureError] = useState<string | null>(null);
+  const [featureRetirementNotice, setFeatureRetirementNotice] = useState<string | null>(
+    () => storedFormState.notice,
+  );
   const [featuresLoading, setFeaturesLoading] = useState(false);
 
   const [availableTickers, setAvailableTickers] = useState<string[]>([]);
@@ -2078,20 +2109,6 @@ export default function CalibrateModelsPage() {
 
   const [models, setModels] = useState<ModelRunSummary[]>([]);
   const [modelError, setModelError] = useState<string | null>(null);
-  const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
-  const [isModelDetailLoading, setIsModelDetailLoading] = useState(false);
-  const [modelDetail, setModelDetail] = useState<ModelDetailResponse | null>(null);
-  const [modelDetailError, setModelDetailError] = useState<string | null>(null);
-  const [modelFiles, setModelFiles] = useState<ModelFilesListResponse | null>(null);
-  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
-  const [fileContent, setFileContent] = useState<ModelFileContentResponse | null>(null);
-  const [fileError, setFileError] = useState<string | null>(null);
-  const [fileLoading, setFileLoading] = useState(false);
-  const [showRawFile, setShowRawFile] = useState(false);
-  const [modelCompare, setModelCompare] = useState<ModelCompareSelection>({ left: null, right: null });
-  const [deleteTarget, setDeleteTarget] = useState<ModelRunSummary | null>(null);
-  const [deleteConfirmText, setDeleteConfirmText] = useState("");
-  const [deleteLoading, setDeleteLoading] = useState(false);
   const [lastRunCiLevel, setLastRunCiLevel] = useState<90 | 95 | 99 | null>(null);
   const [splitRecommended, setSplitRecommended] = useState(false);
   const [splitRecommendationWarning, setSplitRecommendationWarning] = useState<string | null>(null);
@@ -2100,6 +2117,16 @@ export default function CalibrateModelsPage() {
 
   const { jobId, jobStatus, setJobId, setJobStatus } = useCalibrationJob();
   const { anyJobRunning, primaryJob, activeJobs } = useAnyJobRunning();
+
+  const handleWorkspaceTabChange = useCallback((nextTab: WorkspaceTab) => {
+    setWorkspaceTab(nextTab);
+    const nextSearch = nextTab === "models" ? "?tab=models" : "";
+    const nextHref = `/calibrate${nextSearch}`;
+    const currentHref = `${location.pathname}${location.search}`;
+    if (currentHref !== nextHref) {
+      navigate(nextHref, { replace: true });
+    }
+  }, [location.pathname, location.search, navigate]);
 
   const selectedDataset = useMemo(
     () => datasets.find((item) => item.path === form.datasetPath),
@@ -2215,6 +2242,8 @@ export default function CalibrateModelsPage() {
   }, [jobStatus?.progress, jobStatus?.status]);
 
   const metricsSummary = activeResult?.metrics_summary ?? null;
+  const activeStataDiagnostics = activeResult?.stata_diagnostics ?? null;
+  const activeDiagnosticsSkipWarning = findDiagnosticsSkipWarning(activeResult?.warnings ?? null);
   const splitRowCounts = activeResult?.split_row_counts ?? null;
   const splitGroupCounts = activeResult?.split_group_counts ?? null;
   const trainRows = splitRowCounts?.train_fit ?? splitRowCounts?.train ?? null;
@@ -2232,14 +2261,6 @@ export default function CalibrateModelsPage() {
     testGroups != null;
   const activeCiLevel = lastRunCiLevel ?? form.ciLevel;
   const ciLabel = activeCiLevel ? `CI (${activeCiLevel}%)` : "CI";
-  const modelDetailCiLevel = toNumber(
-    (modelDetail?.metadata as Record<string, unknown> | null | undefined)?.["ci_level"],
-  );
-  const modelCiLabel = modelDetailCiLevel ? `CI (${modelDetailCiLevel}%)` : "CI";
-  const modelDetailValidationFolds = toNumber(
-    (modelDetail?.metadata as Record<string, unknown> | null | undefined)?.["validation_folds"],
-  );
-  const autoSelectionSummary = modelDetail?.auto_selection_summary ?? null;
   const autoProgress = jobStatus?.mode === "auto" ? jobStatus.progress ?? null : null;
 
   const autoProgressLog = useMemo(() => {
@@ -2266,109 +2287,6 @@ export default function CalibrateModelsPage() {
     return lines.join("\n");
   }, [autoProgress]);
 
-  const groupedModelFiles = useMemo(() => {
-    const groups: Record<"selected_model" | "auto_search" | "legacy_root", ModelFileSummary[]> = {
-      selected_model: [],
-      auto_search: [],
-      legacy_root: [],
-    };
-    for (const file of modelFiles?.files ?? []) {
-      const section = file.section ?? "legacy_root";
-      if (section === "selected_model" || section === "auto_search") {
-        groups[section].push(file);
-      } else {
-        groups.legacy_root.push(file);
-      }
-    }
-    return groups;
-  }, [modelFiles]);
-  const defaultArtifactFile = useMemo(
-    () => (modelFiles?.files ?? []).find((file) => isDefaultArtifactFile(file) && file.is_viewable) ?? null,
-    [modelFiles],
-  );
-  const defaultArtifactPath = defaultArtifactFile ? artifactFilePath(defaultArtifactFile) : null;
-  const visibleGroupedModelFiles = useMemo(
-    () => ({
-      selected_model: groupedModelFiles.selected_model.filter(
-        (file) => !isDefaultArtifactFile(file) && !isHiddenArtifactPath(artifactFilePath(file)),
-      ),
-      auto_search: groupedModelFiles.auto_search.filter(
-        (file) => !isDefaultArtifactFile(file) && !isHiddenArtifactPath(artifactFilePath(file)),
-      ),
-      legacy_root: groupedModelFiles.legacy_root.filter(
-        (file) => !isDefaultArtifactFile(file) && !isHiddenArtifactPath(artifactFilePath(file)),
-      ),
-    }),
-    [groupedModelFiles],
-  );
-  const selectedArtifactName = fileBaseName(selectedFilePath ?? defaultArtifactPath);
-  const isShowingDefaultArtifact = Boolean(defaultArtifactPath && selectedFilePath === defaultArtifactPath);
-
-  const renderArtifactView = () => {
-    if (!selectedFilePath || !fileContent) return null;
-    if (showRawFile) {
-      return <pre className="file-content">{fileContent.content}</pre>;
-    }
-    const parsedJson = fileContent.content_type === "json" ? parseJsonContent(fileContent.content) : null;
-    const parsedCsv = fileContent.content_type === "csv" ? parseCsvContent(fileContent.content) : null;
-    const selectedName = fileBaseName(fileContent.relative_path ?? selectedFilePath);
-
-    switch (selectedName) {
-      case "metrics.csv":
-        return parsedCsv ? <MetricsCsvView parsed={parsedCsv} ciLabel={ciLabel} /> : <div className="empty">No metrics data.</div>;
-      case "metrics_summary.json":
-        return parsedJson ? <KeyValueGrid data={parsedJson} /> : <div className="empty">No summary data.</div>;
-      case "config.executed.json":
-      case "best_config.json":
-        return parsedJson ? (
-          <ConfigJsonView
-            data={parsedJson}
-            title={artifactDisplayTitle(selectedName)}
-            onRunAgain={() => handleRunAgainFromConfig(parsedJson)}
-          />
-        ) : <div className="empty">No config data.</div>;
-      case "metadata.json":
-      case "two_stage_metadata.json":
-        return parsedJson ? <MetadataView data={parsedJson} /> : <div className="empty">No metadata.</div>;
-      case "feature_manifest.json":
-        return parsedJson ? <FeatureManifestView data={parsedJson} /> : <div className="empty">No feature manifest.</div>;
-      case "audit_overlap.json":
-        return parsedJson ? <AuditOverlapView data={parsedJson} /> : <div className="empty">No overlap data.</div>;
-      case "audit_weight_distribution.json":
-        return parsedJson ? <AuditWeightView data={parsedJson} /> : <div className="empty">No weight audit.</div>;
-      case "audit_split_composition.csv":
-        return parsedCsv ? <SplitCompositionView parsed={parsedCsv} /> : <div className="empty">No split composition.</div>;
-      case "split_timeline.json":
-        return parsedJson ? <SplitTimelineView data={parsedJson} /> : <div className="empty">No timeline data.</div>;
-      case "fold_deltas.csv":
-        return parsedCsv ? <FoldDeltaView parsed={parsedCsv} /> : <div className="empty">No fold delta data.</div>;
-      case "group_delta_distribution.csv":
-        return parsedCsv ? <GroupDeltaDistributionView parsed={parsedCsv} /> : <div className="empty">No group delta data.</div>;
-      case "reliability_bins.csv":
-        return parsedCsv ? <ReliabilityView parsed={parsedCsv} /> : <div className="empty">No reliability bins.</div>;
-      case "rolling_summary.csv":
-        return parsedCsv ? <RollingSummaryView parsed={parsedCsv} /> : <div className="empty">No rolling summary.</div>;
-      case "rolling_windows.csv":
-      case "metrics_groups.csv":
-      case "leaderboard.csv":
-      case "auto_search_leaderboard.csv":
-      case "two_stage_metrics.csv":
-        return parsedCsv ? <CsvTableView parsed={parsedCsv} limit={50} /> : <div className="empty">No table data.</div>;
-      case "two_stage_metrics_summary.json":
-        return parsedJson ? <KeyValueGrid data={parsedJson} /> : <div className="empty">No summary data.</div>;
-      case "auto_search_summary.json":
-        return parsedJson ? <KeyValueGrid data={parsedJson} /> : <div className="empty">No summary data.</div>;
-      case "auto_search_progress.json":
-        return parsedJson ? <KeyValueGrid data={parsedJson} /> : <div className="empty">No progress data.</div>;
-      case "best_model_report.md":
-        return <ReportMarkdownView content={fileContent.content} />;
-      default:
-        if (parsedJson) return <KeyValueGrid data={parsedJson} />;
-        if (parsedCsv) return <CsvTableView parsed={parsedCsv} limit={50} />;
-        return <pre className="file-content">{fileContent.content}</pre>;
-    }
-  };
-
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(form));
@@ -2376,6 +2294,12 @@ export default function CalibrateModelsPage() {
       // ignore
     }
   }, [form]);
+
+  useEffect(() => {
+    if (workspaceTab !== requestedWorkspaceTab) {
+      setWorkspaceTab(requestedWorkspaceTab);
+    }
+  }, [requestedWorkspaceTab, workspaceTab]);
 
   useEffect(() => {
     lastRecommendedRef.current = null;
@@ -2434,7 +2358,6 @@ export default function CalibrateModelsPage() {
     }
     if (jobStatus) {
       setRunJobPanel("active_run");
-      setWorkspaceTab((prev) => (prev === "run_job" ? prev : prev));
     }
   }, [jobStatus]);
 
@@ -2515,10 +2438,6 @@ export default function CalibrateModelsPage() {
       setForm((prev) => ({ ...prev, selectionObjective: "logloss" }));
     }
   }, [form.runMode, form.selectionObjective]);
-
-  useEffect(() => {
-    setShowRawFile(false);
-  }, [selectedFilePath]);
 
   useEffect(() => {
     if (!selectedDatasetPath) {
@@ -3336,8 +3255,12 @@ export default function CalibrateModelsPage() {
         const relative = dataset.path.replace(/\\/g, "/");
         return csv === relative || csv.endsWith(relative);
       })?.path ?? csv;
-    const features = splitCsvValue(config.features).filter((feature) => feature !== BASE_FEATURE);
-    const categorical = splitCsvValue(config.categorical_features);
+    const retiredFeatureSelections = stripRetiredFeatureSelections({
+      selectedFeatures: splitCsvValue(config.features).filter((feature) => feature !== BASE_FEATURE),
+      selectedCategoricalFeatures: splitCsvValue(config.categorical_features),
+    });
+    const features = retiredFeatureSelections.selectedFeatures;
+    const categorical = retiredFeatureSelections.selectedCategoricalFeatures;
     const cGrid =
       typeof regularization.c_grid === "string"
         ? regularization.c_grid
@@ -3349,9 +3272,12 @@ export default function CalibrateModelsPage() {
       "custom";
     const ciLevelValue = toNumber(bootstrap.ci_level);
     const nextModelName =
-      sanitizeModelDirName(selectedModelId ? `${selectedModelId}-rerun` : defaultModelName()) || defaultModelName();
+      sanitizeModelDirName(defaultModelName()) || defaultModelName();
     const shouldSanitizeLoadedFeatures =
       matchedDataset === selectedDatasetPath && selectableFeatures.length > 0;
+    setFeatureRetirementNotice(
+      buildRetiredFeatureNotice(retiredFeatureSelections.removedFeatures, "Loaded config"),
+    );
 
     setForm((prev) => ({
       ...prev,
@@ -3454,152 +3380,26 @@ export default function CalibrateModelsPage() {
     }));
     setRunError(null);
     setCancelError(null);
-    setWorkspaceTab("run_job");
+    handleWorkspaceTabChange("run_job");
     setRunJobPanel("configuration");
   }, [
     categoricalFeatureOrderIndex,
     datasets,
     featureOrderIndex,
+    handleWorkspaceTabChange,
     mutexGroupByFeature,
     selectableCategoricalSet,
     selectableFeatureSet,
     selectableFeatures.length,
     selectedDatasetPath,
-    selectedModelId,
   ]);
 
-  const openModelFile = useCallback(async (
-    modelId: string,
-    file: ModelFileSummary,
-    options?: { allowToggle?: boolean },
-  ) => {
-    const targetPath = artifactFilePath(file);
-    if (!targetPath) return;
-    const allowToggle = options?.allowToggle ?? true;
-    if (allowToggle && selectedFilePath === targetPath) {
-      setSelectedFilePath(null);
-      setFileContent(null);
-      setFileError(null);
-      return;
-    }
-    setSelectedFilePath(targetPath);
-    setFileLoading(true);
-    setFileError(null);
-    try {
-      const content = file.relative_path
-        ? await fetchModelFileContentByPath(modelId, file.relative_path)
-        : await fetchModelFileContent(modelId, file.name);
-      setFileContent(content);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to read file.";
-      setFileError(message);
-      setFileContent(null);
-    } finally {
-      setFileLoading(false);
-    }
-  }, [selectedFilePath]);
-
-  const handleSelectModel = useCallback(async (modelId: string) => {
-    if (selectedModelId === modelId) {
-      setSelectedModelId(null);
-      setModelDetail(null);
-      setModelFiles(null);
-      setSelectedFilePath(null);
-      setFileContent(null);
-      setModelDetailError(null);
-      setFileError(null);
-      return;
-    }
-
-    setSelectedModelId(modelId);
-    setIsModelDetailLoading(true);
-    setModelDetailError(null);
-    setFileError(null);
-    setSelectedFilePath(null);
-    setFileContent(null);
-
-    try {
-      const [detail, files] = await Promise.all([
-        fetchCalibrationModelDetail(modelId),
-        fetchModelFiles(modelId),
-      ]);
-      setModelDetail(detail);
-      setModelFiles(files);
-      const defaultArtifact = files.files.find(
-        (file) => isDefaultArtifactFile(file) && file.is_viewable,
-      );
-      if (defaultArtifact) {
-        await openModelFile(modelId, defaultArtifact, { allowToggle: false });
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to load model detail.";
-      setModelDetailError(message);
-      setModelDetail(null);
-      setModelFiles(null);
-      setSelectedFilePath(null);
-      setFileContent(null);
-    } finally {
-      setIsModelDetailLoading(false);
-    }
-  }, [openModelFile, selectedModelId]);
-
-  const handleOpenFile = useCallback(async (file: ModelFileSummary) => {
-    if (!selectedModelId) return;
-    await openModelFile(selectedModelId, file);
-  }, [openModelFile, selectedModelId]);
-
-  const handleRenameModel = useCallback(async (modelId: string) => {
-    const next = window.prompt("New model name", modelId);
-    if (!next) return;
-    const cleaned = sanitizeModelDirName(next);
-    if (!cleaned) {
-      setModelError("Invalid model name.");
-      return;
-    }
-    try {
-      await renameCalibrationModel(modelId, cleaned);
-      refreshModels();
-      if (selectedModelId === modelId) {
-        setSelectedModelId(cleaned);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Rename failed.";
-      setModelError(message);
-    }
-  }, [refreshModels, selectedModelId]);
-
-  const handleDeleteModel = useCallback(async () => {
-    if (!deleteTarget || deleteConfirmText !== "DELETE") return;
-    setDeleteLoading(true);
-    try {
-      await deleteCalibrationModel(deleteTarget.id);
-      if (selectedModelId === deleteTarget.id) {
-        setSelectedModelId(null);
-        setModelDetail(null);
-        setModelFiles(null);
-        setSelectedFilePath(null);
-        setFileContent(null);
-      }
-      setDeleteTarget(null);
-      setDeleteConfirmText("");
-      refreshModels();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Delete failed.";
-      setModelError(message);
-    } finally {
-      setDeleteLoading(false);
-    }
-  }, [deleteConfirmText, deleteTarget, refreshModels, selectedModelId]);
-
-  const compareLeft = useMemo(
-    () => models.find((model) => model.id === modelCompare.left) ?? null,
-    [models, modelCompare.left],
-  );
-
-  const compareRight = useMemo(
-    () => models.find((model) => model.id === modelCompare.right) ?? null,
-    [models, modelCompare.right],
-  );
+  useEffect(() => {
+    if (!pendingRunAgainConfig || datasets.length === 0) return;
+    handleRunAgainFromConfig(pendingRunAgainConfig);
+    clearPendingRunAgainConfig();
+    setPendingRunAgainConfig(null);
+  }, [datasets.length, handleRunAgainFromConfig, pendingRunAgainConfig]);
 
   const selectedFeatureList = useMemo(
     () =>
@@ -3624,6 +3424,7 @@ export default function CalibrateModelsPage() {
 
   const handleToggleFeature = useCallback((feature: string) => {
     if (!selectableFeatureSet.has(feature)) return;
+    setFeatureRetirementNotice(null);
     setForm((prev) => {
       const next = normalizeFeatureSelection(
         prev.selectedFeatures,
@@ -3655,6 +3456,7 @@ export default function CalibrateModelsPage() {
 
   const handleToggleCategoricalFeature = useCallback((feature: string) => {
     if (!selectableCategoricalSet.has(feature)) return;
+    setFeatureRetirementNotice(null);
     setForm((prev) => {
       const next = new Set(
         normalizeCategoricalSelection(
@@ -3680,6 +3482,7 @@ export default function CalibrateModelsPage() {
   }, [categoricalFeatureOrderIndex, selectableCategoricalSet]);
 
   const handleSelectRecommendedFeatures = useCallback(() => {
+    setFeatureRetirementNotice(null);
     setForm((prev) => ({
       ...prev,
       selectedFeatures: defaultSelectableFeatures,
@@ -3692,6 +3495,7 @@ export default function CalibrateModelsPage() {
   }, [categoricalFeatureOrderIndex, defaultSelectableFeatures, selectableCategoricalSet]);
 
   const handleClearOptionalFeatures = useCallback(() => {
+    setFeatureRetirementNotice(null);
     setForm((prev) => ({ ...prev, selectedFeatures: [], selectedCategoricalFeatures: [] }));
   }, []);
 
@@ -3715,7 +3519,7 @@ export default function CalibrateModelsPage() {
             role="tab"
             aria-selected={workspaceTab === "run_job"}
             className={`calibrate-workspace-tab ${workspaceTab === "run_job" ? "active" : ""}`}
-            onClick={() => setWorkspaceTab("run_job")}
+            onClick={() => handleWorkspaceTabChange("run_job")}
           >
             Run Job
           </button>
@@ -3724,18 +3528,9 @@ export default function CalibrateModelsPage() {
             role="tab"
             aria-selected={workspaceTab === "models"}
             className={`calibrate-workspace-tab ${workspaceTab === "models" ? "active" : ""}`}
-            onClick={() => setWorkspaceTab("models")}
+            onClick={() => handleWorkspaceTabChange("models")}
           >
             Models
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={workspaceTab === "documentation"}
-            className={`calibrate-workspace-tab ${workspaceTab === "documentation" ? "active" : ""}`}
-            onClick={() => setWorkspaceTab("documentation")}
-          >
-            Documentation
           </button>
         </div>
 
@@ -4313,6 +4108,7 @@ export default function CalibrateModelsPage() {
                             </div>
                             {featuresLoading ? <div className="empty">Loading feature options…</div> : null}
                             {featureError ? <div className="error">{featureError}</div> : null}
+                            {featureRetirementNotice ? <div className="warning">{featureRetirementNotice}</div> : null}
                             <div className="feature-category-grid">
                               {featureCategoryOptions.map((category) => (
                                 <div key={category.title} className="feature-category-card">
@@ -4919,7 +4715,7 @@ export default function CalibrateModelsPage() {
                   {cancelError ? <div className="error">{cancelError}</div> : null}
                   {jobStatus ? (
                     <div className="calibrate-active-shell">
-                      <aside className="calibrate-active-sidebar">
+                      <div className="calibrate-active-summary">
                         <div className="run-summary calibrate-run-summary-card">
                           <div className="run-summary-header">
                             <div>
@@ -4966,7 +4762,7 @@ export default function CalibrateModelsPage() {
                             <div className="warning">{activeResult.warnings.join(" ")}</div>
                           ) : null}
                         </div>
-                      </aside>
+                      </div>
 
                       <div className="calibrate-active-main">
                         <div className="run-output">
@@ -5045,10 +4841,14 @@ export default function CalibrateModelsPage() {
                           </div>
                         ) : null}
 
+                        {isJobComplete && !activeStataDiagnostics && activeDiagnosticsSkipWarning ? (
+                          <div className="warning">{activeDiagnosticsSkipWarning}</div>
+                        ) : null}
+
                         {isJobComplete && metricsSummary ? (
                           <div className="metrics-summary">
                             <div className="metrics-summary-header">
-                              <span className="meta-label">Metrics summary</span>
+                              <span className="meta-label">Model performance</span>
                               <span className="metrics-summary-note">
                                 Delta values are model minus baseline.
                               </span>
@@ -5185,8 +4985,7 @@ export default function CalibrateModelsPage() {
                                         if (!activeResult.out_dir) return;
                                         const modelId = activeResult.out_dir.split("/").pop() || "";
                                         if (modelId) {
-                                          void handleSelectModel(modelId);
-                                          setWorkspaceTab("models");
+                                          navigate(buildCalibrationModelDetailHref(modelId));
                                         }
                                       }}
                                     />
@@ -5234,526 +5033,771 @@ export default function CalibrateModelsPage() {
                 {models.length === 0 ? (
                   <div className="empty">No models found in the selected model directory.</div>
                 ) : (
-                  <div className="calibrate-model-list">
+                  <div className="model-directory-list model-directory-list-standalone">
                     {models.map((model) => {
-                      const selected = selectedModelId === model.id;
                       const isAutoRun = model.run_type === "auto";
                       const autoStatus = model.auto_status ?? (model.has_selected_model ? "selected" : null);
-                      const autoSelectionText = describeAutoSelection({
-                        status: autoStatus,
-                        selectedTrialId: model.selected_trial_id,
-                        hasSelectedModel: model.has_selected_model,
-                      });
                       return (
-                        <article key={model.id} className={`model-card ${selected ? "active" : ""}`}>
+                        <article key={model.id} className="model-list-item">
                           <button
                             type="button"
-                            className="model-toggle"
-                            onClick={() => void handleSelectModel(model.id)}
+                            className="model-list-button"
+                            onClick={() => navigate(buildCalibrationModelDetailHref(model.id))}
                           >
-                            <div>
-                              <div className="model-title-row">
-                                <span className="model-title">{model.id}</span>
-                                <span className={`status-pill run-type-pill ${isAutoRun ? "running" : "idle"}`}>
-                                  {isAutoRun ? "AUTO" : "MANUAL"}
-                                </span>
-                                <span className={`status-pill ${model.has_metrics ? "success" : "idle"}`}>
-                                  {model.has_metrics ? "metrics" : "no metrics"}
-                                </span>
-                                {model.is_two_stage ? (
-                                  <span className="status-pill running">two-stage</span>
-                                ) : null}
-                                {isAutoRun && autoStatus ? (
-                                  <span
-                                    className={`status-pill ${
-                                      autoStatus === "selected" ? "success" : autoStatus === "no_viable_model" ? "failed" : "idle"
-                                    }`}
-                                  >
-                                    {autoStatusPillLabel(autoStatus)}
-                                  </span>
-                                ) : null}
-                              </div>
-                              <div className="model-meta-grid">
-                                <div>
-                                  <span className="meta-label">Updated</span>
-                                  <span>{formatTimestamp(model.last_modified)}</span>
-                                </div>
-                                <div>
-                                  <span className="meta-label">Dataset</span>
-                                  <span>{model.dataset_id ?? "--"}</span>
-                                </div>
-                                <div>
-                                  <span className="meta-label">Range</span>
-                                  <span>
-                                    {model.train_date_start && model.train_date_end
-                                      ? `${model.train_date_start} to ${model.train_date_end}`
-                                      : "--"}
-                                  </span>
-                                </div>
-                                <div>
-                                  <span className="meta-label">Tickers/DOW</span>
-                                  <span>{model.tickers_summary ?? model.dow_regime ?? "--"}</span>
-                                </div>
-                                <div>
-                                  <span className="meta-label">Hyperparams</span>
-                                  <span>
-                                    split={model.split_strategy ?? "--"}, penalty=L2, C={model.c_value ?? "--"}, calib={model.calibration_method ?? "--"}
-                                  </span>
-                                </div>
-                                {isAutoRun ? (
-                                  <div>
-                                    <span className="meta-label">Auto selection</span>
-                                    <span>{autoSelectionText}</span>
-                                  </div>
-                                ) : null}
-                              </div>
+                            <div className="model-list-heading">
+                              <span className="model-list-title">{model.id}</span>
+                              <span className="model-list-updated">{formatTimestamp(model.last_modified)}</span>
                             </div>
-                          </button>
-
-                          <div className="model-actions-row">
-                            <label className="checkbox inline-select">
-                              <input
-                                type="checkbox"
-                                checked={modelCompare.left === model.id || modelCompare.right === model.id}
-                                onChange={(event) => {
-                                  if (!event.target.checked) {
-                                    setModelCompare((prev) => ({
-                                      left: prev.left === model.id ? null : prev.left,
-                                      right: prev.right === model.id ? null : prev.right,
-                                    }));
-                                    return;
-                                  }
-                                  setModelCompare((prev) => {
-                                    if (!prev.left) return { ...prev, left: model.id };
-                                    if (!prev.right && prev.left !== model.id) return { ...prev, right: model.id };
-                                    if (prev.left === model.id || prev.right === model.id) return prev;
-                                    return { left: prev.left, right: model.id };
-                                  });
-                                }}
-                              />
-                              Compare
-                            </label>
-                            <button className="button light small" type="button" onClick={() => void handleRenameModel(model.id)}>
-                              Rename model
-                            </button>
-                            <button className="button ghost danger small" type="button" onClick={() => setDeleteTarget(model)}>
-                              Delete model
-                            </button>
-                          </div>
-
-                          {selected ? (
-                            <div className="model-detail-shell">
-                              {isModelDetailLoading ? (
-                                <div className="empty">Loading model detail…</div>
-                              ) : modelDetailError ? (
-                                <div className="error">{modelDetailError}</div>
-                              ) : modelDetail ? (
-                                <>
-                                  {modelDetail.metrics_summary ? (
-                                    <div className="metrics-summary">
-                                      <div className="metrics-summary-header">
-                                        <span className="meta-label">Performance summary</span>
-                                        <span className="metrics-summary-note">Delta values are model minus baseline.</span>
-                                      </div>
-                                      {isAutoRun && autoSelectionSummary ? (
-                                        <AutoSelectionSummaryCard
-                                          summary={autoSelectionSummary}
-                                          validationFolds={modelDetailValidationFolds}
-                                        />
-                                      ) : modelDetailValidationFolds != null && modelDetailValidationFolds > 1 ? (
-                                        <div className="auto-selection-summary-note">{METRIC_INTERPRETATION_COPY}</div>
-                                      ) : null}
-                                      {(() => {
-                                        const modelRows = modelDetail.split_row_counts ?? {};
-                                        const modelGroups = modelDetail.split_group_counts ?? {};
-                                        const modelTrainRows = modelRows.train_fit ?? modelRows.train ?? null;
-                                        const modelValRows = modelRows.val ?? null;
-                                        const modelTestRows = modelRows.test ?? null;
-                                        const modelTrainGroups = modelGroups.train_fit ?? modelGroups.train ?? null;
-                                        const modelValGroups = modelGroups.val ?? null;
-                                        const modelTestGroups = modelGroups.test ?? null;
-                                        const hasCounts =
-                                          modelTrainRows != null ||
-                                          modelValRows != null ||
-                                          modelTestRows != null ||
-                                          modelTrainGroups != null ||
-                                          modelValGroups != null ||
-                                          modelTestGroups != null;
-                                        if (!hasCounts) return null;
-                                        return (
-                                          <div className="metrics-detail-card">
-                                            <div className="metrics-detail-card-header">
-                                              <span className="meta-label">Split coverage</span>
-                                            </div>
-                                            <div className="run-meta-grid">
-                                              <div>
-                                                <span className="meta-label">Train rows</span>
-                                                <span>{formatCountValue(modelTrainRows as number | null)}</span>
-                                              </div>
-                                              <div>
-                                                <span className="meta-label">Val rows</span>
-                                                <span>{formatCountValue(modelValRows as number | null)}</span>
-                                              </div>
-                                              <div>
-                                                <span className="meta-label">Test rows</span>
-                                                <span>{formatCountValue(modelTestRows as number | null)}</span>
-                                              </div>
-                                              <div>
-                                                <span className="meta-label">Train groups</span>
-                                                <span>{formatCountValue(modelTrainGroups as number | null)}</span>
-                                              </div>
-                                              <div>
-                                                <span className="meta-label">Val groups</span>
-                                                <span>{formatCountValue(modelValGroups as number | null)}</span>
-                                              </div>
-                                              <div>
-                                                <span className="meta-label">Test groups</span>
-                                                <span>{formatCountValue(modelTestGroups as number | null)}</span>
-                                              </div>
-                                            </div>
-                                          </div>
-                                        );
-                                      })()}
-                                      <div className="metrics-detail-card">
-                                        <div className="metrics-detail-card-header">
-                                          <span className="meta-label">Metrics card</span>
-                                        </div>
-                                        <div className="metrics-summary-grid">
-                                          {metricsOrder
-                                            .map((split) => modelDetail.metrics_summary?.[split])
-                                            .filter(Boolean)
-                                            .map((metric) => (
-                                            <div key={`${model.id}-${metric!.split}`} className="metrics-card">
-                                              <div className="metrics-card-heading">
-                                                <strong>{metric!.split}</strong>
-                                                <span className={`status-pill ${metric!.status === "good" ? "success" : "failed"}`}>
-                                                  {metric!.status}
-                                                </span>
-                                              </div>
-                                              <div className="metrics-card-row">
-                                                <span>Baseline logloss</span>
-                                                <strong>{formatMetricValue(metric!.baseline_logloss)}</strong>
-                                              </div>
-                                              <div className="metrics-card-row">
-                                                <span>Model logloss</span>
-                                                <strong>{formatMetricValue(metric!.model_logloss)}</strong>
-                                              </div>
-                                              <div className="metrics-card-row">
-                                                <span>Delta logloss</span>
-                                                <strong className={deltaMetricClass(metric!.delta_model_minus_baseline)}>
-                                                  {formatMetricValue(metric!.delta_model_minus_baseline)}
-                                                </strong>
-                                              </div>
-                                              {metric!.delta_logloss_ci_lo != null && metric!.delta_logloss_ci_hi != null ? (
-                                                <div className="metrics-card-row metrics-card-ci">
-                                                  <span>Logloss {modelCiLabel}</span>
-                                                  <strong>
-                                                    [{metric!.delta_logloss_ci_lo.toFixed(4)}, {metric!.delta_logloss_ci_hi.toFixed(4)}]
-                                                  </strong>
-                                                </div>
-                                              ) : null}
-                                              <div className="metrics-card-row">
-                                                <span>Baseline brier</span>
-                                                <strong>{formatMetricValue(metric!.baseline_brier)}</strong>
-                                              </div>
-                                              <div className="metrics-card-row">
-                                                <span>Model brier</span>
-                                                <strong>{formatMetricValue(metric!.model_brier)}</strong>
-                                              </div>
-                                              <div className="metrics-card-row">
-                                                <span>Delta brier</span>
-                                                <strong className={deltaMetricClass(metric!.delta_brier)}>
-                                                  {formatMetricValue(metric!.delta_brier)}
-                                                </strong>
-                                              </div>
-                                              {metric!.delta_brier_ci_lo != null && metric!.delta_brier_ci_hi != null ? (
-                                                <div className="metrics-card-row metrics-card-ci">
-                                                  <span>Brier {modelCiLabel}</span>
-                                                  <strong>
-                                                    [{metric!.delta_brier_ci_lo.toFixed(4)}, {metric!.delta_brier_ci_hi.toFixed(4)}]
-                                                  </strong>
-                                                </div>
-                                              ) : null}
-                                              <div className="metrics-card-row">
-                                                <span>Baseline ece_q</span>
-                                                <strong>{formatMetricValue(metric!.baseline_ece_q)}</strong>
-                                              </div>
-                                              <div className="metrics-card-row">
-                                                <span>Model ece_q</span>
-                                                <strong>{formatMetricValue(metric!.model_ece_q)}</strong>
-                                              </div>
-                                              <div className="metrics-card-row">
-                                                <span>Delta ece_q</span>
-                                                <strong className={deltaMetricClass(metric!.delta_ece_q)}>
-                                                  {formatMetricValue(metric!.delta_ece_q)}
-                                                </strong>
-                                              </div>
-                                              {metric!.delta_ece_q_ci_lo != null && metric!.delta_ece_q_ci_hi != null ? (
-                                                <div className="metrics-card-row metrics-card-ci">
-                                                  <span>ECE-Q {modelCiLabel}</span>
-                                                  <strong>
-                                                    [{metric!.delta_ece_q_ci_lo.toFixed(4)}, {metric!.delta_ece_q_ci_hi.toFixed(4)}]
-                                                  </strong>
-                                                </div>
-                                              ) : null}
-                                            </div>
-                                          ))}
-                                        </div>
-                                      </div>
-                                    </div>
-                                  ) : null}
-
-                                  {modelDetail.model_equation ? (
-                                    <div className="equation-summary">
-                                      <span className="meta-label">Model equation</span>
-                                      <LatexBlock latex={modelDetail.model_equation} />
-                                      <EquationNotes spec={modelDetail.model_equation_spec} />
-                                    </div>
-                                  ) : null}
-
-                                  {modelDetail.stage1_equation ? (
-                                    <div className="equation-summary">
-                                      <span className="meta-label">Stage A equation</span>
-                                      <LatexBlock latex={modelDetail.stage1_equation} />
-                                      <EquationNotes spec={modelDetail.stage1_equation_spec} />
-                                    </div>
-                                  ) : null}
-
-                                  {modelDetail.two_stage_equation ? (
-                                    <div className="equation-summary">
-                                      <span className="meta-label">Stage B equation</span>
-                                      <LatexBlock latex={modelDetail.two_stage_equation} />
-                                      <EquationNotes spec={modelDetail.two_stage_equation_spec} />
-                                    </div>
-                                  ) : null}
-
-                                  {isAutoRun && autoStatus === "no_viable_model" && !model.has_selected_model ? (
-                                    <div className="warning auto-no-viable-callout">
-                                      No candidate passed the acceptance gates for this auto run. Search diagnostics remain available below.
-                                    </div>
-                                  ) : null}
-
-                                  {modelFiles?.files?.length ? (
-                                    <div className="model-detail-section file-viewer-section">
-                                      <span className="meta-label">Artifacts</span>
-                                      {defaultArtifactPath ? (
-                                        <div className="artifact-selection-note">
-                                          <code>{DEFAULT_ARTIFACT_FILE_NAME}</code> opens automatically when you select a model.
-                                        </div>
-                                      ) : null}
-                                      {isAutoRun ? (
-                                        <div className="artifact-section-stack">
-                                          <div className="artifact-section-block">
-                                            <span className="meta-label">Selected Model</span>
-                                            {visibleGroupedModelFiles.selected_model.length ? (
-                                              <div className="file-list">
-                                                {visibleGroupedModelFiles.selected_model.map((file) => {
-                                                  const filePath = artifactFilePath(file);
-                                                  return (
-                                                    <ArtifactFileButton
-                                                      key={`${model.id}-${filePath}`}
-                                                      titlePath={filePath}
-                                                      displayPath={filePath}
-                                                      meta={formatFileSizeLabel(file.size_bytes)}
-                                                      isActive={selectedFilePath === filePath}
-                                                      onClick={() => file.is_viewable && void handleOpenFile(file)}
-                                                      disabled={!file.is_viewable}
-                                                    />
-                                                  );
-                                                })}
-                                              </div>
-                                            ) : (
-                                              <div className="empty">No additional selected-model artifacts.</div>
-                                            )}
-                                          </div>
-                                          <div className="artifact-section-block">
-                                            <span className="meta-label">Auto Search</span>
-                                            {visibleGroupedModelFiles.auto_search.length ? (
-                                              <div className="file-list">
-                                                {visibleGroupedModelFiles.auto_search.map((file) => {
-                                                  const filePath = artifactFilePath(file);
-                                                  return (
-                                                    <ArtifactFileButton
-                                                      key={`${model.id}-${filePath}`}
-                                                      titlePath={filePath}
-                                                      displayPath={filePath}
-                                                      meta={formatFileSizeLabel(file.size_bytes)}
-                                                      isActive={selectedFilePath === filePath}
-                                                      onClick={() => file.is_viewable && void handleOpenFile(file)}
-                                                      disabled={!file.is_viewable}
-                                                    />
-                                                  );
-                                                })}
-                                              </div>
-                                            ) : (
-                                              <div className="empty">No auto-search artifacts.</div>
-                                            )}
-                                          </div>
-                                          {visibleGroupedModelFiles.legacy_root.length ? (
-                                            <div className="artifact-section-block">
-                                              <span className="meta-label">Legacy Root</span>
-                                              <div className="file-list">
-                                                {visibleGroupedModelFiles.legacy_root.map((file) => {
-                                                  const filePath = artifactFilePath(file);
-                                                  return (
-                                                    <ArtifactFileButton
-                                                      key={`${model.id}-${filePath}`}
-                                                      titlePath={filePath}
-                                                      displayPath={filePath}
-                                                      meta={formatFileSizeLabel(file.size_bytes)}
-                                                      isActive={selectedFilePath === filePath}
-                                                      onClick={() => file.is_viewable && void handleOpenFile(file)}
-                                                      disabled={!file.is_viewable}
-                                                    />
-                                                  );
-                                                })}
-                                              </div>
-                                            </div>
-                                          ) : null}
-                                        </div>
-                                      ) : (
-                                        visibleGroupedModelFiles.legacy_root.length ? (
-                                          <div className="file-list">
-                                            {visibleGroupedModelFiles.legacy_root.map((file) => {
-                                              const filePath = artifactFilePath(file);
-                                              return (
-                                                <ArtifactFileButton
-                                                  key={`${model.id}-${filePath}`}
-                                                  titlePath={filePath}
-                                                  displayPath={filePath}
-                                                  meta={formatFileSizeLabel(file.size_bytes)}
-                                                  isActive={selectedFilePath === filePath}
-                                                  onClick={() => file.is_viewable && void handleOpenFile(file)}
-                                                  disabled={!file.is_viewable}
-                                                />
-                                              );
-                                            })}
-                                          </div>
-                                        ) : (
-                                          <div className="empty">No additional artifacts beyond the default metrics view.</div>
-                                        )
-                                      )}
-                                      {selectedFilePath ? (
-                                        <div className="file-content-panel">
-                                          <div className="file-content-header">
-                                            <div className="file-content-title">
-                                              <span className="file-name">{artifactDisplayTitle(selectedFilePath)}</span>
-                                              <span className="file-content-path">{selectedFilePath}</span>
-                                              {ARTIFACT_DESCRIPTIONS[selectedArtifactName] ? (
-                                                <span className="file-content-subtitle">
-                                                  {ARTIFACT_DESCRIPTIONS[selectedArtifactName]}
-                                                </span>
-                                              ) : null}
-                                            </div>
-                                            <div className="file-content-actions">
-                                              <button
-                                                className="button light small"
-                                                type="button"
-                                                onClick={() => setShowRawFile((prev) => !prev)}
-                                              >
-                                                {showRawFile ? "View visual" : "View raw"}
-                                              </button>
-                                              {!isShowingDefaultArtifact || !defaultArtifactFile ? (
-                                                <button
-                                                  className="button small"
-                                                  type="button"
-                                                  onClick={() => {
-                                                    if (defaultArtifactFile && selectedFilePath !== defaultArtifactPath) {
-                                                      void openModelFile(model.id, defaultArtifactFile, { allowToggle: false });
-                                                      return;
-                                                    }
-                                                    setSelectedFilePath(null);
-                                                    setFileContent(null);
-                                                    setFileError(null);
-                                                  }}
-                                                >
-                                                  {defaultArtifactFile ? "Back to metrics" : "Close"}
-                                                </button>
-                                              ) : null}
-                                            </div>
-                                          </div>
-                                          {fileLoading ? <div className="empty">Loading file…</div> : null}
-                                          {fileError ? <div className="error">{fileError}</div> : null}
-                                          {fileContent?.truncated ? (
-                                            <div className="warning">File preview truncated to 512 KB.</div>
-                                          ) : null}
-                                          {fileContent ? renderArtifactView() : null}
-                                        </div>
-                                      ) : null}
-                                    </div>
-                                  ) : null}
-                                </>
+                            <div className="model-list-badges">
+                              <span className={`status-pill run-type-pill ${isAutoRun ? "running" : "idle"}`}>
+                                {isAutoRun ? "AUTO" : "MANUAL"}
+                              </span>
+                              <span className={`status-pill ${model.has_metrics ? "success" : "idle"}`}>
+                                {model.has_metrics ? "metrics" : "no metrics"}
+                              </span>
+                              {model.is_two_stage ? <span className="status-pill running">two-stage</span> : null}
+                              {isAutoRun && autoStatus ? (
+                                <span
+                                  className={`status-pill ${
+                                    autoStatus === "selected" ? "success" : autoStatus === "no_viable_model" ? "failed" : "idle"
+                                  }`}
+                                >
+                                  {autoStatusPillLabel(autoStatus)}
+                                </span>
                               ) : null}
                             </div>
-                          ) : null}
+                            <div className="model-list-meta">{formatModelListMeta(model)}</div>
+                          </button>
                         </article>
                       );
                     })}
                   </div>
                 )}
-
-                <section className="section-card calibrate-section-card">
-                  <h3 className="section-heading">Compare Models</h3>
-                  {!compareLeft || !compareRight ? (
-                    <div className="empty">Select exactly two models to compare.</div>
-                  ) : (
-                    <div className="compare-grid">
-                      <div>
-                        <span className="meta-label">Model A</span>
-                        <span>{compareLeft.id}</span>
-                      </div>
-                      <div>
-                        <span className="meta-label">Model B</span>
-                        <span>{compareRight.id}</span>
-                      </div>
-                      <div>
-                        <span className="meta-label">Delta (B-A) C</span>
-                        <span>
-                          {compareRight.c_value != null && compareLeft.c_value != null
-                            ? (compareRight.c_value - compareLeft.c_value).toFixed(4)
-                            : "--"}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="meta-label">Split strategy</span>
-                        <span>{compareLeft.split_strategy ?? "--"} vs {compareRight.split_strategy ?? "--"}</span>
-                      </div>
-                    </div>
-                  )}
-                </section>
               </div>
             </section>
           </div>
         ) : null}
 
-        {workspaceTab === "documentation" ? (
-          <div className="calibrate-tab-panel" role="tabpanel">
-            <section className="panel calibrate-documentation-panel">
-              <div className="panel-header calibrate-panel-header calibrate-job-config-header">
-                <div>
-                  <h2 className="calibrate-job-config-title">Documentation</h2>
-                  <span className="panel-hint">
-                    Calibration methodology and control-by-control guidance.
-                  </span>
-                </div>
-              </div>
-              <div className="panel-body calibrate-documentation-body">
-                <CalibrateDocContent className="calibrate-doc-embedded" />
-              </div>
-            </section>
-          </div>
-        ) : null}
       </div>
 
-      {deleteTarget ? (
-        <div
-          className="calibrate-delete-modal-overlay"
-          onClick={() => {
-            if (deleteLoading) return;
-            setDeleteTarget(null);
-            setDeleteConfirmText("");
-          }}
-        >
+    </section>
+  );
+}
+
+export function CalibrationModelDetailPage() {
+  const { modelId: routeModelId } = useParams();
+  const navigate = useNavigate();
+  const resolvedModelId = useMemo(() => {
+    if (!routeModelId) return "";
+    try {
+      return decodeURIComponent(routeModelId);
+    } catch {
+      return routeModelId;
+    }
+  }, [routeModelId]);
+
+  const [models, setModels] = useState<ModelRunSummary[]>([]);
+  const [modelListError, setModelListError] = useState<string | null>(null);
+  const [isModelDetailLoading, setIsModelDetailLoading] = useState(false);
+  const [modelDetail, setModelDetail] = useState<ModelDetailResponse | null>(null);
+  const [modelDetailError, setModelDetailError] = useState<string | null>(null);
+  const [modelFiles, setModelFiles] = useState<ModelFilesListResponse | null>(null);
+  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
+  const [fileContent, setFileContent] = useState<ModelFileContentResponse | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [fileLoading, setFileLoading] = useState(false);
+  const [showRawFile, setShowRawFile] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+
+  const refreshModels = useCallback(async () => {
+    try {
+      const response = await fetchCalibrationModels();
+      setModels(response.models);
+      setModelListError(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to load models.";
+      setModelListError(message);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshModels();
+  }, [refreshModels]);
+
+  const selectedModel = useMemo(
+    () => models.find((model) => model.id === resolvedModelId) ?? null,
+    [models, resolvedModelId],
+  );
+
+  const loadModelFileContent = useCallback(async (file: ModelFileSummary) => {
+    if (!resolvedModelId) {
+      throw new Error("Missing model id.");
+    }
+    return file.relative_path
+      ? fetchModelFileContentByPath(resolvedModelId, file.relative_path)
+      : fetchModelFileContent(resolvedModelId, file.name);
+  }, [resolvedModelId]);
+
+  const openModelFile = useCallback(async (
+    file: ModelFileSummary,
+    options?: { allowToggle?: boolean },
+  ) => {
+    const targetPath = artifactFilePath(file);
+    if (!targetPath) return;
+    const allowToggle = options?.allowToggle ?? true;
+    if (allowToggle && selectedFilePath === targetPath) {
+      setSelectedFilePath(null);
+      setFileContent(null);
+      setFileError(null);
+      return;
+    }
+    setSelectedFilePath(targetPath);
+    setFileLoading(true);
+    setFileError(null);
+    setFileContent(null);
+    try {
+      const content = await loadModelFileContent(file);
+      setFileContent(content);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to read file.";
+      setFileError(message);
+      setFileContent(null);
+    } finally {
+      setFileLoading(false);
+    }
+  }, [loadModelFileContent, selectedFilePath]);
+
+  useEffect(() => {
+    setShowRawFile(false);
+  }, [selectedFilePath]);
+
+  useEffect(() => {
+    if (!resolvedModelId) {
+      setModelDetailError("Missing model id.");
+      setModelDetail(null);
+      setModelFiles(null);
+      return;
+    }
+
+    let cancelled = false;
+    const load = async () => {
+      setIsModelDetailLoading(true);
+      setModelDetailError(null);
+      setActionError(null);
+      setSelectedFilePath(null);
+      setFileContent(null);
+      setFileError(null);
+      try {
+        const [detail, files] = await Promise.all([
+          fetchCalibrationModelDetail(resolvedModelId),
+          fetchModelFiles(resolvedModelId),
+        ]);
+        if (cancelled) return;
+        setModelDetail(detail);
+        setModelFiles(files);
+      } catch (error) {
+        if (cancelled) return;
+        const message = error instanceof Error ? error.message : "Failed to load model detail.";
+        setModelDetailError(message);
+        setModelDetail(null);
+        setModelFiles(null);
+        setSelectedFilePath(null);
+        setFileContent(null);
+      } finally {
+        if (!cancelled) {
+          setIsModelDetailLoading(false);
+        }
+      }
+    };
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [resolvedModelId]);
+
+  const modelInspectorArtifacts = useMemo(
+    () => buildModelInspectorArtifactState(modelFiles?.files),
+    [modelFiles],
+  );
+  const artifactSections = modelInspectorArtifacts.sections;
+  const selectedArtifactName = fileBaseName(selectedFilePath);
+
+  const handleQueueRunAgainFromConfig = useCallback((config: Record<string, unknown>) => {
+    storePendingRunAgainConfig(config);
+    navigate(buildCalibrateTabHref("run_job"));
+  }, [navigate]);
+
+  const renderArtifactView = useCallback(() => {
+    if (!selectedFilePath || !fileContent) return null;
+    if (showRawFile) {
+      return <pre className="file-content">{fileContent.content}</pre>;
+    }
+    const parsedJson = fileContent.content_type === "json" ? parseJsonContent(fileContent.content) : null;
+    const parsedCsv = fileContent.content_type === "csv" ? parseCsvContent(fileContent.content) : null;
+    const selectedName = fileBaseName(fileContent.relative_path ?? selectedFilePath);
+
+    switch (selectedName) {
+      case "diagnostics_table.json":
+        return modelDetail?.stata_diagnostics && isStataDiagnosticsPayload(modelDetail.stata_diagnostics)
+          ? (
+            <StataDiagnosticsPanel
+              diagnostics={modelDetail.stata_diagnostics}
+              showHeaderStrip={false}
+              showCalibrationChart={false}
+              showProductionCoefficientTable={false}
+            />
+          )
+          : parsedJson && isStataDiagnosticsPayload(parsedJson)
+            ? (
+              <StataDiagnosticsPanel
+                diagnostics={parsedJson as StataDiagnosticsPayload}
+                showHeaderStrip={false}
+                showCalibrationChart={false}
+                showProductionCoefficientTable={false}
+              />
+            )
+            : <div className="empty">No diagnostics table data.</div>;
+      case "metrics.csv":
+        return parsedCsv ? <MetricsCsvView parsed={parsedCsv} ciLabel={modelCiLabel} /> : <div className="empty">No metrics data.</div>;
+      case "metrics_summary.json":
+        return parsedJson ? <KeyValueGrid data={parsedJson} /> : <div className="empty">No summary data.</div>;
+      case "coefficient_diagnostics.csv":
+      case "marginal_effects.csv":
+        return parsedCsv ? <CsvTableView parsed={parsedCsv} limit={100} /> : <div className="empty">No table data.</div>;
+      case "config.executed.json":
+      case "best_config.json":
+        return parsedJson ? (
+          <ConfigJsonView
+            data={parsedJson}
+            title={artifactDisplayTitle(selectedName)}
+            onRunAgain={() => handleQueueRunAgainFromConfig(parsedJson)}
+          />
+        ) : <div className="empty">No config data.</div>;
+      case "metadata.json":
+      case "two_stage_metadata.json":
+        return parsedJson ? <MetadataView data={parsedJson} /> : <div className="empty">No metadata.</div>;
+      case "feature_manifest.json":
+        return parsedJson ? <FeatureManifestView data={parsedJson} /> : <div className="empty">No feature manifest.</div>;
+      case "audit_overlap.json":
+        return parsedJson ? <AuditOverlapView data={parsedJson} /> : <div className="empty">No overlap data.</div>;
+      case "audit_weight_distribution.json":
+        return parsedJson ? <AuditWeightView data={parsedJson} /> : <div className="empty">No weight audit.</div>;
+      case "audit_split_composition.csv":
+        return parsedCsv ? <SplitCompositionView parsed={parsedCsv} /> : <div className="empty">No split composition.</div>;
+      case "split_timeline.json":
+        return parsedJson ? <SplitTimelineView data={parsedJson} /> : <div className="empty">No timeline data.</div>;
+      case "fold_deltas.csv":
+        return parsedCsv ? <FoldDeltaView parsed={parsedCsv} /> : <div className="empty">No fold delta data.</div>;
+      case "group_delta_distribution.csv":
+        return parsedCsv ? <GroupDeltaDistributionView parsed={parsedCsv} /> : <div className="empty">No group delta data.</div>;
+      case "reliability_bins.csv":
+        return parsedCsv ? <ReliabilityView parsed={parsedCsv} /> : <div className="empty">No reliability bins.</div>;
+      case "rolling_summary.csv":
+        return parsedCsv ? <RollingSummaryView parsed={parsedCsv} /> : <div className="empty">No rolling summary.</div>;
+      case "rolling_windows.csv":
+      case "metrics_groups.csv":
+      case "leaderboard.csv":
+      case "auto_search_leaderboard.csv":
+      case "two_stage_metrics.csv":
+        return parsedCsv ? <CsvTableView parsed={parsedCsv} limit={50} /> : <div className="empty">No table data.</div>;
+      case "two_stage_metrics_summary.json":
+        return parsedJson ? <KeyValueGrid data={parsedJson} /> : <div className="empty">No summary data.</div>;
+      case "auto_search_summary.json":
+        return parsedJson ? <KeyValueGrid data={parsedJson} /> : <div className="empty">No summary data.</div>;
+      case "auto_search_progress.json":
+        return parsedJson ? <KeyValueGrid data={parsedJson} /> : <div className="empty">No progress data.</div>;
+      case "best_model_report.md":
+        return <ReportMarkdownView content={fileContent.content} />;
+      default:
+        if (parsedJson) return <KeyValueGrid data={parsedJson} />;
+        if (parsedCsv) return <CsvTableView parsed={parsedCsv} limit={50} />;
+        return <pre className="file-content">{fileContent.content}</pre>;
+    }
+  }, [fileContent, handleQueueRunAgainFromConfig, modelDetail?.stata_diagnostics, selectedFilePath, showRawFile]);
+
+  const handleOpenFile = useCallback(async (file: ModelFileSummary) => {
+    await openModelFile(file, { allowToggle: false });
+  }, [openModelFile]);
+
+  const handleRenameModel = useCallback(async () => {
+    const next = window.prompt("New model name", resolvedModelId);
+    if (!next) return;
+    const cleaned = sanitizeModelDirName(next);
+    if (!cleaned) {
+      setActionError("Invalid model name.");
+      return;
+    }
+    try {
+      await renameCalibrationModel(resolvedModelId, cleaned);
+      await refreshModels();
+      navigate(buildCalibrationModelDetailHref(cleaned), { replace: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Rename failed.";
+      setActionError(message);
+    }
+  }, [navigate, refreshModels, resolvedModelId]);
+
+  const closeDeleteModal = useCallback(() => {
+    if (deleteLoading) return;
+    setShowDeleteModal(false);
+    setDeleteConfirmText("");
+  }, [deleteLoading]);
+
+  const handleDeleteModel = useCallback(async () => {
+    if (deleteConfirmText !== "DELETE") return;
+    setDeleteLoading(true);
+    try {
+      await deleteCalibrationModel(resolvedModelId);
+      navigate(buildCalibrateTabHref("models"), { replace: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Delete failed.";
+      setActionError(message);
+    } finally {
+      setDeleteLoading(false);
+    }
+  }, [deleteConfirmText, navigate, resolvedModelId]);
+
+  const modelDetailCiLevel = toNumber(
+    (modelDetail?.metadata as Record<string, unknown> | null | undefined)?.["ci_level"],
+  );
+  const modelCiLabel = modelDetailCiLevel ? `CI (${modelDetailCiLevel}%)` : "CI";
+  const modelDetailWarnings = coerceWarningList(
+    (modelDetail?.metadata as Record<string, unknown> | null | undefined)?.["warnings"],
+  );
+  const modelDetailDiagnosticsSkipWarning = findDiagnosticsSkipWarning(modelDetailWarnings);
+  const autoSelectionSummary = modelDetail?.auto_selection_summary ?? null;
+
+  const modelRows = modelDetail?.split_row_counts ?? {};
+  const modelGroups = modelDetail?.split_group_counts ?? {};
+  const modelTrainRows = modelRows.train_fit ?? modelRows.train ?? null;
+  const modelValRows = modelRows.val ?? null;
+  const modelTestRows = modelRows.test ?? null;
+  const modelTrainGroups = modelGroups.train_fit ?? modelGroups.train ?? null;
+  const modelValGroups = modelGroups.val ?? null;
+  const modelTestGroups = modelGroups.test ?? null;
+  const hasCoverage =
+    modelTrainRows != null ||
+    modelValRows != null ||
+    modelTestRows != null ||
+    modelTrainGroups != null ||
+    modelValGroups != null ||
+    modelTestGroups != null;
+
+  const isAutoRun = selectedModel?.run_type === "auto";
+  const autoStatus = selectedModel?.auto_status ?? (selectedModel?.has_selected_model ? "selected" : null);
+  const autoSelectionText = describeAutoSelection({
+    status: autoStatus,
+    selectedTrialId: selectedModel?.selected_trial_id,
+    hasSelectedModel: selectedModel?.has_selected_model,
+  });
+  const overviewItems = [
+    {
+      label: "Dataset",
+      value: selectedModel?.dataset_id ?? "--",
+    },
+    {
+      label: "Updated",
+      value: formatTimestamp(selectedModel?.last_modified ?? modelDetail?.last_modified),
+    },
+    {
+      label: "Range",
+      value: selectedModel ? formatModelRange(selectedModel.train_date_start, selectedModel.train_date_end) : "--",
+    },
+    {
+      label: "Hyperparams",
+      value: compactMetaLine(
+        `split=${selectedModel?.split_strategy ?? "--"}`,
+        `C=${selectedModel?.c_value != null ? formatMaybe(selectedModel.c_value) : "--"}`,
+        `calib=${selectedModel?.calibration_method ?? "--"}`,
+      ) || "--",
+    },
+    {
+      label: "Coverage",
+      value: hasCoverage
+        ? compactMetaLine(
+          `train ${formatCountValue(modelTrainRows as number | null)}`,
+          `val ${formatCountValue(modelValRows as number | null)}`,
+          `test ${formatCountValue(modelTestRows as number | null)}`,
+        )
+        : "--",
+      note: hasCoverage
+        ? compactMetaLine(
+          `groups ${formatCountValue(modelTrainGroups as number | null)}/${formatCountValue(modelValGroups as number | null)}/${formatCountValue(modelTestGroups as number | null)}`,
+        )
+        : null,
+    },
+    {
+      label: "Universe",
+      value: selectedModel?.tickers_summary ?? selectedModel?.dow_regime ?? "--",
+    },
+    isAutoRun ? {
+      label: "Auto selection",
+      value: autoSelectionText,
+      note: compactMetaLine(
+        autoSelectionSummary?.selection_rule ? `rule=${autoSelectionSummary.selection_rule}` : null,
+        autoSelectionSummary?.best_score != null ? `score=${formatMetricValue(autoSelectionSummary.best_score)}` : null,
+      ) || null,
+    } : null,
+  ].filter(Boolean);
+
+  const hasDiagnostics = Boolean(
+    modelDetail?.stata_diagnostics || modelDetail?.metrics_summary || modelDetailDiagnosticsSkipWarning,
+  );
+  const hasEquations = Boolean(
+    modelDetail?.model_equation
+    || modelDetail?.stage1_equation
+    || modelDetail?.two_stage_equation
+    || modelDetail?.combined_p_hat_equation,
+  );
+  const productionCalibrationCurve = modelDetail?.stata_diagnostics?.calibration_curve ?? null;
+  const isDiagnosticsArtifactSelected = selectedArtifactName === "diagnostics_table.json";
+
+  return (
+    <section className="page calibration-model-detail-page">
+      <header className="page-header model-detail-page-header">
+        <div className="model-detail-page-title-block">
+          <Link className="button light small model-detail-back-button" to={buildCalibrateTabHref("models")}>
+            Back to Model Directory
+          </Link>
+          <p className="page-kicker">Calibrate Model</p>
+          <h1 className="page-title model-detail-page-title">{(modelDetail?.id ?? resolvedModelId) || "Model"}</h1>
+          <p className="page-subtitle model-detail-page-subtitle">
+            {compactMetaLine(
+              selectedModel?.dataset_id ?? null,
+              selectedModel?.split_strategy ? `split=${selectedModel.split_strategy}` : null,
+              selectedModel?.c_value != null ? `C=${formatMaybe(selectedModel.c_value)}` : null,
+              selectedModel?.calibration_method ? `calib=${selectedModel.calibration_method}` : null,
+            ) || "Production performance, equations, and artifacts for the selected model."}
+          </p>
+        </div>
+        <div className="model-detail-page-actions">
+          {selectedModel ? (
+            <>
+              <span className={`status-pill run-type-pill ${isAutoRun ? "running" : "idle"}`}>
+                {isAutoRun ? "AUTO" : "MANUAL"}
+              </span>
+              <span className={`status-pill ${(selectedModel.has_metrics || modelDetail?.has_metrics) ? "success" : "idle"}`}>
+                {(selectedModel.has_metrics || modelDetail?.has_metrics) ? "metrics" : "no metrics"}
+              </span>
+              {selectedModel.is_two_stage ? <span className="status-pill running">two-stage</span> : null}
+              {isAutoRun && autoStatus ? (
+                <span
+                  className={`status-pill ${
+                    autoStatus === "selected" ? "success" : autoStatus === "no_viable_model" ? "failed" : "idle"
+                  }`}
+                >
+                  {autoStatusPillLabel(autoStatus)}
+                </span>
+              ) : null}
+            </>
+          ) : null}
+          <button
+            className="button light small"
+            type="button"
+            onClick={() => void handleRenameModel()}
+            disabled={!resolvedModelId}
+          >
+            Rename
+          </button>
+          <button
+            className="button ghost danger small"
+            type="button"
+            onClick={() => setShowDeleteModal(true)}
+            disabled={!resolvedModelId}
+          >
+            Delete
+          </button>
+        </div>
+      </header>
+
+      {actionError ? <div className="error">{actionError}</div> : null}
+      {modelListError ? <div className="warning">{modelListError}</div> : null}
+
+      {!resolvedModelId ? (
+        <div className="empty model-detail-empty-state">
+          <div>Missing model id.</div>
+          <Link className="button light small" to={buildCalibrateTabHref("models")}>
+            Back to Model Directory
+          </Link>
+        </div>
+      ) : isModelDetailLoading ? (
+        <div className="empty model-detail-empty-state">Loading model detail…</div>
+      ) : modelDetailError ? (
+        <div className="model-detail-error-shell">
+          <div className="error">{modelDetailError}</div>
+          <Link className="button light small" to={buildCalibrateTabHref("models")}>
+            Back to Model Directory
+          </Link>
+        </div>
+      ) : modelDetail ? (
+        <div className="model-detail-stack">
+          <section className="model-detail-section model-detail-performance-panel">
+            <div className="model-detail-section-header">
+              <span className="meta-label">Overview</span>
+            </div>
+
+            <div className="model-overview-grid model-detail-overview-grid">
+              {overviewItems.map((item) => (
+                <div key={item!.label} className="model-overview-item">
+                  <span className="meta-label">{item!.label}</span>
+                  <strong className="model-overview-value">{item!.value}</strong>
+                  {item!.note ? <span className="model-overview-note">{item!.note}</span> : null}
+                </div>
+              ))}
+            </div>
+
+            {!modelDetail.stata_diagnostics && modelDetailDiagnosticsSkipWarning ? (
+              <div className="warning auto-no-viable-callout">{modelDetailDiagnosticsSkipWarning}</div>
+            ) : null}
+
+            {isAutoRun && autoStatus === "no_viable_model" && !selectedModel?.has_selected_model ? (
+              <div className="warning auto-no-viable-callout">
+                No candidate passed the acceptance gates for this auto run. Search diagnostics remain available below.
+              </div>
+            ) : null}
+          </section>
+
+          <section className="model-detail-section model-detail-performance-panel">
+            <div className="model-detail-section-header">
+              <span className="meta-label">Production model performance</span>
+            </div>
+
+            {modelDetail.metrics_summary ? (
+              <div className="metrics-summary-grid model-detail-metrics-grid">
+                {metricsOrder
+                  .map((split) => modelDetail.metrics_summary?.[split])
+                  .filter(Boolean)
+                  .map((metric) => (
+                    <div key={`${resolvedModelId}-${metric!.split}`} className="metrics-card">
+                      <div className="metrics-card-heading">
+                        <strong>{metric!.split}</strong>
+                        <span className={`status-pill ${metric!.status === "good" ? "success" : "failed"}`}>
+                          {metric!.status}
+                        </span>
+                      </div>
+                      <div className="metrics-card-row">
+                        <span>Baseline logloss</span>
+                        <strong>{formatMetricValue(metric!.baseline_logloss)}</strong>
+                      </div>
+                      <div className="metrics-card-row">
+                        <span>Model logloss</span>
+                        <strong>{formatMetricValue(metric!.model_logloss)}</strong>
+                      </div>
+                      <div className="metrics-card-row">
+                        <span>Delta logloss</span>
+                        <strong className={deltaMetricClass(metric!.delta_model_minus_baseline)}>
+                          {formatMetricValue(metric!.delta_model_minus_baseline)}
+                        </strong>
+                      </div>
+                      {metric!.delta_logloss_ci_lo != null && metric!.delta_logloss_ci_hi != null ? (
+                        <div className="metrics-card-row metrics-card-ci">
+                          <span>Logloss {modelCiLabel}</span>
+                          <strong>
+                            [{metric!.delta_logloss_ci_lo.toFixed(4)}, {metric!.delta_logloss_ci_hi.toFixed(4)}]
+                          </strong>
+                        </div>
+                      ) : null}
+                      <div className="metrics-card-row">
+                        <span>Baseline brier</span>
+                        <strong>{formatMetricValue(metric!.baseline_brier)}</strong>
+                      </div>
+                      <div className="metrics-card-row">
+                        <span>Model brier</span>
+                        <strong>{formatMetricValue(metric!.model_brier)}</strong>
+                      </div>
+                      <div className="metrics-card-row">
+                        <span>Delta brier</span>
+                        <strong className={deltaMetricClass(metric!.delta_brier)}>
+                          {formatMetricValue(metric!.delta_brier)}
+                        </strong>
+                      </div>
+                      {metric!.delta_brier_ci_lo != null && metric!.delta_brier_ci_hi != null ? (
+                        <div className="metrics-card-row metrics-card-ci">
+                          <span>Brier {modelCiLabel}</span>
+                          <strong>
+                            [{metric!.delta_brier_ci_lo.toFixed(4)}, {metric!.delta_brier_ci_hi.toFixed(4)}]
+                          </strong>
+                        </div>
+                      ) : null}
+                      <div className="metrics-card-row">
+                        <span>Baseline ece_q</span>
+                        <strong>{formatMetricValue(metric!.baseline_ece_q)}</strong>
+                      </div>
+                      <div className="metrics-card-row">
+                        <span>Model ece_q</span>
+                        <strong>{formatMetricValue(metric!.model_ece_q)}</strong>
+                      </div>
+                      <div className="metrics-card-row">
+                        <span>Delta ece_q</span>
+                        <strong className={deltaMetricClass(metric!.delta_ece_q)}>
+                          {formatMetricValue(metric!.delta_ece_q)}
+                        </strong>
+                      </div>
+                      {metric!.delta_ece_q_ci_lo != null && metric!.delta_ece_q_ci_hi != null ? (
+                        <div className="metrics-card-row metrics-card-ci">
+                          <span>ECE-Q {modelCiLabel}</span>
+                          <strong>
+                            [{metric!.delta_ece_q_ci_lo.toFixed(4)}, {metric!.delta_ece_q_ci_hi.toFixed(4)}]
+                          </strong>
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+              </div>
+            ) : (
+              <div className="empty">No production metrics available.</div>
+            )}
+
+            {productionCalibrationCurve ? (
+              <CalibrationCurveCard
+                rows={productionCalibrationCurve.rows}
+                split={productionCalibrationCurve.split}
+                baselineLabel={modelDetail.stata_diagnostics?.header.baseline_name ?? "pRN"}
+                subtitle={`${productionCalibrationCurve.split.toUpperCase()} equal-mass bins • production model vs ${modelDetail.stata_diagnostics?.header.baseline_name ?? "pRN"}`}
+              />
+            ) : hasDiagnostics ? (
+              <div className="empty">Calibration curve unavailable for this model.</div>
+            ) : null}
+          </section>
+
+          {hasEquations ? (
+            <section className="model-detail-section model-detail-section-secondary">
+              <div className="model-detail-section-header">
+                <span className="meta-label">Model equations</span>
+              </div>
+              <div className="model-equation-stack">
+                {modelDetail.model_equation ? (
+                  <div className="equation-summary">
+                    <span className="meta-label">Model equation</span>
+                    <LatexBlock latex={modelDetail.model_equation} />
+                    <EquationNotes spec={modelDetail.model_equation_spec} />
+                  </div>
+                ) : null}
+
+                {modelDetail.stage1_equation ? (
+                  <div className="equation-summary">
+                    <span className="meta-label">Stage A equation</span>
+                    <LatexBlock latex={modelDetail.stage1_equation} />
+                    <EquationNotes spec={modelDetail.stage1_equation_spec} />
+                  </div>
+                ) : null}
+
+                {modelDetail.two_stage_equation ? (
+                  <div className="equation-summary">
+                    <span className="meta-label">Stage B equation</span>
+                    <LatexBlock latex={modelDetail.two_stage_equation} />
+                    <EquationNotes spec={modelDetail.two_stage_equation_spec} />
+                  </div>
+                ) : null}
+
+                {modelDetail.combined_p_hat_equation ? (
+                  <div className="equation-summary">
+                    <span className="meta-label">Combined p-hat</span>
+                    <LatexBlock latex={modelDetail.combined_p_hat_equation} />
+                    <EquationNotes spec={modelDetail.combined_p_hat_equation_spec} />
+                  </div>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
+
+          <section className="model-detail-section model-detail-section-secondary">
+            <div className="model-detail-section-header">
+              <span className="meta-label">Artifacts</span>
+            </div>
+            {artifactSections.length ? (
+              <div className="model-artifact-selection-stack">
+                {artifactSections.map((section) => (
+                  <div key={`${resolvedModelId}-${section.id}`} className="model-artifact-row-section">
+                    <div className="model-artifact-nav-header">
+                      <span className="meta-label">{section.title}</span>
+                      <span className="model-artifact-nav-count">{section.files.length}</span>
+                    </div>
+                    <div className="model-artifact-row-list">
+                      {section.files.map((file) => {
+                        const filePath = artifactFilePath(file);
+                        return (
+                          <ArtifactFileButton
+                            key={`${resolvedModelId}-${section.id}-${filePath}`}
+                            titlePath={filePath}
+                            displayPath={filePath}
+                            meta={file.is_viewable ? formatFileSizeLabel(file.size_bytes) : "Unavailable"}
+                            className="file-item-artifact-card"
+                            isActive={selectedFilePath === filePath}
+                            onClick={() => file.is_viewable && void handleOpenFile(file)}
+                            disabled={!file.is_viewable}
+                          />
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+
+                {isDiagnosticsArtifactSelected ? (
+                  <div className="artifact-selection-note model-artifact-disclaimer">
+                    {INFERRED_DIAGNOSTICS_DISCLAIMER}
+                  </div>
+                ) : null}
+
+                <div className="model-artifact-preview">
+                  {selectedFilePath ? (
+                    <div className="file-content-panel model-artifact-preview-panel">
+                      <div className="file-content-header">
+                        <div className="file-content-title">
+                          <span className="file-name">{artifactDisplayTitle(selectedFilePath)}</span>
+                          <span className="file-content-path">{selectedFilePath}</span>
+                          {ARTIFACT_DESCRIPTIONS[selectedArtifactName] ? (
+                            <span className="file-content-subtitle">
+                              {ARTIFACT_DESCRIPTIONS[selectedArtifactName]}
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="file-content-actions">
+                          <button
+                            className="button light small"
+                            type="button"
+                            onClick={() => setShowRawFile((prev) => !prev)}
+                          >
+                            {showRawFile ? "View visual" : "View raw"}
+                          </button>
+                          <button
+                            className="button small"
+                            type="button"
+                            onClick={() => {
+                              setSelectedFilePath(null);
+                              setFileContent(null);
+                              setFileError(null);
+                            }}
+                          >
+                            Close
+                          </button>
+                        </div>
+                      </div>
+                      {fileLoading ? <div className="empty">Loading file…</div> : null}
+                      {fileError ? <div className="error">{fileError}</div> : null}
+                      {fileContent?.truncated ? (
+                        <div className="warning">File preview truncated to 512 KB.</div>
+                      ) : null}
+                      {fileContent ? renderArtifactView() : null}
+                    </div>
+                  ) : (
+                    <div className="empty model-artifact-empty">Select an artifact to preview.</div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="empty">No viewable artifacts found for this model.</div>
+            )}
+          </section>
+        </div>
+      ) : null}
+
+      {showDeleteModal ? (
+        <div className="calibrate-delete-modal-overlay" onClick={closeDeleteModal}>
           <div
             className="calibrate-delete-modal"
             role="dialog"
@@ -5764,7 +5808,7 @@ export default function CalibrateModelsPage() {
             <div className="calibrate-delete-modal-header">
               <h3 id="calibrate-delete-modal-title">Delete calibration model</h3>
               <p>
-                This permanently deletes <span className="calibrate-delete-modal-code">{deleteTarget.id}</span> and its artifacts.
+                This permanently deletes <span className="calibrate-delete-modal-code">{resolvedModelId}</span> and its artifacts.
               </p>
             </div>
             <div className="calibrate-delete-modal-body">
@@ -5781,7 +5825,7 @@ export default function CalibrateModelsPage() {
               />
             </div>
             <div className="calibrate-delete-modal-actions">
-              <button className="button ghost" type="button" disabled={deleteLoading} onClick={() => setDeleteTarget(null)}>
+              <button className="button ghost" type="button" disabled={deleteLoading} onClick={closeDeleteModal}>
                 Cancel
               </button>
               <button

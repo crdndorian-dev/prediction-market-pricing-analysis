@@ -25,8 +25,8 @@ def _write_option_chain_training_csv(path: Path) -> Path:
     path.write_text(
         "\n".join(
             [
-                "ticker,week_friday,outcome_ST_gt_K,pRN,log_m_fwd,abs_log_m_fwd,rv20,rel_spread_median,dividend_yield,spot_scale_used,quality_issue_count,quality_bucket",
-                "AAPL,2026-03-06,1,0.52,0.08,0.08,0.24,0.012,0.004,spot,0,clean",
+                "ticker,week_friday,outcome_ST_gt_K,pRN,log_m_fwd,abs_log_m_fwd,rv20,rel_spread_median,dividend_yield,spot_scale_used,quality_issue_count,dropped_liquidity,prn_monotone_adj_targets,flag_asof_close_fallback,quality_bucket",
+                "AAPL,2026-03-06,1,0.52,0.08,0.08,0.24,0.012,0.004,spot,0,0,0,0,clean",
             ]
         ),
         encoding="utf-8",
@@ -56,6 +56,9 @@ def test_get_dataset_features_returns_raw_columns_and_registry_backed_selectable
         "dividend_yield",
         "spot_scale_used",
         "quality_issue_count",
+        "dropped_liquidity",
+        "prn_monotone_adj_targets",
+        "flag_asof_close_fallback",
         "quality_bucket",
     ]
     selectable_names = [feature.name for feature in response.selectable_features]
@@ -65,9 +68,12 @@ def test_get_dataset_features_returns_raw_columns_and_registry_backed_selectable
         "rv20",
         "rel_spread_median",
         "dividend_yield",
-        "quality_issue_count",
         "spot_scale_used",
     ]
+    assert "quality_issue_count" not in selectable_names
+    assert "dropped_liquidity" not in selectable_names
+    assert "prn_monotone_adj_targets" not in selectable_names
+    assert "flag_asof_close_fallback" not in selectable_names
     assert "rv20_sqrtT" not in response.available_columns
     assert "rv20_sqrtT" not in selectable_names
     assert "log_m_fwd_over_volT" not in selectable_names
@@ -89,6 +95,26 @@ def test_get_dataset_features_returns_raw_columns_and_registry_backed_selectable
             "Mutually exclusive numeric features requested: log_m_fwd, abs_log_m_fwd.",
         ),
         ("features", "x_logit_prn,x_abs_m", "Unsupported numeric features requested: x_abs_m."),
+        (
+            "features",
+            "x_logit_prn,flag_asof_close_fallback",
+            "Unsupported numeric features requested: flag_asof_close_fallback.",
+        ),
+        (
+            "features",
+            "x_logit_prn,quality_issue_count",
+            "Unsupported numeric features requested: quality_issue_count.",
+        ),
+        (
+            "features",
+            "x_logit_prn,dropped_liquidity",
+            "Unsupported numeric features requested: dropped_liquidity.",
+        ),
+        (
+            "features",
+            "x_logit_prn,prn_monotone_adj_targets",
+            "Unsupported numeric features requested: prn_monotone_adj_targets.",
+        ),
         ("categorical_features", "quality_bucket", "Unsupported categorical features requested: quality_bucket."),
         (
             "categorical_features",
@@ -140,6 +166,16 @@ def test_auto_feature_sets_normalize_to_registry_defaults(tmp_path: Path) -> Non
         ["x_logit_prn", "rv20", "abs_log_m_fwd"],
         ["x_logit_prn", "rv20", "abs_log_m_fwd", "rel_spread_median"],
     ]
+
+
+def test_auto_feature_sets_reject_retired_quality_features(tmp_path: Path) -> None:
+    dataset_path = _write_option_chain_training_csv(tmp_path / "training-auto-invalid.csv")
+
+    with pytest.raises(ValueError, match="Unsupported numeric features requested: quality_issue_count."):
+        services._normalize_auto_feature_sets(
+            [["x_logit_prn", "quality_issue_count"]],
+            dataset_path=dataset_path,
+        )
 
 
 def test_legacy_request_flags_are_rejected() -> None:

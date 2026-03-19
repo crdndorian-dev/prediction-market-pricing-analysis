@@ -67,6 +67,121 @@ export type EquationSpec = {
   model_family?: string | null;
 };
 
+export type DiagnosticScalar = number | string | boolean | null;
+
+export type DiagnosticSectionRow = {
+  key: string;
+  label: string;
+  train_fit?: DiagnosticScalar;
+  val?: DiagnosticScalar;
+  test?: DiagnosticScalar;
+  note?: string | null;
+  status?: "ok" | "warn" | "bad" | "na";
+  format?: "metric" | "count" | "percent" | "pvalue" | "text";
+  source?: string | null;
+};
+
+export type DiagnosticSection = {
+  id: string;
+  title: string;
+  rows: DiagnosticSectionRow[];
+};
+
+export type CoefficientDiagnosticRow = {
+  feature_name: string;
+  display_name: string;
+  feature_group: "core" | "ticker";
+  coefficient?: number | null;
+  std_error?: number | null;
+  z_stat?: number | null;
+  p_value?: number | null;
+  ci_low?: number | null;
+  ci_high?: number | null;
+  odds_ratio?: number | null;
+  odds_ratio_ci_low?: number | null;
+  odds_ratio_ci_high?: number | null;
+  note?: string | null;
+};
+
+export type ProductionCoefficientDiagnosticRow = {
+  feature_name: string;
+  display_name: string;
+  feature_group: "core" | "ticker";
+  coefficient?: number | null;
+  odds_ratio?: number | null;
+  note?: string | null;
+};
+
+export type MarginalEffectDiagnosticRow = {
+  feature_name: string;
+  display_name: string;
+  feature_group: "core" | "ticker";
+  ame?: number | null;
+  std_error?: number | null;
+  z_stat?: number | null;
+  p_value?: number | null;
+  ci_low?: number | null;
+  ci_high?: number | null;
+  note?: string | null;
+};
+
+export type CalibrationBinRow = {
+  bin: number;
+  n: number;
+  series?: "model" | "baseline" | null;
+  pred_mean: number;
+  obs_rate: number;
+  abs_gap: number;
+};
+
+export type StataDiagnosticsPayload = {
+  schema_version: number;
+  header: {
+    model_id: string;
+    estimator: "sklearn_logit" | "sklearn_logit_platt";
+    inference_basis: "shadow_statsmodels_glm";
+    baseline_name: string;
+    best_c?: number | null;
+    penalty: string;
+    solver: string;
+    threshold_default: number;
+    threshold_operating?: number | null;
+    split_counts: Record<string, number | null>;
+    event_counts: Record<string, number | null>;
+    feature_counts: {
+      numeric: number;
+      categorical: number;
+      transformed: number;
+    };
+    notes?: string[] | null;
+  };
+  sections: DiagnosticSection[];
+  production_coefficient_table?: {
+    basis: "production_sklearn_final_model";
+    fit_scope: "train";
+    subtitle?: string | null;
+    rows: ProductionCoefficientDiagnosticRow[];
+  } | null;
+  coefficient_table?: {
+    basis: "shadow_statsmodels_glm";
+    fit_scope?: "train_fit";
+    subtitle?: string | null;
+    rows: CoefficientDiagnosticRow[];
+  } | null;
+  marginal_effects_table?: {
+    basis: "shadow_statsmodels_glm";
+    fit_scope?: "train_fit";
+    subtitle?: string | null;
+    rows: MarginalEffectDiagnosticRow[];
+  } | null;
+  calibration_curve?: {
+    split: "val" | "test";
+    binning: "equal_mass";
+    rows: CalibrationBinRow[];
+  } | null;
+  warnings?: string[] | null;
+};
+
 export type ModelDetailResponse = {
   id: string;
   path: string;
@@ -77,6 +192,7 @@ export type ModelDetailResponse = {
   features_used?: string[] | null;
   categorical_features_used?: string[] | null;
   metrics_summary?: Record<string, SplitMetricSummary> | null;
+  stata_diagnostics?: StataDiagnosticsPayload | null;
   split_row_counts?: Record<string, number> | null;
   split_group_counts?: Record<string, number> | null;
   model_equation?: string | null;
@@ -276,6 +392,7 @@ export type CalibrateModelRunResponse = {
   command: string[];
   files: string[];
   metrics_summary?: Record<string, SplitMetricSummary> | null;
+  stata_diagnostics?: StataDiagnosticsPayload | null;
   split_row_counts?: Record<string, number> | null;
   split_group_counts?: Record<string, number> | null;
   auto_out_dir?: string | null;

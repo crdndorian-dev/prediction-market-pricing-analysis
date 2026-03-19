@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 import pytest
 
 
@@ -89,6 +91,96 @@ def test_option_chain_calibration_parser_drops_enable_x_abs_m_flag() -> None:
     help_text = parser.format_help()
 
     assert "--enable-x-abs-m" not in help_text
+
+
+def test_option_chain_resolved_args_snapshot_has_static_diagnostics_contract() -> None:
+    module = importlib.import_module("model_training.calibration.calibrate_v2_core")
+
+    parser = module._build_calibration_arg_parser()
+    args = parser.parse_args([])
+    snapshot = module._resolved_args_snapshot(args)
+
+    assert snapshot["diagnostics"] == {
+        "split_timeline": False,
+        "per_fold_delta_chart": False,
+        "per_group_delta_distribution": False,
+        "skip_test_metrics": False,
+    }
+
+
+def test_option_chain_run_calibration_from_cache_uses_cached_train_df_for_feature_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("model_training.calibration.calibrate_v2_core")
+
+    parser = module._build_calibration_arg_parser()
+    args = parser.parse_args(["--csv", "ignored.csv", "--out-dir", str(tmp_path / "out")])
+    train_df = pd.DataFrame(
+        {
+            "ticker": ["AAPL"],
+            "week_friday": ["2026-03-06"],
+            "outcome_ST_gt_K": [1],
+        }
+    )
+    empty_df = train_df.iloc[0:0].copy()
+    cache = module.CalibrationCache(
+        df_base=train_df,
+        target_col="outcome_ST_gt_K",
+        week_col="week_friday",
+        ticker_col="ticker",
+        train_idx=train_df.index,
+        test_idx=empty_df.index,
+        train_fit_idx=train_df.index,
+        val_idx=empty_df.index,
+        train_df=train_df,
+        test_df=empty_df,
+        train_fit_df=train_df,
+        val_df=empty_df,
+        train_pos=pd.Series([0], index=train_df.index),
+        fit_pos=np.array([0]),
+        val_pos=np.array([], dtype=int),
+        split_group_series=None,
+        split_group_key=None,
+        split_group_dropped_train_rows=0,
+        split_group_dropped_train_fit_rows=0,
+        embargo_mode="disabled",
+        embargo_date_col_used=None,
+        embargo_rows_dropped_train=0,
+        embargo_rows_dropped_train_fit=0,
+        walk_forward_folds=[],
+        val_split_info={},
+        split_overlap={},
+        split_ranges={},
+        split_composition_rows=[],
+        train_weights_raw=np.array([1.0]),
+        weight_source="uniform",
+        group_key=None,
+        group_key_source=None,
+        foundation_set=set(),
+        active_filters={},
+        trainer_warnings=[],
+        requested_numeric_features=[],
+        requested_categorical_features=[],
+    )
+
+    monkeypatch.setattr(
+        module,
+        "_resolve_requested_feature_lists",
+        lambda args, available_columns, **kwargs: (["missing_feature"], []),
+    )
+
+    result = module.run_calibration_from_cache(
+        cache,
+        args,
+        tmp_path / "out",
+        n_bins=10,
+        eceq_bins=10,
+        fast_trial=False,
+        skip_test_metrics=False,
+    )
+
+    assert result.exit_code == 1
 
 
 def test_option_chain_auto_search_defaults_follow_registry_contract() -> None:

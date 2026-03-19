@@ -58,7 +58,7 @@ Future work will shift from model construction toward market evaluation. In part
   python -m venv .venv
   source .venv/bin/activate
   pip install -U pip
-  pip install fastapi uvicorn numpy pandas requests yfinance scipy
+  pip install -r requirements.txt
   uvicorn main:app --reload --port 8000
   ```
 

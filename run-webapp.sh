@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$ROOT_DIR/src/webapp/backend"
 FRONTEND_DIR="$ROOT_DIR/src/webapp/frontend"
+BACKEND_REQUIREMENTS_FILE="$BACKEND_DIR/requirements.txt"
 
 # Prefer a Homebrew Node that satisfies Vite's minimum version.
 for node_prefix in \
@@ -109,10 +110,10 @@ start_backend() {
     fi
     # shellcheck disable=SC1091
     source ".venv/bin/activate"
-    if ! python -c "import fastapi, uvicorn, numpy, pandas, requests, yfinance, scipy" >/dev/null 2>&1; then
-      echo "Installing backend deps (fastapi, uvicorn, numpy, pandas, requests, yfinance, scipy)..."
+    if ! python -c "import fastapi, uvicorn, numpy, pandas, requests, yfinance, scipy, sklearn, statsmodels.api" >/dev/null 2>&1; then
+      echo "Installing backend deps from $BACKEND_REQUIREMENTS_FILE..."
       pip install -U pip
-      pip install fastapi uvicorn numpy pandas requests yfinance scipy
+      pip install -r "$BACKEND_REQUIREMENTS_FILE"
     fi
     echo "Starting backend on http://localhost:$BACKEND_PORT"
     uvicorn main:app --reload --port "$BACKEND_PORT"

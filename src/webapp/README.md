@@ -24,7 +24,7 @@ cd src/webapp/backend
 python -m venv .venv
 source .venv/bin/activate
 pip install -U pip
-pip install fastapi uvicorn
+pip install -r requirements.txt
 ```
 
 Run the server:

@@ -48,6 +48,7 @@ from support.option_chain_feature_registry import (
     OPTION_CHAIN_DEFAULT_FEATURES,
     validate_option_chain_feature_selection,
 )
+from model_training.calibration.stata_diagnostics import build_and_write_stata_diagnostics
 
 SCRIPT_VERSION = "v2.0.0"
 
@@ -2423,16 +2424,15 @@ def run_calibration_from_cache(
     embargo_rows_dropped_train_fit = cache.embargo_rows_dropped_train_fit
     walk_forward_folds = cache.walk_forward_folds
     val_split_info = cache.val_split_info
+    train_df = cache.train_df
+    test_df = cache.test_df
+    train_fit_df = cache.train_fit_df
+    val_df = cache.val_df
 
     numeric_features, categorical_features = _resolve_requested_feature_lists(
         args,
         list(train_df.columns),
     )
-
-    train_df = cache.train_df
-    test_df = cache.test_df
-    train_fit_df = cache.train_fit_df
-    val_df = cache.val_df
 
     avail_numeric = [f for f in numeric_features if f in train_df.columns]
     avail_numeric = _drop_all_nan_features(train_df, avail_numeric, "base-model")
@@ -2848,10 +2848,18 @@ def run_calibration_from_cache(
             print(f"[WARN] [base-model] Platt calibration skipped: {platt_skip_reason}.")
             trainer_warnings.append(f"Platt calibration skipped: {platt_skip_reason}.")
 
+    if platt_cal is not None:
+        train_fit_logits = val_pipe.decision_function(X_fit)
+        p_train_fit = apply_platt(platt_cal, train_fit_logits)
+    else:
+        p_train_fit = val_pipe.predict_proba(X_fit)[:, 1]
+
     fold_delta_rows: List[Dict[str, Any]] = []
     val_eval_df = val_df
     val_eval_y = y_val
     val_eval_pred: Optional[np.ndarray] = None
+    p_val: Optional[np.ndarray] = None
+    p_test: Optional[np.ndarray] = None
     split_timeline_payload: Dict[str, Any] = {
         "split_strategy": str(args.split_strategy),
         "window_mode": str(args.window_mode),
@@ -3186,6 +3194,64 @@ def run_calibration_from_cache(
     except Exception:
         feat_names_out = avail_numeric + avail_cat
 
+    diagnostics_payload: Optional[Dict[str, Any]] = None
+    if not fast_trial:
+        try:
+            try:
+                shadow_feature_names = val_pipe.named_steps["pre"].get_feature_names_out().tolist()
+            except Exception:
+                shadow_feature_names = list(all_feat_cols)
+            shadow_exog = val_pipe.named_steps["pre"].transform(X_fit)
+            diagnostics_payload = build_and_write_stata_diagnostics(
+                out_dir=out_dir,
+                model_id=out_dir.name,
+                estimator="sklearn_logit_platt" if platt_cal is not None else "sklearn_logit",
+                baseline_name="pRN",
+                best_c=best_c,
+                penalty="l2",
+                solver="lbfgs",
+                threshold_default=0.5,
+                threshold_operating=None,
+                production_coefficients=clf_step.coef_[0].tolist(),
+                production_intercept=float(clf_step.intercept_[0]),
+                production_feature_names=feat_names_out,
+                shadow_exog=shadow_exog,
+                shadow_endog=y_fit,
+                shadow_sample_weight=w_fit,
+                shadow_feature_names=shadow_feature_names,
+                numeric_features=avail_numeric,
+                categorical_features=avail_cat,
+                requested_numeric_features=numeric_features,
+                requested_categorical_features=categorical_features,
+                train_fit_df=train_fit_df,
+                val_df=val_eval_df,
+                test_df=test_df,
+                train_fit_pred=p_train_fit,
+                val_pred=p_val,
+                test_pred=p_test,
+                target_col=target_col,
+                n_bins=n_bins,
+                eceq_bins=eceq_bins,
+                fold_delta_rows=fold_delta_rows,
+                trainer_warnings=trainer_warnings,
+            )
+            diagnostics_warnings = diagnostics_payload.get("warnings") if isinstance(diagnostics_payload, dict) else None
+            if isinstance(diagnostics_warnings, list):
+                for warning in diagnostics_warnings:
+                    warning_text = str(warning).strip()
+                    if warning_text and warning_text not in trainer_warnings:
+                        trainer_warnings.append(warning_text)
+        except Exception as exc:
+            exc_message = str(exc).strip()
+            diagnostics_msg = (
+                exc_message
+                if exc_message.startswith("Stata diagnostics skipped:")
+                else f"Stata diagnostics generation failed: {exc}"
+            )
+            print(f"[WARN] [base-model] {diagnostics_msg}")
+            if diagnostics_msg not in trainer_warnings:
+                trainer_warnings.append(diagnostics_msg)
+
     x_logit_prn_coef = None
     for feat_name, coef_val in zip(feat_names_out, clf_step.coef_[0].tolist()):
         if str(feat_name).endswith("x_logit_prn") or str(feat_name) == "x_logit_prn":
@@ -3378,6 +3444,7 @@ def run_calibration_from_cache(
             "per_group_delta_distribution": bool(args.per_group_delta_distribution),
             "per_split_reporting": bool(args.per_split_reporting),
             "per_fold_reporting": bool(args.per_fold_reporting),
+            "stata_diagnostics": "diagnostics_table.json" if diagnostics_payload is not None else None,
         },
         "unsupported_controls_ignored": unsupported_controls,
         "warnings": trainer_warnings,

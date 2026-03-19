@@ -111,6 +111,12 @@ from shared.cli_contract_v2 import (
     validate_payload,
     ValidationError,
 )
+from model_training.calibration.stata_diagnostics import (
+    PRODUCTION_COEFFICIENT_SUBTITLE,
+    SHADOW_COEFFICIENT_SUBTITLE,
+    SHADOW_MARGINAL_EFFECTS_SUBTITLE,
+    build_production_coefficient_table,
+)
 from support.option_chain_feature_registry import (
     OPTION_CHAIN_AUTO_FEATURE_SETS,
     OPTION_CHAIN_BASE_FEATURE,
@@ -844,9 +850,12 @@ MAX_FILE_SIZE_BYTES = 512 * 1024  # 512 KB max for viewing
 MAX_AUTO_TRIAL_FILES = 100
 SELECTED_MODEL_IMPORTANT_FILES = [
     "config.executed.json",
+    "diagnostics_table.json",
     "metadata.json",
     "metrics.csv",
     "metrics_summary.json",
+    "coefficient_diagnostics.csv",
+    "marginal_effects.csv",
     "split_timeline.json",
     "fold_deltas.csv",
     "group_delta_distribution.csv",
@@ -984,6 +993,17 @@ def _read_model_file_content(*, run_dir: Path, model_id: str, requested_path: st
 
     with open(file_path, "r", encoding="utf-8", errors="replace") as f:
         content = f.read(MAX_FILE_SIZE_BYTES) if truncated else f.read()
+
+    if suffix == ".json" and file_path.name == "diagnostics_table.json":
+        try:
+            parsed = json.loads(content)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            metadata = _load_json(file_path.parent / "metadata.json")
+            augmented = _augment_stata_diagnostics_payload(parsed, metadata=metadata, diagnostics_path=file_path)
+            if augmented is not None:
+                content = json.dumps(augmented, indent=2)
 
     return ModelFileContentResponse(
         model_id=model_id,
@@ -1536,6 +1556,199 @@ def _load_json(path: Path) -> Optional[Dict[str, object]]:
             return json.load(f)
     except Exception:
         return None
+
+
+def _coerce_optional_number(value: Any) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _coerce_optional_whole_number(value: Any) -> Optional[int]:
+    parsed = _coerce_optional_number(value)
+    if parsed is None:
+        return None
+    return int(parsed)
+
+
+def _normalize_calibration_curve_rows(rows: Any) -> List[Dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+
+    normalized_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        bin_id = _coerce_optional_whole_number(row.get("bin"))
+        n = _coerce_optional_whole_number(row.get("n"))
+        pred_mean = _coerce_optional_number(row.get("pred_mean"))
+        obs_rate = _coerce_optional_number(row.get("obs_rate"))
+        abs_gap = _coerce_optional_number(row.get("abs_gap"))
+        if bin_id is None or pred_mean is None or obs_rate is None or abs_gap is None:
+            continue
+        series = str(row.get("series") or "model").strip().lower()
+        normalized_rows.append({
+            "bin": int(bin_id),
+            "n": int(n or 0),
+            "series": "baseline" if series == "baseline" else "model",
+            "pred_mean": float(pred_mean),
+            "obs_rate": float(obs_rate),
+            "abs_gap": float(abs_gap),
+        })
+    return normalized_rows
+
+
+def _load_reliability_curve_rows(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        frame = pd.read_csv(path)
+    except Exception:
+        return []
+
+    required_columns = {"split", "bin", "pred_mean", "obs_rate", "abs_gap"}
+    if not required_columns.issubset(frame.columns):
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    for record in frame.to_dict(orient="records"):
+        split = str(record.get("split") or "").strip()
+        if not split:
+            continue
+        bin_id = _coerce_optional_whole_number(record.get("bin"))
+        n = _coerce_optional_whole_number(record.get("n"))
+        pred_mean = _coerce_optional_number(record.get("pred_mean"))
+        obs_rate = _coerce_optional_number(record.get("obs_rate"))
+        abs_gap = _coerce_optional_number(record.get("abs_gap"))
+        if bin_id is None or pred_mean is None or obs_rate is None or abs_gap is None:
+            continue
+        series = str(record.get("series") or "model").strip().lower()
+        rows.append({
+            "split": split,
+            "bin": int(bin_id),
+            "n": int(n or 0),
+            "series": "baseline" if series == "baseline" else "model",
+            "pred_mean": float(pred_mean),
+            "obs_rate": float(obs_rate),
+            "abs_gap": float(abs_gap),
+        })
+    return rows
+
+
+def _preferred_calibration_split(
+    calibration_curve: Any,
+    reliability_rows: List[Dict[str, Any]],
+) -> Optional[str]:
+    if isinstance(calibration_curve, dict):
+        split = calibration_curve.get("split")
+        if isinstance(split, str) and split.strip():
+            return split
+
+    for candidate in ("test", "val", "train_fit"):
+        if any(str(row.get("split")) == candidate for row in reliability_rows):
+            return candidate
+    return None
+
+
+def _augment_stata_diagnostics_payload(
+    payload: Optional[Dict[str, Any]],
+    *,
+    metadata: Optional[Dict[str, object]] = None,
+    diagnostics_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+
+    enriched: Dict[str, Any] = dict(payload)
+
+    production_table = enriched.get("production_coefficient_table")
+    if isinstance(production_table, dict):
+        production_table = dict(production_table)
+        production_table.setdefault("basis", "production_sklearn_final_model")
+        production_table.setdefault("fit_scope", "train")
+        production_table.setdefault("subtitle", PRODUCTION_COEFFICIENT_SUBTITLE)
+        enriched["production_coefficient_table"] = production_table
+    elif isinstance(metadata, dict):
+        built_table = build_production_coefficient_table(
+            coefficients=metadata.get("coefficients") if isinstance(metadata.get("coefficients"), list) else [],
+            intercept=metadata.get("intercept"),
+            feature_names=(
+                metadata.get("feature_names_out")
+                if isinstance(metadata.get("feature_names_out"), list)
+                else metadata.get("feature_names")
+                if isinstance(metadata.get("feature_names"), list)
+                else metadata.get("features")
+                if isinstance(metadata.get("features"), list)
+                else []
+            ),
+        )
+        if built_table is not None:
+            enriched["production_coefficient_table"] = built_table
+
+    coefficient_table = enriched.get("coefficient_table")
+    if isinstance(coefficient_table, dict):
+        coefficient_table = dict(coefficient_table)
+        coefficient_table.setdefault("basis", "shadow_statsmodels_glm")
+        coefficient_table.setdefault("fit_scope", "train_fit")
+        coefficient_table.setdefault("subtitle", SHADOW_COEFFICIENT_SUBTITLE)
+        enriched["coefficient_table"] = coefficient_table
+
+    marginal_effects_table = enriched.get("marginal_effects_table")
+    if isinstance(marginal_effects_table, dict):
+        marginal_effects_table = dict(marginal_effects_table)
+        marginal_effects_table.setdefault("basis", "shadow_statsmodels_glm")
+        marginal_effects_table.setdefault("fit_scope", "train_fit")
+        marginal_effects_table.setdefault("subtitle", SHADOW_MARGINAL_EFFECTS_SUBTITLE)
+        enriched["marginal_effects_table"] = marginal_effects_table
+
+    reliability_rows = _load_reliability_curve_rows(diagnostics_path.with_name("reliability_bins.csv")) if diagnostics_path else []
+    calibration_curve = enriched.get("calibration_curve")
+    normalized_curve_rows = _normalize_calibration_curve_rows(
+        calibration_curve.get("rows") if isinstance(calibration_curve, dict) else None,
+    )
+    preferred_split = _preferred_calibration_split(calibration_curve, reliability_rows)
+    csv_curve_rows = [
+        {
+            "bin": int(row["bin"]),
+            "n": int(row["n"]),
+            "series": str(row["series"]),
+            "pred_mean": float(row["pred_mean"]),
+            "obs_rate": float(row["obs_rate"]),
+            "abs_gap": float(row["abs_gap"]),
+        }
+        for row in reliability_rows
+        if preferred_split and str(row.get("split")) == preferred_split
+    ]
+
+    active_curve_rows = normalized_curve_rows
+    if csv_curve_rows and (
+        not normalized_curve_rows or not any(str(row.get("series")) == "baseline" for row in normalized_curve_rows)
+    ):
+        active_curve_rows = csv_curve_rows
+
+    if active_curve_rows:
+        curve_payload = dict(calibration_curve) if isinstance(calibration_curve, dict) else {}
+        curve_payload["split"] = preferred_split or curve_payload.get("split") or "val"
+        curve_payload["binning"] = str(curve_payload.get("binning") or "equal_mass")
+        curve_payload["rows"] = active_curve_rows
+        enriched["calibration_curve"] = curve_payload
+
+    return enriched
+
+
+def _load_stata_diagnostics(
+    path: Path,
+    *,
+    metadata: Optional[Dict[str, object]] = None,
+) -> Optional[Dict[str, Any]]:
+    payload = _load_json(path)
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("schema_version") is None:
+        return None
+    return _augment_stata_diagnostics_payload(payload, metadata=metadata, diagnostics_path=path)
 
 
 def _load_two_stage_metrics(run_dir: Path) -> Optional[List[Dict[str, Any]]]:
@@ -2506,6 +2719,10 @@ def get_model_detail(model_id: str) -> ModelDetailResponse:
     metrics_summary = _build_metrics_summary(effective_dir / "metrics.csv")
     if not metrics_summary:
         metrics_summary = None
+    stata_diagnostics = _load_stata_diagnostics(
+        effective_dir / "diagnostics_table.json",
+        metadata=metadata,
+    )
     split_row_counts, split_group_counts = _build_split_counts(effective_dir)
     if not split_row_counts:
         split_row_counts = None
@@ -2583,6 +2800,7 @@ def get_model_detail(model_id: str) -> ModelDetailResponse:
         features_used=features_used,
         categorical_features_used=categorical_features_used,
         metrics_summary=metrics_summary,
+        stata_diagnostics=stata_diagnostics,
         split_row_counts=split_row_counts,
         split_group_counts=split_group_counts,
         model_equation=model_equation,
@@ -2979,6 +3197,11 @@ def _build_calibration_run_response(
     metrics_summary = _build_metrics_summary(effective_dir / "metrics.csv")
     if not metrics_summary:
         metrics_summary = None
+    metadata = _load_json(effective_dir / "metadata.json")
+    stata_diagnostics = _load_stata_diagnostics(
+        effective_dir / "diagnostics_table.json",
+        metadata=metadata,
+    )
 
     split_row_counts, split_group_counts = _build_split_counts(effective_dir)
 
@@ -3077,6 +3300,7 @@ def _build_calibration_run_response(
         duration_s=duration_s,
         command=cmd,
         metrics_summary=metrics_summary,
+        stata_diagnostics=stata_diagnostics,
         split_row_counts=split_row_counts or None,
         split_group_counts=split_group_counts or None,
         auto_out_dir=None,
@@ -3687,6 +3911,11 @@ def run_calibration_v2(payload) -> CalibrateModelRunResponse:
         metrics_summary = _build_metrics_summary(out_dir / "two_stage_metrics.csv")
     if not metrics_summary:
         metrics_summary = None
+    metadata = _load_json(out_dir / "metadata.json")
+    stata_diagnostics = _load_stata_diagnostics(
+        out_dir / "diagnostics_table.json",
+        metadata=metadata,
+    )
 
     features = _read_features(out_dir)
     model_equation_spec = _build_model_equation_spec(out_dir)
@@ -3715,6 +3944,7 @@ def run_calibration_v2(payload) -> CalibrateModelRunResponse:
         duration_s=duration_s,
         command=cmd,
         metrics_summary=metrics_summary,
+        stata_diagnostics=stata_diagnostics,
         auto_out_dir=None,
         features=features,
         model_equation=model_equation,

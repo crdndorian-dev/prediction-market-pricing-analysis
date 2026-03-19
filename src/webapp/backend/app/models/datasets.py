@@ -342,15 +342,6 @@ class DatasetAuditRow(BaseModel):
     flags: List[str] = Field(default_factory=list)
 
 
-class DatasetAuditHeatmapCell(BaseModel):
-    ticker: str
-    asof_date: str
-    row_count: int
-    flagged_share: Optional[float] = None
-    avg_issue_count: Optional[float] = None
-    quality_bucket: Optional[str] = None
-
-
 class DatasetAuditRvBucketSummary(BaseModel):
     label: Literal["low", "mid", "high"]
     value_min: Optional[float] = None
@@ -392,8 +383,6 @@ class DatasetAuditResponse(BaseModel):
     rv_feature_audit: List[DatasetAuditRvFeatureAudit] = Field(default_factory=list)
     top_problem_tickers: List[DatasetAuditTickerSummary] = Field(default_factory=list)
     timeline: List[DatasetAuditTimelinePoint] = Field(default_factory=list)
-    heatmap_dates: List[str] = Field(default_factory=list)
-    heatmap_cells: List[DatasetAuditHeatmapCell] = Field(default_factory=list)
     noisiest_rows: List[DatasetAuditRow] = Field(default_factory=list)
 
 

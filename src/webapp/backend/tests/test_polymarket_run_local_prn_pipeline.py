@@ -187,6 +187,74 @@ def test_attach_prn_features_daily_falls_back_without_market_id() -> None:
     assert merged.iloc[0]["coverage_status"] == "ok"
 
 
+def test_attach_dim_market_coalesces_existing_bar_metadata_and_mixed_market_id_types() -> None:
+    base = pd.DataFrame(
+        [
+            {
+                "market_id": "101",
+                "ticker": "AAPL",
+                "threshold": 150.0,
+                "week_friday": "2025-01-10",
+                "expiry_date_utc": "2025-01-10T00:00:00Z",
+            }
+        ]
+    )
+    dim = pd.DataFrame(
+        [
+            {
+                "market_id": 101,
+                "condition_id": "cond-101",
+                "ticker": "MSFT",
+                "threshold": 205.0,
+                "expiry_date_utc": "2025-01-17T00:00:00Z",
+                "resolution_time_utc": "2025-01-10T23:59:59Z",
+            }
+        ]
+    )
+
+    merged = build_features_v1._attach_dim_market(base, dim)
+
+    assert len(merged) == 1
+    row = merged.iloc[0]
+    assert row["market_id"] == "101"
+    assert row["ticker"] == "AAPL"
+    assert row["threshold"] == 150.0
+    assert row["condition_id"] == "cond-101"
+    assert row["resolution_time_utc"] == pd.Timestamp("2025-01-10T23:59:59Z")
+    assert row["expiry_date"] == date(2025, 1, 10)
+    assert not any(col.endswith("_dim") for col in merged.columns)
+
+
+def test_attach_dim_market_falls_back_to_week_friday_resolution() -> None:
+    base = pd.DataFrame(
+        [
+            {
+                "market_id": "101",
+                "ticker": "AAPL",
+                "threshold": 150.0,
+                "week_friday": "2025-01-10",
+            }
+        ]
+    )
+    dim = pd.DataFrame(
+        [
+            {
+                "market_id": 101,
+                "condition_id": "cond-101",
+                "ticker": "AAPL",
+                "threshold": 150.0,
+            }
+        ]
+    )
+
+    merged = build_features_v1._attach_dim_market(base, dim)
+
+    assert len(merged) == 1
+    row = merged.iloc[0]
+    assert row["resolution_time_utc"] == pd.Timestamp("2025-01-10T23:59:59Z")
+    assert row["expiry_date"] == date(2025, 1, 10)
+
+
 def test_merge_prn_on_hourly_base_is_time_safe_and_market_id_keyed() -> None:
     hourly_base = pd.DataFrame(
         [
@@ -546,6 +614,188 @@ def test_build_features_main_uses_run_local_prn_without_explicit_selection(
     feature_rows = pd.read_csv(run_dir / "decision_features.csv")
     assert "quality_issue_count" in feature_rows.columns
     assert "flag_pm_stale_prices" in feature_rows.columns
+
+
+def test_build_features_handles_run_bar_metadata_overlap_with_numeric_dim_market_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "poly-run"
+    bars_dir = run_dir / "bars_history"
+    bars_dir.mkdir(parents=True, exist_ok=True)
+
+    pd.DataFrame(
+        [
+            {
+                "timestamp_utc": "2026-03-03T00:00:00Z",
+                "market_id": 1460482,
+                "event_id": 235645,
+                "event_slug": "aapl-above-on-march-6-2026",
+                "market_slug": "aapl-above-245-on-march-6-2026",
+                "ticker": "AAPL",
+                "threshold": 245.0,
+                "week_friday": "2026-03-06",
+                "expiry_date_utc": "2026-03-06T00:00:00Z",
+                "open": 0.93,
+                "high": 0.974,
+                "low": 0.93,
+                "close": 0.958,
+                "volume": np.nan,
+                "trade_count": np.nan,
+                "bar_source": "clob_fallback",
+                "written_by_run_id": "march6-repro",
+                "schema_version": "pm_bars_history_v1.0",
+            },
+            {
+                "timestamp_utc": "2026-03-04T00:00:00Z",
+                "market_id": 1460482,
+                "event_id": 235645,
+                "event_slug": "aapl-above-on-march-6-2026",
+                "market_slug": "aapl-above-245-on-march-6-2026",
+                "ticker": "AAPL",
+                "threshold": 245.0,
+                "week_friday": "2026-03-06",
+                "expiry_date_utc": "2026-03-06T00:00:00Z",
+                "open": 0.958,
+                "high": 0.9925,
+                "low": 0.915,
+                "close": 0.9715,
+                "volume": np.nan,
+                "trade_count": np.nan,
+                "bar_source": "clob_fallback",
+                "written_by_run_id": "march6-repro",
+                "schema_version": "pm_bars_history_v1.0",
+            },
+            {
+                "timestamp_utc": "2026-03-05T00:00:00Z",
+                "market_id": 1460482,
+                "event_id": 235645,
+                "event_slug": "aapl-above-on-march-6-2026",
+                "market_slug": "aapl-above-245-on-march-6-2026",
+                "ticker": "AAPL",
+                "threshold": 245.0,
+                "week_friday": "2026-03-06",
+                "expiry_date_utc": "2026-03-06T00:00:00Z",
+                "open": 0.9715,
+                "high": 0.995,
+                "low": 0.95,
+                "close": 0.982,
+                "volume": np.nan,
+                "trade_count": np.nan,
+                "bar_source": "clob_fallback",
+                "written_by_run_id": "march6-repro",
+                "schema_version": "pm_bars_history_v1.0",
+            },
+        ]
+    ).to_csv(bars_dir / "1d.csv", index=False)
+
+    dim_market_path = tmp_path / "dim_market_weekly.csv"
+    pd.DataFrame(
+        [
+            {
+                "market_id": 1460482,
+                "condition_id": "cond-1460482",
+                "question": "Will Apple (AAPL) finish week of March 2 above $245?",
+                "ticker": "AAPL",
+                "threshold": 245.0,
+                "expiry_date_utc": "2026-03-06T00:00:00Z",
+                "resolution_time_utc": "2026-03-06T23:59:59Z",
+                "outcome_yes_token_id": "yes-1",
+                "outcome_no_token_id": "no-1",
+                "slug": "aapl-above-245-on-march-6-2026",
+                "source": "gamma",
+                "mapping_confidence": 1.0,
+                "ticker_source": "slug",
+                "schema_version": "pm_dim_market_weekly_v1.0",
+            }
+        ]
+    ).to_csv(dim_market_path, index=False)
+
+    prn_dir = run_dir / polymarket_run_prn.PRN_DATASET_DIRNAME
+    prn_dir.mkdir(parents=True, exist_ok=True)
+    training_path = prn_dir / "training-poly-run-prn.csv"
+    pd.DataFrame(
+        [
+            {
+                "market_id": "1460482",
+                "ticker": "AAPL",
+                "K": 245.0,
+                "asof_date": "2026-03-03",
+                "expiry_date": "2026-03-06",
+                "pRN": 0.95,
+                "qRN": 0.05,
+                "pRN_raw": 0.95,
+                "qRN_raw": 0.05,
+                "coverage_status": "ok",
+                "drop_reason": np.nan,
+            },
+            {
+                "market_id": "1460482",
+                "ticker": "AAPL",
+                "K": 245.0,
+                "asof_date": "2026-03-04",
+                "expiry_date": "2026-03-06",
+                "pRN": 0.96,
+                "qRN": 0.04,
+                "pRN_raw": 0.96,
+                "qRN_raw": 0.04,
+                "coverage_status": "ok",
+                "drop_reason": np.nan,
+            },
+            {
+                "market_id": "1460482",
+                "ticker": "AAPL",
+                "K": 245.0,
+                "asof_date": "2026-03-05",
+                "expiry_date": "2026-03-06",
+                "pRN": 0.97,
+                "qRN": 0.03,
+                "pRN_raw": 0.97,
+                "qRN_raw": 0.03,
+                "coverage_status": "ok",
+                "drop_reason": np.nan,
+            },
+        ]
+    ).to_csv(training_path, index=False)
+
+    def _fake_to_parquet(self, path, index=False):  # noqa: ANN001
+        Path(path).write_bytes(b"PAR1")
+        self.to_csv(Path(path).with_suffix(".csv"), index=index)
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", _fake_to_parquet, raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "polymarket-build-features.py",
+            "--dim-market",
+            str(dim_market_path),
+            "--bars-dir",
+            str(bars_dir),
+            "--out-dir",
+            str(run_dir),
+            "--prn-dataset",
+            str(training_path),
+            "--decision-freq",
+            "1d",
+            "--start-date",
+            "2026-03-03",
+            "--end-date",
+            "2026-03-12",
+            "--skip-subgraph-labels",
+        ],
+    )
+
+    build_features_v1.main()
+
+    assert (run_dir / "decision_features.parquet").exists()
+    assert (run_dir / "feature_manifest.json").exists()
+
+    feature_rows = pd.read_csv(run_dir / "decision_features.csv")
+    assert len(feature_rows) == 3
+    assert set(feature_rows["market_id"].astype(str)) == {"1460482"}
+    assert set(feature_rows["condition_id"]) == {"cond-1460482"}
+    assert not any(col.endswith("_dim") for col in feature_rows.columns)
 
 
 def test_market_quality_builder_marks_missing_prn_and_composite_flags(tmp_path: Path) -> None:
